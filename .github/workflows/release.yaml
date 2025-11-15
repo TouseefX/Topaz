@@ -1,0 +1,62 @@
+name: Build
+
+on:
+  push:
+    branches: ["*"]
+
+jobs:
+  build:
+    name: Build
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact_name: web-server.exe
+            binary_name: web-server.exe
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: web-server
+            binary_name: web-server
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact_name: web-server-macos-x64
+            binary_name: web-server
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact_name: web-server-macos-arm64
+            binary_name: web-server
+    steps:
+      - name: Checkout
+        uses: actions/checkout@master
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          profile: minimal
+          toolchain: nightly
+          override: true
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./web-server -> target"
+      
+      - name: Build binary
+        working-directory: ./web-server
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Strip binary (Unix)
+        if: runner.os != 'Windows'
+        run: strip target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+          if-no-files-found: error
