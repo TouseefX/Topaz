@@ -44,48 +44,71 @@ impl<'a> Labeller<'a, NodeIndex, EdgeIndex> for FunctionLabeller<'a> {
         } else {
             ""
         };
-        dot::LabelText::LabelStr(
-            block
-                .iter()
-                .map(|s| {
-                    for local in s.values() {
-                        let name = &mut local.0 .0.lock().0;
-                        if name.is_none() {
-                            // TODO: ugly
-                            *name = Some(format!("v{}", self.counter.borrow()));
-                            *self.counter.borrow_mut() += 1;
-                        }
+        
+        let formatted_block = block
+            .iter()
+            .enumerate()
+            .map(|(idx, s)| {
+                for local in s.values() {
+                    let name = &mut local.0 .0.lock().0;
+                    if name.is_none() {
+                        *name = Some(format!("v{}", self.counter.borrow()));
+                        *self.counter.borrow_mut() += 1;
                     }
-                    s
-                })
-                .join("\n")
-                .into(),
-        )
-        .prefix_line(dot::LabelText::LabelStr(
-            format!("{} {}", n.index(), prefix).into(),
-        ))
+                }
+                
+                let mut statement_str = s.to_string();
+                
+                if idx > 0 {
+                    match s {
+                        ast::Statement::If(_) | 
+                        ast::Statement::While(_) | 
+                        ast::Statement::Repeat(_) |
+                        ast::Statement::NumericFor(_) |
+                        ast::Statement::GenericFor(_) => {
+                            statement_str = format!("\n{}", statement_str);
+                        }
+                        _ => {}
+                    }
+                }
+                
+                statement_str
+            })
+            .join("\n");
+        
+        let label = if prefix.is_empty() {
+            format!("Block {}\n{}", n.index(), formatted_block)
+        } else {
+            format!("Block {} ({})\n{}", n.index(), prefix, formatted_block)
+        };
+        
+        dot::LabelText::LabelStr(label.into())
     }
 
     fn edge_label<'b>(&'b self, e: &EdgeIndex) -> dot::LabelText<'b> {
         let edge = self.function.graph().edge_weight(*e).unwrap();
+        let args = arguments(&edge.arguments);
+        
         match edge.branch_type {
             crate::block::BranchType::Unconditional => {
-                dot::LabelText::LabelStr(arguments(&edge.arguments).into())
+                if args.is_empty() {
+                    dot::LabelText::LabelStr("".into())
+                } else {
+                    dot::LabelText::LabelStr(args.into())
+                }
             }
             crate::block::BranchType::Then => {
-                let arguments = arguments(&edge.arguments);
-                if !arguments.is_empty() {
-                    dot::LabelText::LabelStr(format!("t\n{}", arguments).into())
+                if args.is_empty() {
+                    dot::LabelText::LabelStr("then".into())
                 } else {
-                    dot::LabelText::LabelStr("t".into())
+                    dot::LabelText::LabelStr(format!("then\n{}", args).into())
                 }
             }
             crate::block::BranchType::Else => {
-                let arguments = arguments(&edge.arguments);
-                if !arguments.is_empty() {
-                    dot::LabelText::LabelStr(format!("e\n{}", arguments).into())
+                if args.is_empty() {
+                    dot::LabelText::LabelStr("else".into())
                 } else {
-                    dot::LabelText::LabelStr("e".into())
+                    dot::LabelText::LabelStr(format!("else\n{}", args).into())
                 }
             }
         }
@@ -96,7 +119,15 @@ impl<'a> Labeller<'a, NodeIndex, EdgeIndex> for FunctionLabeller<'a> {
     }
 
     fn node_shape(&'a self, _n: &NodeIndex) -> Option<LabelText<'a>> {
-        Some(LabelText::LabelStr("rect".into()))
+        Some(LabelText::LabelStr("box".into()))
+    }
+    
+    fn node_style(&'a self, n: &NodeIndex) -> dot::Style {
+        if self.function.entry() == &Some(*n) {
+            dot::Style::Bold
+        } else {
+            dot::Style::None
+        }
     }
 }
 

@@ -29,7 +29,7 @@ async fn main() -> Result<(), std::io::Error> {
         .layer(DefaultBodyLimit::disable()); 
 
     let listener = TcpListener::bind(BIND_ADDR).await?;
-    info!("Listening on {}", listener.local_addr()?);
+    info!("Topaz Listening on {}", listener.local_addr()?);
     axum::serve(listener, app).await
 }
 
@@ -62,7 +62,7 @@ impl IntoResponse for Error {
 async fn decompile(body: Bytes) -> Result<String, Error> {
     let mut bytecode = Vec::new();
     BASE64_STANDARD.decode_vec(body, &mut bytecode)?;
-    let decompiled = luau_lifter::decompile_bytecode(&bytecode, u8::MAX);
+    let decompiled = luau_lifter::decompile_bytecode(&bytecode, 203);
     info!("Successfully decompiled bytecode.");
     Ok(decompiled)
 }

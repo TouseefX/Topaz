@@ -75,20 +75,68 @@ impl Traverse for SetList {
 
 impl std::fmt::Display for SetList {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "__set_list({}, {}, {{{}}})",
-            self.object_local,
-            self.index,
-            // TODO: bad
-            formatter::format_arg_list(
-                &self
-                    .values
-                    .iter()
-                    .chain(self.tail.as_ref())
-                    .cloned()
-                    .collect::<Vec<_>>()
-            )
-        )
+        if self.index == 1 && self.tail.is_none() {
+            if self.values.is_empty() {
+                write!(f, "{} = {{}}", self.object_local)
+            } else if self.values.len() == 1 {
+                write!(f, "{} = {{{}}}", self.object_local, self.values[0])
+            } else {
+                write!(
+                    f,
+                    "{} = {{\n\t{}\n}}",
+                    self.object_local,
+                    self.values
+                        .iter()
+                        .map(|v| v.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",\n\t")
+                )
+            }
+        } else if self.index == 1 && self.tail.is_some() {
+            let mut all_values = self.values
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>();
+            
+            if let Some(tail) = &self.tail {
+                all_values.push(tail.to_string());
+            }
+            
+            if all_values.len() == 1 {
+                write!(f, "{} = {{{}}}", self.object_local, all_values[0])
+            } else {
+                write!(
+                    f,
+                    "{} = {{\n\t{}\n}}",
+                    self.object_local,
+                    all_values.join(",\n\t")
+                )
+            }
+        } else {
+            let mut result = String::new();
+            for (i, value) in self.values.iter().enumerate() {
+                if i > 0 {
+                    result.push_str("\n");
+                }
+                result.push_str(&format!(
+                    "{}[{}] = {}",
+                    self.object_local,
+                    self.index + i,
+                    value
+                ));
+            }
+            if let Some(tail) = &self.tail {
+                if !self.values.is_empty() {
+                    result.push_str("\n");
+                }
+                result.push_str(&format!(
+                    "{}[{}] = {}",
+                    self.object_local,
+                    self.index + self.values.len(),
+                    tail
+                ));
+            }
+            write!(f, "{}", result)
+        }
     }
 }

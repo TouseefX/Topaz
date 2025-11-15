@@ -101,69 +101,91 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         Ok(())
     }
 
-    fn format_block_no_indent(&mut self, block: &Block) -> fmt::Result {
-        for (i, statement) in block.iter().enumerate() {
-            if i != 0 {
-                writeln!(self.output)?;
+fn format_block_no_indent(&mut self, block: &Block) -> fmt::Result {
+    let mut prev_statement_type: Option<&str> = None;
+    
+    for (i, statement) in block.iter().enumerate() {
+        if i != 0 {
+            writeln!(self.output)?;
+            
+            let current_type = match statement {
+                Statement::If(_) | Statement::While(_) | Statement::Repeat(_) | 
+                Statement::NumericFor(_) | Statement::GenericFor(_) => "control",
+                Statement::Assign(a) if a.prefix => "local",
+                Statement::Assign(_) => "assign",
+                Statement::Return(_) => "return",
+                Statement::Call(_) | Statement::MethodCall(_) => "call",
+                Statement::Comment(_) => "comment",
+                _ => "other",
+            };
+            
+            if let Some(prev) = prev_statement_type {
+                if prev != current_type && prev != "comment" && current_type != "comment" {
+                    writeln!(self.output)?;
+                }
             }
-            self.format_statement(statement)?;
-            if let Some(next_statement) =
-                block.iter().skip(i + 1).find(|s| s.as_comment().is_none())
-            {
-                fn is_ambiguous(r: &RValue) -> bool {
-                    match r {
-                        RValue::Local(_)
-                        | RValue::Global(_)
-                        | RValue::Index(_)
-                        | RValue::Call(_)
-                        | RValue::MethodCall(_)
-                        | RValue::Select(Select::Call(_) | Select::MethodCall(_)) => true,
-                        RValue::Binary(binary) => is_ambiguous(&binary.right),
-                        _ => false,
+            
+            prev_statement_type = Some(current_type);
+        }
+        
+        self.format_statement(statement)?;
+        if let Some(next_statement) =
+            block.iter().skip(i + 1).find(|s| s.as_comment().is_none())
+        {
+            fn is_ambiguous(r: &RValue) -> bool {
+                match r {
+                    RValue::Local(_)
+                    | RValue::Global(_)
+                    | RValue::Index(_)
+                    | RValue::Call(_)
+                    | RValue::MethodCall(_)
+                    | RValue::Select(Select::Call(_) | Select::MethodCall(_)) => true,
+                    RValue::Binary(binary) => is_ambiguous(&binary.right),
+                    _ => false,
+                }
+            }
+
+            let disambiguate = match statement {
+                Statement::Call(_) | Statement::MethodCall(_) => true,
+                Statement::Repeat(repeat) => is_ambiguous(&repeat.condition),
+                Statement::Assign(Assign { right: list, .. })
+                | Statement::Return(Return { values: list }) => {
+                    if let Some(last) = list.last() {
+                        is_ambiguous(last)
+                    } else {
+                        false
                     }
                 }
-
-                let disambiguate = match statement {
-                    Statement::Call(_) | Statement::MethodCall(_) => true,
-                    Statement::Repeat(repeat) => is_ambiguous(&repeat.condition),
-                    Statement::Assign(Assign { right: list, .. })
-                    | Statement::Return(Return { values: list }) => {
-                        if let Some(last) = list.last() {
-                            is_ambiguous(last)
+                Statement::Goto(_) | Statement::Continue(_) | Statement::Break(_) => true,
+                _ => false,
+            };
+            let disambiguate = disambiguate
+                && match next_statement {
+                    Statement::Assign(Assign {
+                        left,
+                        prefix: false,
+                        ..
+                    }) => {
+                        if let Some(index) = left[0].as_index() {
+                            Self::should_wrap_left_rvalue(&index.left)
                         } else {
                             false
                         }
                     }
-                    Statement::Goto(_) | Statement::Continue(_) | Statement::Break(_) => true,
+                    Statement::Call(Call { value, .. })
+                    | Statement::MethodCall(MethodCall { value, .. }) => {
+                        Self::should_wrap_left_rvalue(value)
+                    }
+                    Statement::Comment(_) => unimplemented!(),
                     _ => false,
                 };
-                let disambiguate = disambiguate
-                    && match next_statement {
-                        Statement::Assign(Assign {
-                            left,
-                            prefix: false,
-                            ..
-                        }) => {
-                            if let Some(index) = left[0].as_index() {
-                                Self::should_wrap_left_rvalue(&index.left)
-                            } else {
-                                false
-                            }
-                        }
-                        Statement::Call(Call { value, .. })
-                        | Statement::MethodCall(MethodCall { value, .. }) => {
-                            Self::should_wrap_left_rvalue(value)
-                        }
-                        Statement::Comment(_) => unimplemented!(),
-                        _ => false,
-                    };
-                if disambiguate {
-                    write!(self.output, ";")?;
-                }
+            if disambiguate {
+                write!(self.output, ";")?;
             }
         }
-        Ok(())
     }
+    Ok(())
+}
 
     fn format_lvalue(&mut self, lvalue: &LValue) -> fmt::Result {
         match lvalue {
@@ -197,87 +219,81 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         table.0.iter().any(|(_, v)| matches!(v, RValue::Table(_x)))
     }
 
-    pub(crate) fn format_table(&mut self, table: &Table) -> fmt::Result {
-        // Empty table - just output {}
-        if table.0.is_empty() {
-            return write!(self.output, "{{}}");
-        }
+pub(crate) fn format_table(&mut self, table: &Table) -> fmt::Result {
+    if table.0.is_empty() {
+        return write!(self.output, "{{}}");
+    }
 
-        let sequential_keys = Self::are_table_keys_sequential(table);
-        let should_format = (!sequential_keys || table.0.len() > 3) || Self::contains_table(table);
-        
-        write!(self.output, "{{")?;
-        
+    let sequential_keys = Self::are_table_keys_sequential(table);
+    let should_format = (!sequential_keys || table.0.len() > 3) || Self::contains_table(table);
+    
+    write!(self.output, "{{")?;
+    
+    if should_format {
+        writeln!(self.output)?;
+        self.indentation_level += 1;
+    }
+    
+    for (index, (key, value)) in table.0.iter().enumerate() {
         if should_format {
-            writeln!(self.output)?;
-            self.indentation_level += 1;
-        } else {
+            self.indent()?;
+        } else if index == 0 {
             write!(self.output, " ")?;
         }
         
-        for (index, (key, value)) in table.0.iter().enumerate() {
-            if should_format {
-                self.indent()?;
+        let is_last = index + 1 == table.0.len();
+        
+        if is_last && key.is_none() {
+            let wrap = matches!(value, RValue::Select(_));
+            if wrap {
+                write!(self.output, "(")?;
             }
-            
-            let is_last = index + 1 == table.0.len();
-            
-            // Handle the last element specially if it has no key (vararg expansion)
-            if is_last && key.is_none() {
-                let wrap = matches!(value, RValue::Select(_));
-                if wrap {
-                    write!(self.output, "(")?;
-                }
-                self.format_rvalue(value)?;
-                if wrap {
-                    write!(self.output, ")")?;
-                }
-            } else {
-                // Write the key if not sequential or if key is explicitly provided
-                if !sequential_keys && key.is_some() {
-                    let key_value = key.as_ref().unwrap();
-                    // Check if key is a simple string that can use dot notation
-                    if let RValue::Literal(crate::Literal::String(field)) = key_value {
-                        if Self::is_valid_name(field) {
-                            // Use dot notation for valid identifiers
-                            write!(self.output, "{} = ", std::str::from_utf8(field).unwrap())?;
-                        } else {
-                            // Use bracket notation for invalid identifiers
-                            write!(self.output, "[")?;
-                            self.format_rvalue(key_value)?;
-                            write!(self.output, "] = ")?;
-                        }
+            self.format_rvalue(value)?;
+            if wrap {
+                write!(self.output, ")")?;
+            }
+        } else {
+            if !sequential_keys && key.is_some() {
+                let key_value = key.as_ref().unwrap();
+                if let RValue::Literal(crate::Literal::String(field)) = key_value {
+                    if Self::is_valid_name(field) {
+                        write!(self.output, "{} = ", std::str::from_utf8(field).unwrap())?;
                     } else {
-                        // Use bracket notation for non-string keys
                         write!(self.output, "[")?;
                         self.format_rvalue(key_value)?;
                         write!(self.output, "] = ")?;
                     }
-                }
-                
-                self.format_rvalue(value)?;
-                
-                if !is_last {
-                    write!(self.output, ",")?;
-                    if should_format {
-                        writeln!(self.output)?;
-                    } else {
-                        write!(self.output, " ")?;
-                    }
+                } else {
+                    write!(self.output, "[")?;
+                    self.format_rvalue(key_value)?;
+                    write!(self.output, "] = ")?;
                 }
             }
+            
+            self.format_rvalue(value)?;
+            
+            if !is_last {
+                write!(self.output, ",")?;
+            }
+            
+            if should_format {
+                writeln!(self.output)?;
+            } else if !is_last {
+                write!(self.output, " ")?;
+            }
         }
-        
-        if should_format {
-            self.indentation_level -= 1;
-            writeln!(self.output)?;
-            self.indent()?;
-        } else {
-            write!(self.output, " ")?;
-        }
-        
-        write!(self.output, "}}")
     }
+    
+    if should_format {
+        self.indentation_level -= 1;
+        writeln!(self.output)?;
+        self.indent()?;
+    } else {
+        write!(self.output, " ")?;
+    }
+    
+    write!(self.output, "}}")
+}
 
     pub(crate) fn format_unary(&mut self, unary: &Unary) -> fmt::Result {
         write!(self.output, "{}", unary.operation)?;
@@ -342,22 +358,22 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             // }
             if !closure.upvalues.is_empty() {
                 self.indent()?;
-                write!(self.output, "-- upvalues: ")?;
+              //  write!(self.output, "-- upvalues: ")?;
                 let mut it = closure.upvalues.iter().peekable();
                 while let Some(uv) = it.next() {
                     match uv {
                         crate::Upvalue::Copy(copy) => {
-                            write!(self.output, "(copy) {}", copy)?;
+                            //write!(self.output, "(copy) {}", copy)?;
                         }
                         crate::Upvalue::Ref(lref) => {
-                            write!(self.output, "(ref) {}", lref)?;
+                             //write!(self.output, "(ref) {}", lref)?;
                         }
                     }
                     if it.peek().is_some() {
-                        write!(self.output, ", ")?;
+                       // write!(self.output, ", ")?;
                     }
                 }
-                writeln!(self.output)?;
+       //         writeln!(self.output)?;
             }
             self.indentation_level -= 1;
 
@@ -564,102 +580,95 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         write!(self.output, ")")
     }
 
-    pub(crate) fn format_if(&mut self, r#if: &If) -> fmt::Result {
-        write!(self.output, "if ")?;
+pub(crate) fn format_if(&mut self, r#if: &If) -> fmt::Result {
+    write!(self.output, "if ")?;
+    self.format_rvalue(&r#if.condition)?;
+    writeln!(self.output, " then")?;
 
-        self.format_rvalue(&r#if.condition)?;
-
-        writeln!(self.output, " then")?;
-
-        let then_block = r#if.then_block.lock();
-        if !then_block.is_empty() {
-            self.format_block(&then_block)?;
-            writeln!(self.output)?;
-        }
-
-        let else_block = r#if.else_block.lock();
-        if !else_block.is_empty() {
-            self.indent()?;
-            if let Some(else_if) = else_block.iter().exactly_one().ok().and_then(|s| s.as_if()) {
-                write!(self.output, "else")?;
-                return self.format_if(else_if);
-            }
-            writeln!(self.output, "else")?;
-            self.format_block(&else_block)?;
-            writeln!(self.output)?;
-        }
-
-        self.indent()?;
-        write!(self.output, "end")
+    let then_block = r#if.then_block.lock();
+    if !then_block.is_empty() {
+        self.format_block(&then_block)?;
+        writeln!(self.output)?;
     }
 
-    pub(crate) fn format_assign(&mut self, assign: &Assign) -> fmt::Result {
-        if assign.prefix {
-            write!(self.output, "local ")?;
+    let else_block = r#if.else_block.lock();
+    if !else_block.is_empty() {
+        self.indent()?;
+        if let Some(else_if) = else_block.iter().exactly_one().ok().and_then(|s| s.as_if()) {
+            write!(self.output, "else")?;
+            return self.format_if(else_if);
         }
+        writeln!(self.output, "else")?;
+        self.format_block(&else_block)?;
+        writeln!(self.output)?;
+    }
 
-        if assign.left.len() == 1
-            && assign.right.len() == 1
-            && let RValue::Closure(closure) = &assign.right[0]
-        {
-            let left = &assign.left[0];
-            if assign.prefix || left.as_global().is_some() || {
-                if let LValue::Index(index) = left {
-                    let mut index = index;
-                    let mut valid = true;
-                    loop {
-                        if let box RValue::Literal(Literal::String(key)) = &index.right
-                            && Self::is_valid_name(key)
-                        {
-                            match index.left {
-                                box RValue::Index(ref i) => {
-                                    index = i;
-                                    continue;
-                                }
-                                box RValue::Global(_) | box RValue::Local(_) => {}
-                                _ => valid = false,
+    self.indent()?;
+    write!(self.output, "end")
+}
+
+pub(crate) fn format_assign(&mut self, assign: &Assign) -> fmt::Result {
+    if assign.prefix {
+        write!(self.output, "local ")?;
+    }
+
+    if assign.left.len() == 1
+        && assign.right.len() == 1
+        && let RValue::Closure(closure) = &assign.right[0]
+    {
+        let left = &assign.left[0];
+        if assign.prefix || left.as_global().is_some() || {
+            if let LValue::Index(index) = left {
+                let mut index = index;
+                let mut valid = true;
+                loop {
+                    if let box RValue::Literal(Literal::String(key)) = &index.right
+                        && Self::is_valid_name(key)
+                    {
+                        match index.left {
+                            box RValue::Index(ref i) => {
+                                index = i;
+                                continue;
                             }
-                        } else {
-                            valid = false;
+                            box RValue::Global(_) | box RValue::Local(_) => {}
+                            _ => valid = false,
                         }
-                        break;
+                    } else {
+                        valid = false;
                     }
-                    valid
-                } else {
-                    false
+                    break;
                 }
-            } {
-                return self.format_named_function(left, closure);
+                valid
+            } else {
+                false
             }
+        } {
+            return self.format_named_function(left, closure);
         }
+    }
 
-        for (i, lvalue) in assign.left.iter().enumerate() {
-            if i != 0 {
-                write!(self.output, ", ")?;
-            }
-            self.format_lvalue(lvalue)?;
+    for (i, lvalue) in assign.left.iter().enumerate() {
+        if i != 0 {
+            write!(self.output, ", ")?;
         }
+        self.format_lvalue(lvalue)?;
+    }
 
-        if !assign.right.is_empty() {
-            write!(self.output, " = ")?;
-        } else {
-            assert!(assign.prefix);
-        }
-
-        // TODO: REFACTOR: move to format_rvalue_list function
+    if !assign.right.is_empty() {
+        write!(self.output, " = ")?;
+        
         for (i, rvalue) in assign.right.iter().enumerate() {
             if i != 0 {
                 write!(self.output, ", ")?;
             }
             self.format_rvalue(rvalue)?;
         }
-
-        if assign.parallel {
-            write!(self.output, " -- parallel")?;
-        }
-
-        Ok(())
+    } else {
+        assert!(assign.prefix);
     }
+
+    Ok(())
+}
 
     pub(crate) fn format_while(&mut self, r#while: &While) -> fmt::Result {
         write!(self.output, "while ")?;

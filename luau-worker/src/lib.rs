@@ -50,7 +50,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                             if let Ok(bytecode) = BASE64_STANDARD.decode(data.encoded_bytecode) {
                                 let resp = DecompileResponse {
                                     id: data.id,
-                                    decompilation: decompile_bytecode(&bytecode, u8::MAX),
+                                    decompilation: decompile_bytecode(&bytecode, 1),
                                 };
                                 let _ = server.send_with_str(serde_json::to_string(&resp).unwrap());
                             } else {
@@ -83,7 +83,7 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             // Read and decode request body
             let body = req.bytes().await?;
             match BASE64_STANDARD.decode(body) {
-                Ok(bytecode) => Response::ok(decompile_bytecode(&bytecode, u8::MAX)),
+                Ok(bytecode) => Response::ok(decompile_bytecode(&bytecode, 203)),
                 Err(_) => Response::error("invalid bytecode", 400),
             }
         })

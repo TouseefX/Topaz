@@ -409,6 +409,94 @@ block.insert(i, ast::Statement::While(while_stmt));
         }
     }
 
+    fn remove_duplicate_conditions(block: &mut ast::Block) {
+    let mut i = 0;
+
+    while i < block.len() {
+        if let Some(if_stmt) = block[i].as_if() {
+            Self::remove_duplicate_conditions(&mut if_stmt.then_block.lock());
+            Self::remove_duplicate_conditions(&mut if_stmt.else_block.lock());
+            
+            if i + 1 < block.len() {
+                if let Some(next_if) = block.get(i + 1).and_then(|s| s.as_if()) {
+                    let current_cond = format!("{:?}", if_stmt.condition);
+                    let next_cond = format!("{:?}", next_if.condition);
+                    
+                    if current_cond == next_cond {
+                        block.remove(i + 1);
+                        continue;
+                    }
+                }
+            }
+        } else {
+            match block.get_mut(i) {
+                Some(ast::Statement::While(while_stmt)) => {
+                    Self::remove_duplicate_conditions(&mut while_stmt.block.lock());
+                }
+                Some(ast::Statement::Repeat(repeat)) => {
+                    Self::remove_duplicate_conditions(&mut repeat.block.lock());
+                }
+                Some(ast::Statement::NumericFor(numeric_for)) => {
+                    Self::remove_duplicate_conditions(&mut numeric_for.block.lock());
+                }
+                Some(ast::Statement::GenericFor(generic_for)) => {
+                    Self::remove_duplicate_conditions(&mut generic_for.block.lock());
+                }
+                _ => {}
+            }
+        }
+        
+        i += 1;
+    }
+}
+
+fn simplify_redundant_conditions(block: &mut ast::Block) {
+    for i in 0..block.len() {
+        if let Some(if_stmt) = block.get_mut(i).and_then(|s| s.as_if_mut()) {
+            if let Some(binary) = if_stmt.condition.as_binary() {
+                if binary.operation == ast::BinaryOperation::And {
+                    let left = binary.left.clone();
+                    let right = binary.right.clone();
+                    let left_str = format!("{:?}", left);
+
+                    if let Some(right_binary) = right.as_binary() {
+                        if right_binary.operation == ast::BinaryOperation::And {
+                            let right_left_str = format!("{:?}", right_binary.left);
+                            if left_str == right_left_str {
+                                if_stmt.condition = (*right.clone()).clone();
+                            }
+                        }
+                    }
+
+                    let right_str = format!("{:?}", right);
+                    if left_str == right_str {
+                        if_stmt.condition = (*left.clone()).clone();
+                    }
+                }
+            }
+
+            Self::simplify_redundant_conditions(&mut if_stmt.then_block.lock());
+            Self::simplify_redundant_conditions(&mut if_stmt.else_block.lock());
+        } else {
+            match block.get_mut(i) {
+                Some(ast::Statement::While(while_stmt)) => {
+                    Self::simplify_redundant_conditions(&mut while_stmt.block.lock());
+                }
+                Some(ast::Statement::Repeat(repeat)) => {
+                    Self::simplify_redundant_conditions(&mut repeat.block.lock());
+                }
+                Some(ast::Statement::NumericFor(numeric_for)) => {
+                    Self::simplify_redundant_conditions(&mut numeric_for.block.lock());
+                }
+                Some(ast::Statement::GenericFor(generic_for)) => {
+                    Self::simplify_redundant_conditions(&mut generic_for.block.lock());
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
     fn apply_formatting_rules(block: &mut ast::Block) {
         while block.first().map(|s| matches!(s, ast::Statement::Comment(_))).unwrap_or(false) {
             block.remove(0);
@@ -1229,26 +1317,32 @@ fn structure(mut self) -> ast::Block {
         Self::inline_set_lists(&mut res_block);
         Self::inline_table_assignments(&mut res_block);
         Self::convert_to_elseif_chains(&mut res_block);
+        Self::simplify_redundant_conditions(&mut res_block); 
         Self::remove_duplicate_conditions(&mut res_block);
         Self::optimize_nested_ifs(&mut res_block);
         Self::clean_variable_declarations(&mut res_block);
         Self::apply_formatting_rules(&mut res_block);
         res_block
-        } else {
-            let mut final_block = Self::remove_last_return(
+    } else {
+        let mut final_block = Self::remove_last_return(
             self.function
-            .remove_block(self.function.entry().unwrap())
-            .unwrap(),
-    );
-    Self::remove_redundant_declarations(&mut final_block);
-    Self::collapse_temporary_assignments(&mut final_block);
-    Self::fix_loop_boundaries(&mut final_block);
-    Self::inline_set_lists(&mut final_block);
-    Self::inline_table_assignments(&mut final_block);
-    Self::convert_to_elseif_chains(&mut final_block);
-    Self::optimize_nested_ifs(&mut final_block);
-    Self::clean_variable_declarations(&mut final_block);
-    Self::apply_formatting_rules(&mut final_block);
+                .remove_block(self.function.entry().unwrap())
+                .unwrap(),
+        );
+        
+        Self::remove_redundant_declarations(&mut final_block);
+        Self::collapse_temporary_assignments(&mut final_block);
+        Self::fix_loop_boundaries(&mut final_block);
+        Self::hoist_local_definitions(&mut final_block);
+        Self::enforce_local_definition_order(&mut final_block);
+        Self::inline_set_lists(&mut final_block);
+        Self::inline_table_assignments(&mut final_block);
+        Self::convert_to_elseif_chains(&mut final_block);
+        Self::simplify_redundant_conditions(&mut final_block);  
+        Self::remove_duplicate_conditions(&mut final_block);
+        Self::optimize_nested_ifs(&mut final_block);
+        Self::clean_variable_declarations(&mut final_block);
+        Self::apply_formatting_rules(&mut final_block);
     final_block
 }
 }
@@ -1337,31 +1431,6 @@ fn structure(mut self) -> ast::Block {
             }
         }
     }
-
-
-fn remove_duplicate_conditions(block: &mut ast::Block) {
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut i = 0;
-
-    while i < block.len() {
-        if let Some(if_stmt) = block[i].as_if_mut() {
-
-            let key = format!("{:?}", if_stmt.condition);
-
-            if !seen.insert(key) {
-                let then_block = if_stmt.then_block.lock().clone();
-                block.remove(i);
-                block.splice(i..i, then_block.0);
-                continue;
-            }
-
-            Self::remove_duplicate_conditions(&mut if_stmt.then_block.lock());
-            Self::remove_duplicate_conditions(&mut if_stmt.else_block.lock());
-
-        }
-        i += 1;
-    }
-}
     
     fn inline_set_lists(block: &mut ast::Block) {
         let mut to_remove: Vec<usize> = Vec::new();

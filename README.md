@@ -49,7 +49,6 @@ local Options = {
   ShutdownWhenDone = true,
   ShowStatus = true,
   AntiIdle = true,
-  NilInstances = true,
   timeout = -1,
 }
 synsaveinstance(Options)
