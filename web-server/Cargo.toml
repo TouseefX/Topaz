@@ -8,7 +8,9 @@ default-run = "web-server"
 [dependencies]
 axum = "0.7"
 base64 = "0.22"
+indicatif = "0.18.3"
 luau-lifter = { path = "../luau-lifter" }
+serde = "1.0.228"
 thiserror = "2.0"
 tokio = { version = "1.42", features = ["rt-multi-thread"] }
 tracing = "0.1"

@@ -124,11 +124,21 @@ fn format_block_no_indent(&mut self, block: &Block) -> fmt::Result {
                     writeln!(self.output)?;
                 }
             }
-            
-            prev_statement_type = Some(current_type);
+        } else {
+            prev_statement_type = Some(match statement {
+                Statement::If(_) | Statement::While(_) | Statement::Repeat(_) | 
+                Statement::NumericFor(_) | Statement::GenericFor(_) => "control",
+                Statement::Assign(a) if a.prefix => "local",
+                Statement::Assign(_) => "assign",
+                Statement::Return(_) => "return",
+                Statement::Call(_) | Statement::MethodCall(_) => "call",
+                Statement::Comment(_) => "comment",
+                _ => "other",
+            });
         }
         
         self.format_statement(statement)?;
+        
         if let Some(next_statement) =
             block.iter().skip(i + 1).find(|s| s.as_comment().is_none())
         {
@@ -182,6 +192,19 @@ fn format_block_no_indent(&mut self, block: &Block) -> fmt::Result {
             if disambiguate {
                 write!(self.output, ";")?;
             }
+        }
+        
+        if i != 0 {
+            prev_statement_type = Some(match statement {
+                Statement::If(_) | Statement::While(_) | Statement::Repeat(_) | 
+                Statement::NumericFor(_) | Statement::GenericFor(_) => "control",
+                Statement::Assign(a) if a.prefix => "local",
+                Statement::Assign(_) => "assign",
+                Statement::Return(_) => "return",
+                Statement::Call(_) | Statement::MethodCall(_) => "call",
+                Statement::Comment(_) => "comment",
+                _ => "other",
+            });
         }
     }
     Ok(())

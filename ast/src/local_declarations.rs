@@ -27,9 +27,18 @@ impl LocalDeclarer {
     fn visit(&mut self, block: Arc<Mutex<Block>>, stat_index: usize) -> NodeIndex {
         let node = self.graph.add_node((Some(block.clone()), stat_index));
         self.block_to_node.insert(block.clone().into(), node);
+        
         for (stat_index, stat) in block.lock().iter().enumerate() {
-            if !matches!(stat, Statement::GenericFor(_) | Statement::NumericFor(_)) {
-                for local in stat.values_written() {
+            let locals_written = stat.values_written();
+            
+            for local in locals_written {
+                let should_skip = match stat {
+                    Statement::NumericFor(nf) => local == &nf.counter,
+                    Statement::GenericFor(gf) => gf.res_locals.iter().any(|l| l == local),
+                    _ => false,
+                };
+                
+                if !should_skip {
                     self.local_usages
                         .entry(local.clone())
                         .or_default()
@@ -37,6 +46,7 @@ impl LocalDeclarer {
                         .or_insert(stat_index);
                 }
             }
+            
             match stat {
                 Statement::If(r#if) => {
                     let if_node = self.graph.add_node((None, stat_index));
@@ -87,10 +97,12 @@ impl LocalDeclarer {
     ) {
         let root_node = self.visit(root_block, 0);
         let dominators = simple_fast(&self.graph, root_node);
+        
         for (local, usages) in self.local_usages {
             if locals_to_ignore.contains(&local) {
                 continue;
             }
+            
             let (mut node, mut first_stat_index) = if usages.len() == 1 {
                 usages.into_iter().next().unwrap()
             } else {
@@ -123,6 +135,7 @@ impl LocalDeclarer {
                     (common_dominator, first_stat_index.unwrap())
                 }
             };
+            
             while let (block, parent_stat_index) = self.graph.node_weight(node).unwrap()
                 && block.is_none()
             {
@@ -133,6 +146,7 @@ impl LocalDeclarer {
                     .unwrap();
                 (node, first_stat_index) = (parent, *parent_stat_index);
             }
+            
             let block = self
                 .graph
                 .node_weight(node)
@@ -141,6 +155,7 @@ impl LocalDeclarer {
                 .as_ref()
                 .unwrap()
                 .clone();
+            
             self.declarations
                 .entry(block.into())
                 .or_default()
@@ -152,30 +167,39 @@ impl LocalDeclarer {
         for (ByAddress(block), declarations) in self.declarations {
             let mut block = block.lock();
             for (stat_index, mut locals) in declarations.into_iter().rev() {
+                if stat_index >= block.len() {
+                    continue;
+                }
+                
                 match &mut block[stat_index] {
-                    Statement::Assign(assign)
-                        if assign
+                    Statement::Assign(assign) if !assign.prefix => {
+                        let matching_locals: Vec<_> = assign
                             .left
                             .iter()
-                            .all(|l| l.as_local().is_some_and(|l| locals.contains(l))) =>
-                    {
-                        locals.retain(|l| {
-                            !assign
-                                .left
-                                .iter()
-                                .map(|l| l.as_local().unwrap())
-                                .contains(l)
-                        });
-                        assign.prefix = true;
+                            .filter_map(|lv| lv.as_local())
+                            .filter(|&l| locals.contains(l))
+                            .cloned()
+                            .collect();
+                        
+                        if !matching_locals.is_empty() {
+                            assign.prefix = true;
+                            
+                            for matching in matching_locals {
+                                locals.shift_remove(&matching);
+                            }
+                        }
                     }
                     _ => {}
                 }
+                
                 if locals.is_empty() {
                     continue;
                 }
+                
                 for local in locals.iter() {
                     Self::ensure_local_named(local);
                 }
+                
                 let mut declaration =
                     Assign::new(locals.into_iter().map(|l| l.into()).collect_vec(), vec![]);
                 declaration.prefix = true;
