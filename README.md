@@ -42,7 +42,7 @@ getgenv().decompile = function(Script)
 end;
 
 
-local synsaveinstance = loadstring(game:HttpGet("https://raw.githubusercontent.com/Devraj2010isme/BetterSaveinstance/saveinstance.luau"))()
+local synsaveinstance = loadstring(game:HttpGet("https://raw.githubusercontent.com/horizzondev/TopazSaveinstance/main/saveinstance.luau"))()
 
 local Options = {
   SafeMode = true,
