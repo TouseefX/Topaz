@@ -1,8 +1,8 @@
 use axum::{
-    body::{ Body, Bytes },
+    body::{Body, Bytes},
     extract::DefaultBodyLimit,
     http::StatusCode,
-    response::{ IntoResponse, Response },
+    response::{IntoResponse, Response},
     routing::post,
     Router,
 };
@@ -14,8 +14,7 @@ const BIND_ADDR: &str = "127.0.0.1:3000";
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
-    let subscriber = tracing_subscriber
-        ::fmt()
+    let subscriber = tracing_subscriber::fmt()
         .compact()
         .with_file(true)
         .with_line_number(true)
@@ -25,17 +24,21 @@ async fn main() -> Result<(), std::io::Error> {
 
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
-    let app = Router::new().route("/decompile", post(decompile)).layer(DefaultBodyLimit::disable());
+    let app = Router::new()
+        .route("/decompile", post(decompile))
+        .layer(DefaultBodyLimit::disable()); 
 
     let listener = TcpListener::bind(BIND_ADDR).await?;
-    println!("💎 Topaz Listening on {}", listener.local_addr()?);
+    info!("Topaz Listening on {}", listener.local_addr()?);
     axum::serve(listener, app).await
 }
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
-    #[error("there was an IO error: {0}")] Io(#[from] std::io::Error),
-    #[error("invalid Base64 data recieved: {0}")] Base64(#[from] base64::DecodeError),
+    #[error("there was an IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("invalid base64 data recieved: {0}")]
+    Base64(#[from] base64::DecodeError),
 }
 
 impl Error {
@@ -59,11 +62,7 @@ impl IntoResponse for Error {
 async fn decompile(body: Bytes) -> Result<String, Error> {
     let mut bytecode = Vec::new();
     BASE64_STANDARD.decode_vec(body, &mut bytecode)?;
-
-    let bytecode_len = bytecode.len();
     let decompiled = luau_lifter::decompile_bytecode(&bytecode, 203);
-
-    println!("Bytecode received ({} bytes) and decompiled successfully.", bytecode_len);
-
+    info!("Successfully decompiled bytecode.");
     Ok(decompiled)
 }
