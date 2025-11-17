@@ -1339,17 +1339,10 @@ impl<'a> Lifter<'a> {
                         }
                         _ => unreachable!("{:?}", instruction),
                     }
-                instruction => {
-                    eprintln!(
-                        "Unimplemented instruction at PC {}: {:?}",
-                        block_start + index,
-                        instruction
-                    );
-                    eprintln!("Block range: {}..{}", block_start, block_end);
-                    unimplemented!("{:?}", instruction);
-                }
+                _ => unimplemented!("{:?}", instruction),
             }
         }
+
         let last_index = iter
             .next()
             .map(|(i, _)| block_start + i - 1)
