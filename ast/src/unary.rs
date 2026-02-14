@@ -1,8 +1,8 @@
 use std::fmt;
 
-use crate::{Literal, LocalRw, RValue, RcLocal, Reduce, SideEffects, Traverse};
+use crate::{ Literal, LocalRw, RValue, RcLocal, Reduce, SideEffects, Traverse };
 
-use super::{Binary, BinaryOperation};
+use super::{ Binary, BinaryOperation };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum UnaryOperation {
@@ -30,10 +30,8 @@ pub struct Unary {
 impl SideEffects for Unary {
     fn has_side_effects(&self) -> bool {
         // TODO: do this properly
-        matches!(
-            self.operation,
-            UnaryOperation::Negate | UnaryOperation::Length
-        ) || self.value.has_side_effects()
+        matches!(self.operation, UnaryOperation::Negate | UnaryOperation::Length) ||
+            self.value.has_side_effects()
     }
 }
 
@@ -55,11 +53,9 @@ impl Reduce for Unary {
         fn is_boolean(r: &RValue) -> bool {
             match r {
                 RValue::Binary(binary) if binary.operation.is_comparator() => true,
-                RValue::Binary(Binary {
-                    left,
-                    right,
-                    operation: BinaryOperation::And | BinaryOperation::Or,
-                }) => is_boolean(left) && is_boolean(right),
+                RValue::Binary(
+                    Binary { left, right, operation: BinaryOperation::And | BinaryOperation::Or },
+                ) => is_boolean(left) && is_boolean(right),
                 RValue::Literal(Literal::Boolean(_)) => true,
                 // no point matching strings, numbers and tables since reduce_condition has already been called
                 _ => false,
@@ -73,9 +69,8 @@ impl Reduce for Unary {
                 Binary::new(
                     Binary::new(r, Literal::Boolean(true).into(), BinaryOperation::And).into(),
                     Literal::Boolean(false).into(),
-                    BinaryOperation::Or,
-                )
-                .into()
+                    BinaryOperation::Or
+                ).into()
             }
         };
 
@@ -84,10 +79,7 @@ impl Reduce for Unary {
                 RValue::Literal(Literal::Boolean(!value))
             }
             (
-                RValue::Unary(Unary {
-                    box value,
-                    operation: UnaryOperation::Not,
-                }),
+                RValue::Unary(Unary { box value, operation: UnaryOperation::Not }),
                 UnaryOperation::Not,
             ) => ensure_boolean(value.reduce_condition()),
             (RValue::Literal(Literal::Number(value)), UnaryOperation::Negate) => {
@@ -98,130 +90,104 @@ impl Reduce for Unary {
                 RValue::Literal(Literal::Number(value.len() as f64))
             }
             (
-                RValue::Binary(Binary {
-                    left,
-                    right,
-                    operation: BinaryOperation::GreaterThan,
-                }),
+                RValue::Binary(Binary { left, right, operation: BinaryOperation::GreaterThan }),
                 UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::LessThanOrEqual,
-            }
-            .reduce(),
-            (
-                RValue::Binary(Binary {
+            ) =>
+                (Binary {
                     left,
                     right,
                     operation: BinaryOperation::LessThanOrEqual,
-                }),
-                UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::GreaterThan,
-            }
-            .reduce(),
+                }).reduce(),
             (
-                RValue::Binary(Binary {
+                RValue::Binary(Binary { left, right, operation: BinaryOperation::LessThanOrEqual }),
+                UnaryOperation::Not,
+            ) =>
+                (Binary {
                     left,
                     right,
-                    operation: BinaryOperation::GreaterThanOrEqual,
-                }),
-                UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::LessThan,
-            }
-            .reduce(),
+                    operation: BinaryOperation::GreaterThan,
+                }).reduce(),
             (
-                RValue::Binary(Binary {
+                RValue::Binary(
+                    Binary { left, right, operation: BinaryOperation::GreaterThanOrEqual },
+                ),
+                UnaryOperation::Not,
+            ) =>
+                (Binary {
                     left,
                     right,
                     operation: BinaryOperation::LessThan,
-                }),
-                UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::GreaterThanOrEqual,
-            }
-            .reduce(),
+                }).reduce(),
             (
-                RValue::Binary(Binary {
+                RValue::Binary(Binary { left, right, operation: BinaryOperation::LessThan }),
+                UnaryOperation::Not,
+            ) =>
+                (Binary {
                     left,
                     right,
-                    operation: BinaryOperation::Equal,
-                }),
-                UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::NotEqual,
-            }
-            .reduce(),
+                    operation: BinaryOperation::GreaterThanOrEqual,
+                }).reduce(),
             (
-                RValue::Binary(Binary {
+                RValue::Binary(Binary { left, right, operation: BinaryOperation::Equal }),
+                UnaryOperation::Not,
+            ) =>
+                (Binary {
                     left,
                     right,
                     operation: BinaryOperation::NotEqual,
-                }),
-                UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::Equal,
-            }
-            .reduce(),
+                }).reduce(),
             (
-                RValue::Binary(Binary {
+                RValue::Binary(Binary { left, right, operation: BinaryOperation::NotEqual }),
+                UnaryOperation::Not,
+            ) =>
+                (Binary {
                     left,
                     right,
-                    operation,
-                }),
-                UnaryOperation::Not,
-            ) if (operation == BinaryOperation::And || operation == BinaryOperation::Or)
-            // TODO: unnecessary clones
-                && (does_reduce(&Unary {
-                    value: left.clone(),
-                    operation: UnaryOperation::Not,
-                }.into()) || does_reduce(&Unary {
-                    value: right.clone(),
-                    operation: UnaryOperation::Not,
-                }.into())) =>
-            {
+                    operation: BinaryOperation::Equal,
+                }).reduce(),
+            (RValue::Binary(Binary { left, right, operation }), UnaryOperation::Not) if
+                (operation == BinaryOperation::And || operation == BinaryOperation::Or) &&
+                // TODO: unnecessary clones
+                (does_reduce(
+                    &(Unary {
+                        value: left.clone(),
+                        operation: UnaryOperation::Not,
+                    }).into()
+                ) ||
+                    does_reduce(
+                        &(Unary {
+                            value: right.clone(),
+                            operation: UnaryOperation::Not,
+                        }).into()
+                    ))
+            => {
                 ensure_boolean(
-                    Binary {
+                    (Binary {
                         left: Box::new(
-                            Unary {
+                            (Unary {
                                 value: left,
                                 operation: UnaryOperation::Not,
-                            }
-                            .reduce_condition(),
+                            }).reduce_condition()
                         ),
                         right: Box::new(
-                            Unary {
+                            (Unary {
                                 value: right,
                                 operation: UnaryOperation::Not,
-                            }
-                            .reduce_condition(),
+                            }).reduce_condition()
                         ),
                         operation: if operation == BinaryOperation::And {
                             BinaryOperation::Or
                         } else {
                             BinaryOperation::And
                         },
-                    }
-                    .reduce_condition(),
+                    }).reduce_condition()
                 )
             }
-            (value, operation) => Self {
-                value: Box::new(value),
-                operation,
-            }
-            .into(),
+            (value, operation) =>
+                (Self {
+                    value: Box::new(value),
+                    operation,
+                }).into(),
         }
     }
 
@@ -234,10 +200,7 @@ impl Reduce for Unary {
                 RValue::Literal(Literal::Boolean(!value))
             }
             (
-                RValue::Unary(Unary {
-                    box value,
-                    operation: UnaryOperation::Not,
-                }),
+                RValue::Unary(Unary { box value, operation: UnaryOperation::Not }),
                 UnaryOperation::Not,
             ) => value.reduce_condition(),
             (RValue::Literal(Literal::Number(value)), UnaryOperation::Negate) => {
@@ -246,128 +209,102 @@ impl Reduce for Unary {
             // __len has to return number, numbers are always truthy
             (_, UnaryOperation::Length) => RValue::Literal(Literal::Boolean(true)),
             (
-                RValue::Binary(Binary {
-                    left,
-                    right,
-                    operation: BinaryOperation::GreaterThan,
-                }),
+                RValue::Binary(Binary { left, right, operation: BinaryOperation::GreaterThan }),
                 UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::LessThanOrEqual,
-            }
-            .reduce_condition(),
-            (
-                RValue::Binary(Binary {
+            ) =>
+                (Binary {
                     left,
                     right,
                     operation: BinaryOperation::LessThanOrEqual,
-                }),
-                UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::GreaterThan,
-            }
-            .reduce_condition(),
+                }).reduce_condition(),
             (
-                RValue::Binary(Binary {
+                RValue::Binary(Binary { left, right, operation: BinaryOperation::LessThanOrEqual }),
+                UnaryOperation::Not,
+            ) =>
+                (Binary {
                     left,
                     right,
-                    operation: BinaryOperation::GreaterThanOrEqual,
-                }),
-                UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::LessThan,
-            }
-            .reduce_condition(),
+                    operation: BinaryOperation::GreaterThan,
+                }).reduce_condition(),
             (
-                RValue::Binary(Binary {
+                RValue::Binary(
+                    Binary { left, right, operation: BinaryOperation::GreaterThanOrEqual },
+                ),
+                UnaryOperation::Not,
+            ) =>
+                (Binary {
                     left,
                     right,
                     operation: BinaryOperation::LessThan,
-                }),
-                UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::GreaterThanOrEqual,
-            }
-            .reduce_condition(),
+                }).reduce_condition(),
             (
-                RValue::Binary(Binary {
+                RValue::Binary(Binary { left, right, operation: BinaryOperation::LessThan }),
+                UnaryOperation::Not,
+            ) =>
+                (Binary {
                     left,
                     right,
-                    operation: BinaryOperation::Equal,
-                }),
-                UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::NotEqual,
-            }
-            .reduce_condition(),
+                    operation: BinaryOperation::GreaterThanOrEqual,
+                }).reduce_condition(),
             (
-                RValue::Binary(Binary {
+                RValue::Binary(Binary { left, right, operation: BinaryOperation::Equal }),
+                UnaryOperation::Not,
+            ) =>
+                (Binary {
                     left,
                     right,
                     operation: BinaryOperation::NotEqual,
-                }),
-                UnaryOperation::Not,
-            ) => Binary {
-                left,
-                right,
-                operation: BinaryOperation::Equal,
-            }
-            .reduce_condition(),
+                }).reduce_condition(),
             (
-                RValue::Binary(Binary {
+                RValue::Binary(Binary { left, right, operation: BinaryOperation::NotEqual }),
+                UnaryOperation::Not,
+            ) =>
+                (Binary {
                     left,
                     right,
-                    operation,
-                }),
-                UnaryOperation::Not,
-            ) if (operation == BinaryOperation::And || operation == BinaryOperation::Or)
-            // TODO: unnecessary clones
-                && (does_reduce(&Unary {
-                    value: left.clone(),
-                    operation: UnaryOperation::Not,
-                }.into()) || does_reduce(&Unary {
-                    value: right.clone(),
-                    operation: UnaryOperation::Not,
-                }.into())) =>
-            {
-                Binary {
+                    operation: BinaryOperation::Equal,
+                }).reduce_condition(),
+            (RValue::Binary(Binary { left, right, operation }), UnaryOperation::Not) if
+                (operation == BinaryOperation::And || operation == BinaryOperation::Or) &&
+                // TODO: unnecessary clones
+                (does_reduce(
+                    &(Unary {
+                        value: left.clone(),
+                        operation: UnaryOperation::Not,
+                    }).into()
+                ) ||
+                    does_reduce(
+                        &(Unary {
+                            value: right.clone(),
+                            operation: UnaryOperation::Not,
+                        }).into()
+                    ))
+            => {
+                (Binary {
                     left: Box::new(
-                        Unary {
+                        (Unary {
                             value: left,
                             operation: UnaryOperation::Not,
-                        }
-                        .reduce_condition(),
+                        }).reduce_condition()
                     ),
                     right: Box::new(
-                        Unary {
+                        (Unary {
                             value: right,
                             operation: UnaryOperation::Not,
-                        }
-                        .reduce_condition(),
+                        }).reduce_condition()
                     ),
                     operation: if operation == BinaryOperation::And {
                         BinaryOperation::Or
                     } else {
                         BinaryOperation::And
                     },
-                }
-                .reduce_condition()
+                }).reduce_condition()
             }
-            (value, operation) => Self {
-                value: Box::new(value),
-                operation,
-            }
-            .into(),
+            (value, operation) =>
+                (Self {
+                    value: Box::new(value),
+                    operation,
+                }).into(),
         }
     }
 }
@@ -385,15 +322,16 @@ impl Unary {
     }
 
     pub fn group(&self) -> bool {
-        (self.precedence() > self.value.precedence())
-            || (matches!(self.operation, UnaryOperation::Negate)
-                && (matches!(
+        self.precedence() > self.value.precedence() ||
+            (matches!(self.operation, UnaryOperation::Negate) &&
+                (matches!(
                     *self.value,
                     RValue::Unary(Unary {
                         operation: UnaryOperation::Negate,
                         ..
                     })
-                ) || matches!(
+                ) ||
+                    matches!(
                     *self.value,
                     RValue::Literal(Literal::Number(value))
                         if value.is_finite() && value.is_sign_negative()
@@ -413,15 +351,10 @@ impl LocalRw for Unary {
 
 impl fmt::Display for Unary {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}{}",
-            self.operation,
-            if self.group() {
-                format!("({})", self.value)
-            } else {
-                format!("{}", self.value)
-            }
-        )
+        write!(f, "{}{}", self.operation, if self.group() {
+            format!("({})", self.value)
+        } else {
+            format!("{}", self.value)
+        })
     }
 }

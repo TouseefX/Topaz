@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{formatter::Formatter, has_side_effects, LocalRw, RcLocal, Traverse};
+use crate::{ formatter::Formatter, has_side_effects, LocalRw, RcLocal, Traverse };
 
 use super::RValue;
 
@@ -31,15 +31,11 @@ has_side_effects!(Call);
 
 impl Traverse for Call {
     fn rvalues_mut(&mut self) -> Vec<&mut RValue> {
-        std::iter::once(self.value.as_mut())
-            .chain(self.arguments.iter_mut())
-            .collect()
+        std::iter::once(self.value.as_mut()).chain(self.arguments.iter_mut()).collect()
     }
 
     fn rvalues(&self) -> Vec<&RValue> {
-        std::iter::once(self.value.as_ref())
-            .chain(self.arguments.iter())
-            .collect()
+        std::iter::once(self.value.as_ref()).chain(self.arguments.iter()).collect()
     }
 }
 
@@ -63,12 +59,11 @@ impl LocalRw for Call {
 
 impl fmt::Display for Call {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        Formatter {
+        (Formatter {
             indentation_level: 0,
             indentation_mode: Default::default(),
             output: f,
-        }
-        .format_call(self)
+        }).format_call(self)
     }
 }
 
@@ -95,15 +90,11 @@ has_side_effects!(MethodCall);
 
 impl Traverse for MethodCall {
     fn rvalues_mut(&mut self) -> Vec<&mut RValue> {
-        std::iter::once(self.value.as_mut())
-            .chain(self.arguments.iter_mut())
-            .collect()
+        std::iter::once(self.value.as_mut()).chain(self.arguments.iter_mut()).collect()
     }
 
     fn rvalues(&self) -> Vec<&RValue> {
-        std::iter::once(self.value.as_ref())
-            .chain(self.arguments.iter())
-            .collect()
+        std::iter::once(self.value.as_ref()).chain(self.arguments.iter()).collect()
     }
 }
 
@@ -127,11 +118,10 @@ impl LocalRw for MethodCall {
 
 impl fmt::Display for MethodCall {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        Formatter {
+        (Formatter {
             indentation_level: 0,
             indentation_mode: Default::default(),
             output: f,
-        }
-        .format_method_call(self)
+        }).format_method_call(self)
     }
 }

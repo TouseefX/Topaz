@@ -4,10 +4,7 @@ use nom::IResult;
 
 pub use header::Header;
 
-use crate::{
-    chunk::header::{Endianness, Format},
-    function::Function,
-};
+use crate::{ chunk::header::{ Endianness, Format }, function::Function };
 
 pub mod header;
 

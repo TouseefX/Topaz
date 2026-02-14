@@ -1,7 +1,7 @@
 use parking_lot::Mutex;
 use triomphe::Arc;
 
-use crate::{formatter::Formatter, has_side_effects, Block, LocalRw, RValue, RcLocal, Traverse};
+use crate::{ formatter::Formatter, has_side_effects, Block, LocalRw, RValue, RcLocal, Traverse };
 use std::fmt;
 
 #[derive(Debug, Clone)]
@@ -50,11 +50,10 @@ impl LocalRw for While {
 
 impl fmt::Display for While {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        Formatter {
+        (Formatter {
             indentation_level: 0,
             indentation_mode: Default::default(),
             output: f,
-        }
-        .format_while(self)
+        }).format_while(self)
     }
 }

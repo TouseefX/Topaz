@@ -114,10 +114,10 @@ pub enum Instruction {
 
 impl Instruction {
     pub fn parse(insn: u32, encode_key: u8) -> Result<Instruction, nom::error::ErrorKind> {
-        let op_code = (insn & 0xFF) as u8;
+        let op_code = (insn & 0xff) as u8;
         let op_code = op_code.wrapping_mul(encode_key);
         match op_code {
-            0
+            | 0
             | 1
             | 2
             | 3
@@ -163,28 +163,29 @@ impl Instruction {
                     e,
                 })
             }
-            97 => Ok(Self::BC {
-                op_code: OpCode::try_from(0).unwrap(),
-                a: 0,
-                b: 0,
-                c: 0,
-                aux: 0,
-            }),
+            97 =>
+                Ok(Self::BC {
+                    op_code: OpCode::try_from(0).unwrap(),
+                    a: 0,
+                    b: 0,
+                    c: 0,
+                    aux: 0,
+                }),
             _ => unreachable!("{}", op_code),
         }
     }
 
     fn parse_abc(insn: u32) -> (u8, u8, u8) {
-        let a = ((insn >> 8) & 0xFF) as u8;
-        let b = ((insn >> 16) & 0xFF) as u8;
-        let c = ((insn >> 24) & 0xFF) as u8;
+        let a = ((insn >> 8) & 0xff) as u8;
+        let b = ((insn >> 16) & 0xff) as u8;
+        let c = ((insn >> 24) & 0xff) as u8;
 
         (a, b, c)
     }
 
     fn parse_ad(insn: u32) -> (u8, i16) {
-        let a = ((insn >> 8) & 0xFF) as u8;
-        let d = ((insn >> 16) & 0xFFFF) as i16;
+        let a = ((insn >> 8) & 0xff) as u8;
+        let d = ((insn >> 16) & 0xffff) as i16;
 
         (a, d)
     }

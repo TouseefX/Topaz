@@ -1,5 +1,4 @@
 #![feature(box_patterns)]
-#![feature(let_chains)]
 
 use derive_more::From;
 use enum_as_inner::EnumAsInner;
@@ -7,10 +6,7 @@ use enum_dispatch::enum_dispatch;
 use formatter::Formatter;
 use itertools::Either;
 
-use std::{
-    fmt,
-    ops::{Deref, DerefMut},
-};
+use std::{ fmt, ops::{ Deref, DerefMut } };
 
 mod assign;
 mod binary;
@@ -63,7 +59,7 @@ pub use set_list::*;
 pub use side_effects::*;
 pub use table::*;
 pub use traverse::*;
-use type_system::{Type, TypeSystem};
+use type_system::{ Type, TypeSystem };
 pub use unary::*;
 pub use vararg::*;
 

@@ -1,18 +1,11 @@
 use core::num;
 
-use nom::{
-    complete::take,
-    number::complete::{le_u32, le_u8},
-    IResult,
-};
+use nom::{ complete::take, number::complete::{ le_u32, le_u8 }, IResult };
 use nom_leb128::leb128_usize;
 
-use super::{
-    constant::Constant,
-    list::{parse_list, parse_list_len},
-};
+use super::{ constant::Constant, list::{ parse_list, parse_list_len } };
 
-use crate::{instruction::*, op_code::OpCode};
+use crate::{ instruction::*, op_code::OpCode };
 
 #[derive(Debug)]
 pub struct Function {
@@ -46,7 +39,7 @@ impl Function {
 
             // handle ops with aux values
             match op {
-                OpCode::LOP_GETGLOBAL
+                | OpCode::LOP_GETGLOBAL
                 | OpCode::LOP_SETGLOBAL
                 | OpCode::LOP_GETIMPORT
                 | OpCode::LOP_GETTABLEKS
@@ -72,9 +65,7 @@ impl Function {
                     let aux = vec[pc + 1];
                     pc += 2;
                     match ins {
-                        Instruction::BC {
-                            op_code, a, b, c, ..
-                        } => {
+                        Instruction::BC { op_code, a, b, c, .. } => {
                             v.push(Instruction::BC {
                                 op_code,
                                 a,
@@ -137,8 +128,11 @@ impl Function {
         let (input, line_info_delta) = match has_line_info {
             0 => (input, None),
             _ => {
-                let (input, line_info_delta) =
-                    parse_list_len(input, le_u8, u32_instructions.len())?;
+                let (input, line_info_delta) = parse_list_len(
+                    input,
+                    le_u8,
+                    u32_instructions.len()
+                )?;
                 (input, Some(line_info_delta))
             }
         };
@@ -148,7 +142,7 @@ impl Function {
                 let (input, abs_line_info_delta) = parse_list_len(
                     input,
                     le_u32,
-                    ((u32_instructions.len() - 1) >> line_gap_log2.unwrap()) + 1,
+                    ((u32_instructions.len() - 1) >> line_gap_log2.unwrap()) + 1
                 )?;
                 (input, Some(abs_line_info_delta))
             }

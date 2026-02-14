@@ -28,7 +28,7 @@ pub async fn serve(port: u16, luau: bool, lua51: bool) -> Result<(), std::io::Er
 }
 
 async fn ok() -> &'static str {
-    "yep web-server is on"
+    "Web server is connected!"
 }
 
 #[inline]

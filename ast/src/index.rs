@@ -1,4 +1,4 @@
-use crate::{formatter::Formatter, has_side_effects, LocalRw, RcLocal, Traverse};
+use crate::{ formatter::Formatter, has_side_effects, LocalRw, RcLocal, Traverse };
 
 use super::RValue;
 use std::fmt;
@@ -23,11 +23,7 @@ impl Index {
 
 impl LocalRw for Index {
     fn values_read(&self) -> Vec<&RcLocal> {
-        self.left
-            .values_read()
-            .into_iter()
-            .chain(self.right.values_read().into_iter())
-            .collect()
+        self.left.values_read().into_iter().chain(self.right.values_read().into_iter()).collect()
     }
 
     fn values_read_mut(&mut self) -> Vec<&mut RcLocal> {
@@ -51,11 +47,10 @@ impl Traverse for Index {
 
 impl fmt::Display for Index {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        Formatter {
+        (Formatter {
             indentation_level: 0,
             indentation_mode: Default::default(),
             output: f,
-        }
-        .format_index(self)
+        }).format_index(self)
     }
 }

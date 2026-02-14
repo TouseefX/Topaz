@@ -1,4 +1,4 @@
-use nom::{multi::count, number::complete::le_u32, IResult};
+use nom::{ multi::count, number::complete::le_u32, IResult };
 
 #[derive(Debug)]
 pub struct Position {

@@ -1,4 +1,4 @@
-use nom::{bytes::complete::take, number::complete::le_u8, IResult};
+use nom::{ bytes::complete::take, number::complete::le_u8, IResult };
 
 use super::chunk::Chunk;
 
@@ -14,10 +14,7 @@ impl Bytecode {
         match status_code {
             0 => {
                 let (input, error_msg) = take(input.len())(input)?;
-                Ok((
-                    input,
-                    Bytecode::Error(String::from_utf8_lossy(error_msg).to_string()),
-                ))
+                Ok((input, Bytecode::Error(String::from_utf8_lossy(error_msg).to_string())))
             }
             4..=6 => {
                 let (input, chunk) = Chunk::parse(input, encode_key, status_code)?;

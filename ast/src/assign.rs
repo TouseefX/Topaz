@@ -1,8 +1,8 @@
 use std::fmt;
 
-use crate::{formatter::Formatter, RcLocal, SideEffects, Traverse};
+use crate::{ formatter::Formatter, RcLocal, SideEffects, Traverse };
 
-use super::{LValue, LocalRw, RValue};
+use super::{ LValue, LocalRw, RValue };
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assign {
@@ -39,8 +39,8 @@ impl Traverse for Assign {
 
 impl SideEffects for Assign {
     fn has_side_effects(&self) -> bool {
-        self.right.iter().any(|r| r.has_side_effects())
-            || self.left.iter().any(|l| l.has_side_effects())
+        self.right.iter().any(|r| r.has_side_effects()) ||
+            self.left.iter().any(|l| l.has_side_effects())
     }
 }
 
@@ -62,7 +62,10 @@ impl LocalRw for Assign {
     }
 
     fn values_written(&self) -> Vec<&RcLocal> {
-        self.left.iter().flat_map(|l| l.values_written()).collect()
+        self.left
+            .iter()
+            .flat_map(|l| l.values_written())
+            .collect()
     }
 
     fn values_written_mut(&mut self) -> Vec<&mut RcLocal> {
@@ -75,11 +78,10 @@ impl LocalRw for Assign {
 
 impl fmt::Display for Assign {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        Formatter {
+        (Formatter {
             indentation_level: 0,
             indentation_mode: Default::default(),
             output: f,
-        }
-        .format_assign(self)
+        }).format_assign(self)
     }
 }

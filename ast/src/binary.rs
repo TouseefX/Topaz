@@ -1,8 +1,8 @@
 use std::fmt;
 
-use crate::{Literal, LocalRw, RValue, RcLocal, Reduce, SideEffects, Traverse};
+use crate::{ Literal, LocalRw, RValue, RcLocal, Reduce, SideEffects, Traverse };
 
-use super::{Unary, UnaryOperation};
+use super::{ Unary, UnaryOperation };
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Copy, Clone)]
 pub enum BinaryOperation {
@@ -28,40 +28,36 @@ impl BinaryOperation {
     pub fn is_comparator(&self) -> bool {
         matches!(
             self,
-            BinaryOperation::Equal
-                | BinaryOperation::NotEqual
-                | BinaryOperation::LessThanOrEqual
-                | BinaryOperation::GreaterThanOrEqual
-                | BinaryOperation::LessThan
-                | BinaryOperation::GreaterThan
+            BinaryOperation::Equal |
+                BinaryOperation::NotEqual |
+                BinaryOperation::LessThanOrEqual |
+                BinaryOperation::GreaterThanOrEqual |
+                BinaryOperation::LessThan |
+                BinaryOperation::GreaterThan
         )
     }
 }
 
 impl fmt::Display for BinaryOperation {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                BinaryOperation::Add => "+",
-                BinaryOperation::Sub => "-",
-                BinaryOperation::Mul => "*",
-                BinaryOperation::Div => "/",
-                BinaryOperation::Mod => "%",
-                BinaryOperation::Pow => "^",
-                BinaryOperation::Concat => "..",
-                BinaryOperation::Equal => "==",
-                BinaryOperation::NotEqual => "~=",
-                BinaryOperation::LessThanOrEqual => "<=",
-                BinaryOperation::GreaterThanOrEqual => ">=",
-                BinaryOperation::LessThan => "<",
-                BinaryOperation::GreaterThan => ">",
-                BinaryOperation::And => "and",
-                BinaryOperation::Or => "or",
-                BinaryOperation::IDiv => "//",
-            }
-        )
+        write!(f, "{}", match self {
+            BinaryOperation::Add => "+",
+            BinaryOperation::Sub => "-",
+            BinaryOperation::Mul => "*",
+            BinaryOperation::Div => "/",
+            BinaryOperation::Mod => "%",
+            BinaryOperation::Pow => "^",
+            BinaryOperation::Concat => "..",
+            BinaryOperation::Equal => "==",
+            BinaryOperation::NotEqual => "~=",
+            BinaryOperation::LessThanOrEqual => "<=",
+            BinaryOperation::GreaterThanOrEqual => ">=",
+            BinaryOperation::LessThan => "<",
+            BinaryOperation::GreaterThan => ">",
+            BinaryOperation::And => "and",
+            BinaryOperation::Or => "or",
+            BinaryOperation::IDiv => "//",
+        })
     }
 }
 
@@ -100,67 +96,65 @@ impl<'a: 'b, 'b> Reduce for Binary {
         // really anything without side effects should be true if l == r
         match (self.left.reduce(), self.right.reduce(), self.operation) {
             (
-                RValue::Unary(Unary {
-                    operation: UnaryOperation::Not,
-                    value: left,
-                }),
-                RValue::Unary(Unary {
-                    operation: UnaryOperation::Not,
-                    value: right,
-                }),
+                RValue::Unary(Unary { operation: UnaryOperation::Not, value: left }),
+                RValue::Unary(Unary { operation: UnaryOperation::Not, value: right }),
                 BinaryOperation::And | BinaryOperation::Or,
-            ) => Unary {
-                value: Box::new(
-                    Binary {
-                        left,
-                        right,
-                        operation: if self.operation == BinaryOperation::And {
-                            BinaryOperation::Or
-                        } else {
-                            BinaryOperation::And
-                        },
-                    }
-                    .into(),
-                ),
-                operation: UnaryOperation::Not,
-            }
-            .into(),
+            ) =>
+                (Unary {
+                    value: Box::new(
+                        (Binary {
+                            left,
+                            right,
+                            operation: if self.operation == BinaryOperation::And {
+                                BinaryOperation::Or
+                            } else {
+                                BinaryOperation::And
+                            },
+                        }).into()
+                    ),
+                    operation: UnaryOperation::Not,
+                }).into(),
             (
                 RValue::Literal(Literal::Boolean(left)),
                 RValue::Literal(Literal::Boolean(right)),
                 BinaryOperation::And | BinaryOperation::Or,
-            ) => Literal::Boolean(if self.operation == BinaryOperation::And {
-                left && right
-            } else {
-                left || right
-            })
-            .into(),
+            ) =>
+                Literal::Boolean(
+                    if self.operation == BinaryOperation::And {
+                        left && right
+                    } else {
+                        left || right
+                    }
+                ).into(),
             (
                 RValue::Literal(Literal::Boolean(left)),
                 right,
                 BinaryOperation::And | BinaryOperation::Or,
-            ) => match self.operation {
-                BinaryOperation::And if !left => RValue::Literal(Literal::Boolean(false)),
-                BinaryOperation::And => right.reduce(),
-                BinaryOperation::Or if left => RValue::Literal(Literal::Boolean(true)),
-                BinaryOperation::Or => right.reduce(),
-                _ => unreachable!(),
-            },
-            (left, right, BinaryOperation::And)
-                if !left.has_side_effects() && !right.has_side_effects() && left == right =>
-            {
+            ) =>
+                match self.operation {
+                    BinaryOperation::And if !left => RValue::Literal(Literal::Boolean(false)),
+                    BinaryOperation::And => right.reduce(),
+                    BinaryOperation::Or if left => RValue::Literal(Literal::Boolean(true)),
+                    BinaryOperation::Or => right.reduce(),
+                    _ => unreachable!(),
+                }
+            (left, right, BinaryOperation::And) if
+                !left.has_side_effects() &&
+                !right.has_side_effects() &&
+                left == right
+            => {
                 left
             }
             (
-                RValue::Binary(Binary {
-                    left:
-                        box value @ RValue::Unary(Unary {
-                            operation: UnaryOperation::Not,
-                            ..
-                        }),
-                    right: box RValue::Literal(Literal::Boolean(true)),
-                    operation: BinaryOperation::And,
-                }),
+                RValue::Binary(
+                    Binary {
+                        left: box value @ RValue::Unary(
+                            Unary { operation: UnaryOperation::Not, .. },
+                        ),
+                        right: box RValue::Literal(Literal::Boolean(true)),
+                        operation: BinaryOperation::And,
+                    },
+                ),
                 RValue::Literal(Literal::Boolean(false)),
                 BinaryOperation::Or,
             ) => value,
@@ -170,98 +164,96 @@ impl<'a: 'b, 'b> Reduce for Binary {
                 RValue::Literal(Literal::String(left)),
                 RValue::Literal(Literal::String(right)),
                 BinaryOperation::Concat,
-            ) => RValue::Literal(Literal::String(
-                left.into_iter().chain(right.into_iter()).collect(),
-            )),
-            (left, right, operation) => Self {
-                left: Box::new(left),
-                right: Box::new(right),
-                operation,
-            }
-            .into(),
+            ) =>
+                RValue::Literal(
+                    Literal::String(left.into_iter().chain(right.into_iter()).collect())
+                ),
+            (left, right, operation) =>
+                (Self {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    operation,
+                }).into(),
         }
     }
 
     fn reduce_condition(self) -> RValue {
-        let (left, right) = if matches!(self.operation, BinaryOperation::And | BinaryOperation::Or)
-        {
+        let (left, right) = if matches!(self.operation, BinaryOperation::And | BinaryOperation::Or) {
             (self.left.reduce_condition(), self.right.reduce_condition())
         } else {
             (self.left.reduce(), self.right.reduce())
         };
         match (left, right, self.operation) {
             (
-                RValue::Unary(Unary {
-                    operation: UnaryOperation::Not,
-                    value: left,
-                }),
-                RValue::Unary(Unary {
-                    operation: UnaryOperation::Not,
-                    value: right,
-                }),
+                RValue::Unary(Unary { operation: UnaryOperation::Not, value: left }),
+                RValue::Unary(Unary { operation: UnaryOperation::Not, value: right }),
                 BinaryOperation::And | BinaryOperation::Or,
-            ) => Unary {
-                value: Box::new(
-                    Binary {
-                        left,
-                        right,
-                        operation: if self.operation == BinaryOperation::And {
-                            BinaryOperation::Or
-                        } else {
-                            BinaryOperation::And
-                        },
-                    }
-                    .into(),
-                ),
-                operation: UnaryOperation::Not,
-            }
-            .into(),
+            ) =>
+                (Unary {
+                    value: Box::new(
+                        (Binary {
+                            left,
+                            right,
+                            operation: if self.operation == BinaryOperation::And {
+                                BinaryOperation::Or
+                            } else {
+                                BinaryOperation::And
+                            },
+                        }).into()
+                    ),
+                    operation: UnaryOperation::Not,
+                }).into(),
             (
                 RValue::Literal(Literal::Boolean(left)),
                 RValue::Literal(Literal::Boolean(right)),
                 BinaryOperation::And | BinaryOperation::Or,
-            ) => Literal::Boolean(if self.operation == BinaryOperation::And {
-                left && right
-            } else {
-                left || right
-            })
-            .into(),
+            ) =>
+                Literal::Boolean(
+                    if self.operation == BinaryOperation::And {
+                        left && right
+                    } else {
+                        left || right
+                    }
+                ).into(),
             (
                 RValue::Literal(Literal::Boolean(left)),
                 right,
                 BinaryOperation::And | BinaryOperation::Or,
-            ) => match self.operation {
-                BinaryOperation::And if !left => RValue::Literal(Literal::Boolean(false)),
-                BinaryOperation::And => right.reduce(),
-                BinaryOperation::Or if left => RValue::Literal(Literal::Boolean(true)),
-                BinaryOperation::Or => right.reduce(),
-                _ => unreachable!(),
-            },
+            ) =>
+                match self.operation {
+                    BinaryOperation::And if !left => RValue::Literal(Literal::Boolean(false)),
+                    BinaryOperation::And => right.reduce(),
+                    BinaryOperation::Or if left => RValue::Literal(Literal::Boolean(true)),
+                    BinaryOperation::Or => right.reduce(),
+                    _ => unreachable!(),
+                }
             (
                 left,
                 RValue::Literal(Literal::Boolean(right)),
                 BinaryOperation::And | BinaryOperation::Or,
-            ) => match self.operation {
-                BinaryOperation::And if !right => RValue::Literal(Literal::Boolean(false)),
-                BinaryOperation::And => left.reduce(),
-                BinaryOperation::Or if right => RValue::Literal(Literal::Boolean(true)),
-                BinaryOperation::Or => left.reduce(),
-                _ => unreachable!(),
-            },
+            ) =>
+                match self.operation {
+                    BinaryOperation::And if !right => RValue::Literal(Literal::Boolean(false)),
+                    BinaryOperation::And => left.reduce(),
+                    BinaryOperation::Or if right => RValue::Literal(Literal::Boolean(true)),
+                    BinaryOperation::Or => left.reduce(),
+                    _ => unreachable!(),
+                }
             // TODO: concat numbers
             (
                 RValue::Literal(Literal::String(left)),
                 RValue::Literal(Literal::String(right)),
                 BinaryOperation::Concat,
-            ) => RValue::Literal(Literal::String(
-                left.into_iter().chain(right.into_iter()).collect(),
-            )),
-            (left, right, operation) => Self {
-                left: Box::new(left),
-                right: Box::new(right),
-                operation,
-            }
-            .into(),
+            ) =>
+                RValue::Literal(
+                    Literal::String(left.into_iter().chain(right.into_iter()).collect())
+                ),
+            (left, right, operation) =>
+                (Self {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    operation,
+                }).into(),
         }
     }
 }
@@ -278,13 +270,13 @@ impl Binary {
     pub fn precedence(&self) -> usize {
         match self.operation {
             BinaryOperation::Pow => 8,
-            BinaryOperation::Mul
+            | BinaryOperation::Mul
             | BinaryOperation::Div
             | BinaryOperation::Mod
             | BinaryOperation::IDiv => 6,
             BinaryOperation::Add | BinaryOperation::Sub => 5,
             BinaryOperation::Concat => 4,
-            BinaryOperation::LessThan
+            | BinaryOperation::LessThan
             | BinaryOperation::GreaterThan
             | BinaryOperation::LessThanOrEqual
             | BinaryOperation::GreaterThanOrEqual
@@ -296,30 +288,23 @@ impl Binary {
     }
 
     pub fn right_associative(&self) -> bool {
-        matches!(
-            self.operation,
-            BinaryOperation::Pow | BinaryOperation::Concat
-        )
+        matches!(self.operation, BinaryOperation::Pow | BinaryOperation::Concat)
     }
 
     pub fn left_group(&self) -> bool {
-        self.precedence() > self.left.precedence()
-            || (self.precedence() == self.left.precedence() && self.right_associative())
+        self.precedence() > self.left.precedence() ||
+            (self.precedence() == self.left.precedence() && self.right_associative())
     }
 
     pub fn right_group(&self) -> bool {
-        self.precedence() > self.right.precedence()
-            || (self.precedence() == self.right.precedence() && !self.right_associative())
+        self.precedence() > self.right.precedence() ||
+            (self.precedence() == self.right.precedence() && !self.right_associative())
     }
 }
 
 impl LocalRw for Binary {
     fn values_read(&self) -> Vec<&RcLocal> {
-        self.left
-            .values_read()
-            .into_iter()
-            .chain(self.right.values_read().into_iter())
-            .collect()
+        self.left.values_read().into_iter().chain(self.right.values_read().into_iter()).collect()
     }
 
     fn values_read_mut(&mut self) -> Vec<&mut RcLocal> {
@@ -334,11 +319,7 @@ impl LocalRw for Binary {
 impl fmt::Display for Binary {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let parentheses = |group: bool, rvalue: &RValue| {
-            if group {
-                format!("({})", rvalue)
-            } else {
-                format!("{}", rvalue)
-            }
+            if group { format!("({})", rvalue) } else { format!("{}", rvalue) }
         };
 
         write!(
@@ -346,7 +327,7 @@ impl fmt::Display for Binary {
             "{} {} {}",
             parentheses(self.left_group(), self.left.as_ref()),
             self.operation,
-            parentheses(self.right_group(), self.right.as_ref()),
+            parentheses(self.right_group(), self.right.as_ref())
         )
     }
 }

@@ -7,6 +7,10 @@ pub use decompile::*;
 mod serve;
 pub use serve::*;
 
+fn default_encode_key() -> u8 {
+    0
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     /// Decompile a single bytecode file, either raw or base64 encoded
@@ -35,11 +39,11 @@ pub enum Commands {
         port: u16,
 
         /// Whether to allow decompiling Luau bytecode
-        #[arg(short, long, default_value_t = true)]
+        #[arg(short = 'u', long, default_value_t = true)]
         luau: bool,
 
         /// Whether to allow decompiling Lua 5.1 bytecode
-        #[arg(short, long, default_value_t = false)]
+        #[arg(short = 'l', long, default_value_t = false)]
         lua51: bool,
     },
 }

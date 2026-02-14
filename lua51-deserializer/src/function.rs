@@ -1,14 +1,9 @@
-use nom::{
-    combinator::opt,
-    multi::count,
-    number::complete::{le_u32, le_u8},
-    IResult,
-};
+use nom::{ combinator::opt, multi::count, number::complete::{ le_u32, le_u8 }, IResult };
 
 use crate::{
-    instruction::{position::Position, Instruction},
+    instruction::{ position::Position, Instruction },
     local::Local,
-    value::{self, Value},
+    value::{ self, Value },
 };
 
 #[derive(Debug)]

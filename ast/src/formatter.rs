@@ -1,14 +1,30 @@
 use std::iter;
-use std::{
-    borrow::Cow,
-    fmt::{self},
-};
+use std::{ borrow::Cow, fmt::{ self } };
 
 use itertools::Itertools;
 
 use crate::{
-    Assign, Binary, BinaryOperation, Block, Call, Closure, GenericFor, If, Index, LValue, Literal,
-    MethodCall, NumericFor, RValue, Repeat, Return, Select, Statement, Table, Unary, While,
+    Assign,
+    Binary,
+    BinaryOperation,
+    Block,
+    Call,
+    Closure,
+    GenericFor,
+    If,
+    Index,
+    LValue,
+    Literal,
+    MethodCall,
+    NumericFor,
+    RValue,
+    Repeat,
+    Return,
+    Select,
+    Statement,
+    Table,
+    Unary,
+    While,
 };
 
 pub enum IndentationMode {
@@ -67,7 +83,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     pub fn format(
         main: &Block,
         output: &'a mut W,
-        indentation_mode: IndentationMode,
+        indentation_mode: IndentationMode
     ) -> fmt::Result {
         let mut formatter = Self {
             indentation_level: 0,
@@ -78,20 +94,37 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     }
 
     fn indent(&mut self) -> fmt::Result {
-        self.indentation_mode
-            .display(&mut self.output, self.indentation_level)
+        self.indentation_mode.display(&mut self.output, self.indentation_level)
     }
 
-    // (function() end)()
-    // (function() end)[1]
     fn should_wrap_left_rvalue(value: &RValue) -> bool {
         !matches!(
             value,
-            RValue::Local(_)
-                | RValue::Global(_)
-                | RValue::Index(_)
-                | RValue::Select(Select::Call(_) | Select::MethodCall(_))
+            RValue::Local(_) |
+                RValue::Global(_) |
+                RValue::Index(_) |
+                RValue::Select(Select::Call(_) | Select::MethodCall(_))
         )
+    }
+
+    fn clean_name(name: &str) -> String {
+        let prefixes = ["t_", "v_", "l_", "g_", "f_", "tmp_", "var_", "val_"];
+
+        for prefix in &prefixes {
+            if name.starts_with(prefix) {
+                let rest = &name[prefix.len()..];
+                if !rest.is_empty() && rest.chars().next().unwrap().is_alphabetic() {
+                    return rest.to_string();
+                }
+            }
+        }
+
+        let cleaned = name.replace('_', "");
+        if cleaned.is_empty() || cleaned == name {
+            name.to_string()
+        } else {
+            cleaned
+        }
     }
 
     fn format_block(&mut self, block: &Block) -> fmt::Result {
@@ -101,95 +134,104 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         Ok(())
     }
 
-fn format_block_no_indent(&mut self, block: &Block) -> fmt::Result {
-    let mut prev_statement_type: Option<&str> = None;
-    
-    for (i, statement) in block.iter().enumerate() {
-        if i != 0 {
-            writeln!(self.output)?;
-            
-            let current_type = match statement {
-                Statement::If(_) | Statement::While(_) | Statement::Repeat(_) | 
-                Statement::NumericFor(_) | Statement::GenericFor(_) => "control",
-                Statement::Assign(a) if a.prefix => "local",
-                Statement::Assign(_) => "assign",
-                Statement::Return(_) => "return",
-                Statement::Call(_) | Statement::MethodCall(_) => "call",
-                Statement::Comment(_) => "comment",
-                _ => "other",
-            };
-            
-            if let Some(prev) = prev_statement_type {
-                if prev != current_type && prev != "comment" && current_type != "comment" {
-                    writeln!(self.output)?;
+    fn format_block_no_indent(&mut self, block: &Block) -> fmt::Result {
+        let mut prev_statement_type: Option<&str> = None;
+
+        for (i, statement) in block.iter().enumerate() {
+            if i != 0 {
+                writeln!(self.output)?;
+
+                let current_type = match statement {
+                    | Statement::If(_)
+                    | Statement::While(_)
+                    | Statement::Repeat(_)
+                    | Statement::NumericFor(_)
+                    | Statement::GenericFor(_) => "control",
+                    Statement::Assign(a) if a.prefix => "local",
+                    Statement::Assign(_) => "assign",
+                    Statement::Return(_) => "return",
+                    Statement::Call(_) | Statement::MethodCall(_) => "call",
+                    Statement::Comment(_) => "comment",
+                    _ => "other",
+                };
+
+                if let Some(prev) = prev_statement_type {
+                    if prev != current_type && prev != "comment" && current_type != "comment" {
+                        writeln!(self.output)?;
+                    }
                 }
-            }
-            
-            prev_statement_type = Some(current_type);
-        }
-        
-        self.format_statement(statement)?;
-        if let Some(next_statement) =
-            block.iter().skip(i + 1).find(|s| s.as_comment().is_none())
-        {
-            fn is_ambiguous(r: &RValue) -> bool {
-                match r {
-                    RValue::Local(_)
-                    | RValue::Global(_)
-                    | RValue::Index(_)
-                    | RValue::Call(_)
-                    | RValue::MethodCall(_)
-                    | RValue::Select(Select::Call(_) | Select::MethodCall(_)) => true,
-                    RValue::Binary(binary) => is_ambiguous(&binary.right),
-                    _ => false,
-                }
+
+                prev_statement_type = Some(current_type);
             }
 
-            let disambiguate = match statement {
-                Statement::Call(_) | Statement::MethodCall(_) => true,
-                Statement::Repeat(repeat) => is_ambiguous(&repeat.condition),
-                Statement::Assign(Assign { right: list, .. })
-                | Statement::Return(Return { values: list }) => {
-                    if let Some(last) = list.last() {
-                        is_ambiguous(last)
-                    } else {
-                        false
+            self.format_statement(statement)?;
+            if
+                let Some(next_statement) = block
+                    .iter()
+                    .skip(i + 1)
+                    .find(|s| s.as_comment().is_none())
+            {
+                fn is_ambiguous(r: &RValue) -> bool {
+                    match r {
+                        | RValue::Local(_)
+                        | RValue::Global(_)
+                        | RValue::Index(_)
+                        | RValue::Call(_)
+                        | RValue::MethodCall(_)
+                        | RValue::Select(Select::Call(_) | Select::MethodCall(_)) => true,
+                        RValue::Binary(binary) => is_ambiguous(&binary.right),
+                        _ => false,
                     }
                 }
-                Statement::Goto(_) | Statement::Continue(_) | Statement::Break(_) => true,
-                _ => false,
-            };
-            let disambiguate = disambiguate
-                && match next_statement {
-                    Statement::Assign(Assign {
-                        left,
-                        prefix: false,
-                        ..
-                    }) => {
-                        if let Some(index) = left[0].as_index() {
-                            Self::should_wrap_left_rvalue(&index.left)
-                        } else {
-                            false
-                        }
+
+                let disambiguate = match statement {
+                    Statement::Call(_) | Statement::MethodCall(_) => true,
+                    Statement::Repeat(repeat) => is_ambiguous(&repeat.condition),
+                    | Statement::Assign(Assign { right: list, .. })
+                    | Statement::Return(Return { values: list }) => {
+                        if let Some(last) = list.last() { is_ambiguous(last) } else { false }
                     }
-                    Statement::Call(Call { value, .. })
-                    | Statement::MethodCall(MethodCall { value, .. }) => {
-                        Self::should_wrap_left_rvalue(value)
-                    }
-                    Statement::Comment(_) => unimplemented!(),
+                    Statement::Goto(_) | Statement::Continue(_) | Statement::Break(_) => true,
                     _ => false,
                 };
-            if disambiguate {
-                write!(self.output, ";")?;
+                let disambiguate =
+                    disambiguate &&
+                    (match next_statement {
+                        Statement::Assign(Assign { left, prefix: false, .. }) => {
+                            if let Some(index) = left[0].as_index() {
+                                Self::should_wrap_left_rvalue(&index.left)
+                            } else {
+                                false
+                            }
+                        }
+                        | Statement::Call(Call { value, .. })
+                        | Statement::MethodCall(MethodCall { value, .. }) => {
+                            Self::should_wrap_left_rvalue(value)
+                        }
+                        Statement::Comment(_) => unimplemented!(),
+                        _ => false,
+                    });
+                if disambiguate {
+                    write!(self.output, ";")?;
+                }
             }
         }
+        Ok(())
     }
-    Ok(())
-}
 
     fn format_lvalue(&mut self, lvalue: &LValue) -> fmt::Result {
         match lvalue {
             LValue::Index(index) => self.format_index(index),
+            LValue::Local(local) => {
+                let name = local.to_string();
+                let cleaned = Self::clean_name(&name);
+                write!(self.output, "{}", cleaned)
+            }
+            LValue::Global(global) => {
+                let name = global.to_string();
+                let cleaned = Self::clean_name(&name);
+                write!(self.output, "{}", cleaned)
+            }
             _ => write!(self.output, "{}", lvalue),
         }
     }
@@ -199,8 +241,7 @@ fn format_block_no_indent(&mut self, block: &Block) -> fmt::Result {
             return true;
         }
 
-        let keys_vec = table
-            .0
+        let keys_vec = table.0
             .iter()
             .filter(|(k, _)| !k.is_none())
             .map(|(k, _)| k)
@@ -208,10 +249,13 @@ fn format_block_no_indent(&mut self, block: &Block) -> fmt::Result {
         if keys_vec.is_empty() {
             false
         } else {
-            keys_vec.iter().enumerate().all(|(i, k)| {
-                matches!(k, Some(RValue::Literal(Literal::Number(x)))
+            keys_vec
+                .iter()
+                .enumerate()
+                .all(|(i, k)| {
+                    matches!(k, Some(RValue::Literal(Literal::Number(x)))
                         if (x - 1f64) as usize == i)
-            })
+                })
         }
     }
 
@@ -219,81 +263,83 @@ fn format_block_no_indent(&mut self, block: &Block) -> fmt::Result {
         table.0.iter().any(|(_, v)| matches!(v, RValue::Table(_x)))
     }
 
-pub(crate) fn format_table(&mut self, table: &Table) -> fmt::Result {
-    if table.0.is_empty() {
-        return write!(self.output, "{{}}");
-    }
-
-    let sequential_keys = Self::are_table_keys_sequential(table);
-    let should_format = (!sequential_keys || table.0.len() > 3) || Self::contains_table(table);
-    
-    write!(self.output, "{{")?;
-    
-    if should_format {
-        writeln!(self.output)?;
-        self.indentation_level += 1;
-    }
-    
-    for (index, (key, value)) in table.0.iter().enumerate() {
-        if should_format {
-            self.indent()?;
-        } else if index == 0 {
-            write!(self.output, " ")?;
+    pub(crate) fn format_table(&mut self, table: &Table) -> fmt::Result {
+        if table.0.is_empty() {
+            return write!(self.output, "{{}}");
         }
-        
-        let is_last = index + 1 == table.0.len();
-        
-        if is_last && key.is_none() {
-            let wrap = matches!(value, RValue::Select(_));
-            if wrap {
-                write!(self.output, "(")?;
+
+        let sequential_keys = Self::are_table_keys_sequential(table);
+        let should_format = !sequential_keys || table.0.len() > 3 || Self::contains_table(table);
+
+        write!(self.output, "{{")?;
+
+        if should_format {
+            writeln!(self.output)?;
+            self.indentation_level += 1;
+        }
+
+        for (index, (key, value)) in table.0.iter().enumerate() {
+            if should_format {
+                self.indent()?;
+            } else if index == 0 {
+                write!(self.output, " ")?;
             }
-            self.format_rvalue(value)?;
-            if wrap {
-                write!(self.output, ")")?;
-            }
-        } else {
-            if !sequential_keys && key.is_some() {
-                let key_value = key.as_ref().unwrap();
-                if let RValue::Literal(crate::Literal::String(field)) = key_value {
-                    if Self::is_valid_name(field) {
-                        write!(self.output, "{} = ", std::str::from_utf8(field).unwrap())?;
+
+            let is_last = index + 1 == table.0.len();
+
+            if is_last && key.is_none() {
+                let wrap = matches!(value, RValue::Select(_));
+                if wrap {
+                    write!(self.output, "(")?;
+                }
+                self.format_rvalue(value)?;
+                if wrap {
+                    write!(self.output, ")")?;
+                }
+            } else {
+                if !sequential_keys && key.is_some() {
+                    let key_value = key.as_ref().unwrap();
+                    if let RValue::Literal(crate::Literal::String(field)) = key_value {
+                        if Self::is_valid_name(field.as_slice()) {
+                            let field_str = std::str::from_utf8(field.as_slice()).unwrap();
+                            let cleaned = Self::clean_name(field_str);
+                            write!(self.output, "{} = ", cleaned)?;
+                        } else {
+                            write!(self.output, "[")?;
+                            self.format_rvalue(key_value)?;
+                            write!(self.output, "] = ")?;
+                        }
                     } else {
                         write!(self.output, "[")?;
                         self.format_rvalue(key_value)?;
                         write!(self.output, "] = ")?;
                     }
-                } else {
-                    write!(self.output, "[")?;
-                    self.format_rvalue(key_value)?;
-                    write!(self.output, "] = ")?;
+                }
+
+                self.format_rvalue(value)?;
+
+                if !is_last {
+                    write!(self.output, ",")?;
+                }
+
+                if should_format {
+                    writeln!(self.output)?;
+                } else if !is_last {
+                    write!(self.output, " ")?;
                 }
             }
-            
-            self.format_rvalue(value)?;
-            
-            if !is_last {
-                write!(self.output, ",")?;
-            }
-            
-            if should_format {
-                writeln!(self.output)?;
-            } else if !is_last {
-                write!(self.output, " ")?;
-            }
         }
+
+        if should_format {
+            self.indentation_level -= 1;
+            writeln!(self.output)?;
+            self.indent()?;
+        } else {
+            write!(self.output, " ")?;
+        }
+
+        write!(self.output, "}}")
     }
-    
-    if should_format {
-        self.indentation_level -= 1;
-        writeln!(self.output)?;
-        self.indent()?;
-    } else {
-        write!(self.output, " ")?;
-    }
-    
-    write!(self.output, "}}")
-}
 
     pub(crate) fn format_unary(&mut self, unary: &Unary) -> fmt::Result {
         write!(self.output, "{}", unary.operation)?;
@@ -327,56 +373,30 @@ pub(crate) fn format_table(&mut self, table: &Table) -> fmt::Result {
 
     fn format_closure_parameters(&mut self, closure: &Closure) -> fmt::Result {
         let function = closure.function.lock();
-        write!(
-            self.output,
-            "{}",
-            if function.is_variadic {
-                function
-                    .parameters
-                    .iter()
-                    .map(|x| x.to_string())
-                    .chain(std::iter::once("...".into()))
-                    .join(", ")
+        let params: Vec<String> = function.parameters
+            .iter()
+            .map(|p| {
+                let name = p.to_string();
+                Self::clean_name(&name)
+            })
+            .collect();
+
+        if function.is_variadic {
+            let joined = params.join(", ");
+            if joined.is_empty() {
+                write!(self.output, "...")
             } else {
-                function.parameters.iter().join(", ")
+                write!(self.output, "{}, ...", joined)
             }
-        )
+        } else {
+            write!(self.output, "{}", params.join(", "))
+        }
     }
 
     fn format_closure_body(&mut self, closure: &Closure) -> fmt::Result {
         let function = closure.function.lock();
         if !function.body.is_empty() {
             writeln!(self.output)?;
-            self.indentation_level += 1;
-            // if closure.name.is_some() {
-            //     self.indent()?;
-            //     writeln!(self.output, "-- function name: {}", closure.name.as_ref().unwrap())?;
-            // }
-            // if closure.line_defined.is_some() {
-            //     self.indent()?;
-            //     writeln!(self.output, "-- line defined: {}", closure.line_defined.as_ref().unwrap())?;
-            // }
-            if !closure.upvalues.is_empty() {
-                self.indent()?;
-              //  write!(self.output, "-- upvalues: ")?;
-                let mut it = closure.upvalues.iter().peekable();
-                while let Some(uv) = it.next() {
-                    match uv {
-                        crate::Upvalue::Copy(copy) => {
-                            //write!(self.output, "(copy) {}", copy)?;
-                        }
-                        crate::Upvalue::Ref(lref) => {
-                             //write!(self.output, "(ref) {}", lref)?;
-                        }
-                    }
-                    if it.peek().is_some() {
-                       // write!(self.output, ", ")?;
-                    }
-                }
-       //         writeln!(self.output)?;
-            }
-            self.indentation_level -= 1;
-
             self.format_block(&function.body)?;
             writeln!(self.output)?;
             self.indent()
@@ -394,7 +414,9 @@ pub(crate) fn format_table(&mut self, table: &Table) -> fmt::Result {
     }
 
     fn format_named_function(&mut self, name: &LValue, closure: &Closure) -> fmt::Result {
-        write!(self.output, "function {}(", name)?;
+        write!(self.output, "function ")?;
+        self.format_lvalue(name)?;
+        write!(self.output, "(")?;
         self.format_closure_parameters(closure)?;
         write!(self.output, ")")?;
         self.format_closure_body(closure)?;
@@ -412,26 +434,36 @@ pub(crate) fn format_table(&mut self, table: &Table) -> fmt::Result {
             RValue::Unary(unary) => self.format_unary(unary),
             RValue::Binary(binary) => self.format_binary(binary),
             RValue::Closure(closure) => self.format_closure(closure),
+            RValue::Local(local) => {
+                let name = local.to_string();
+                let cleaned = Self::clean_name(&name);
+                write!(self.output, "{}", cleaned)
+            }
+            RValue::Global(global) => {
+                let name = global.to_string();
+                let cleaned = Self::clean_name(&name);
+                write!(self.output, "{}", cleaned)
+            }
             RValue::Literal(Literal::Number(n)) if n.is_infinite() => {
-                // TODO: only insert parentheses when necessary
                 write!(self.output, "(")?;
-                self.format_binary(&Binary::new(
-                    Literal::Number(if n.is_sign_positive() { 1.0 } else { -1.0 }).into(),
-                    Literal::Number(0.0).into(),
-                    BinaryOperation::Div,
-                ))?;
+                self.format_binary(
+                    &Binary::new(
+                        Literal::Number(if n.is_sign_positive() { 1.0 } else { -1.0 }).into(),
+                        Literal::Number(0.0).into(),
+                        BinaryOperation::Div
+                    )
+                )?;
                 write!(self.output, ")")
             }
             RValue::Literal(Literal::Number(n)) if n.is_nan() => {
-                // TODO: check that nan is appropriate for platform
-                // assert_eq!(n.to_bits(), 0x7ff8000000000000);
-                // TODO: only insert parentheses when necessary
                 write!(self.output, "(")?;
-                self.format_binary(&Binary::new(
-                    Literal::Number(0.0).into(),
-                    Literal::Number(0.0).into(),
-                    BinaryOperation::Div,
-                ))?;
+                self.format_binary(
+                    &Binary::new(
+                        Literal::Number(0.0).into(),
+                        Literal::Number(0.0).into(),
+                        BinaryOperation::Div
+                    )
+                )?;
                 write!(self.output, ")")
             }
             _ => write!(self.output, "{}", rvalue),
@@ -456,28 +488,58 @@ pub(crate) fn format_table(&mut self, table: &Table) -> fmt::Result {
         }
         Ok(())
     }
+
     pub(crate) fn is_valid_name(name: &[u8]) -> bool {
-        if !(name
-            .iter()
-            .enumerate()
-            .all(|(i, &c)| (i != 0 && c.is_ascii_digit()) || c.is_ascii_alphabetic() || c == b'_'))
+        if
+            !name
+                .iter()
+                .enumerate()
+                .all(
+                    |(i, &c)|
+                        (i != 0 && c.is_ascii_digit()) || c.is_ascii_alphabetic() || c == b'_'
+                )
         {
             return false;
         }
-        // TODO: Consider adding "goto" to reserved keywords
+
         const RESERVED_KEYWORDS: &[&str] = &[
-            "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
-            "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
+            "and",
+            "break",
+            "do",
+            "else",
+            "elseif",
+            "end",
+            "false",
+            "for",
+            "function",
+            "goto",
+            "if",
+            "in",
+            "local",
+            "nil",
+            "not",
+            "or",
+            "repeat",
+            "return",
+            "then",
+            "true",
+            "until",
+            "while",
         ];
 
-        let name_str = std::str::from_utf8(name).unwrap_or("");
+        let name_str = match std::str::from_utf8(name) {
+            Ok(s) => s,
+            Err(_) => {
+                return false;
+            }
+        };
+
         if RESERVED_KEYWORDS.contains(&name_str) {
             return false;
         }
-        return true;
+        true
     }
 
-    // TODO: PERF: Cow like from_utf8_lossy
     pub(crate) fn escape_string(string: &[u8]) -> Cow<str> {
         let mut owned: Option<String> = None;
         let mut iter = string.iter().enumerate().peekable();
@@ -488,11 +550,15 @@ pub(crate) fn format_table(&mut self, table: &Table) -> fmt::Result {
                 }
             } else {
                 if owned.is_none() {
-                    // TODO: PERF: unchecked?
-                    owned = Some(std::str::from_utf8(&string[..i]).unwrap().to_string());
-                    // TODO: do we want to be multiplying by 2 here?
-                    // TODO: PERF: String::with_capacity + push_str to avoid an allocation
-                    owned.as_mut().unwrap().reserve((string.len() - i) * 2);
+                    let prefix = match std::str::from_utf8(&string[..i]) {
+                        Ok(s) => s.to_string(),
+                        Err(_) => String::new(),
+                    };
+
+                    let capacity = prefix.len() + (string.len() - i) * 2;
+                    let mut new_owned = String::with_capacity(capacity);
+                    new_owned.push_str(&prefix);
+                    owned = Some(new_owned);
                 }
                 let owned = owned.as_mut().unwrap();
                 match c {
@@ -507,22 +573,25 @@ pub(crate) fn format_table(&mut self, table: &Table) -> fmt::Result {
                         let mut buffer = itoa::Buffer::new();
                         let printed = buffer.format(c);
                         owned.push('\\');
-                        if printed.len() != 3
-                            && let Some((_, next)) = iter.peek()
-                            && next.is_ascii_digit()
+                        if
+                            printed.len() != 3 &&
+                            let Some((_, next)) = iter.peek() &&
+                            next.is_ascii_digit()
                         {
                             owned.extend(iter::repeat('0').take(3 - printed.len()));
                         }
                         owned.push_str(printed);
                     }
-                };
+                }
             }
         }
         if let Some(owned) = owned {
             owned.into()
         } else {
-            // TODO: PERF: unchecked?
-            std::str::from_utf8(string).unwrap().into()
+            match std::str::from_utf8(string) {
+                Ok(s) => s.into(),
+                Err(_) => String::from_utf8_lossy(string),
+            }
         }
     }
 
@@ -537,8 +606,12 @@ pub(crate) fn format_table(&mut self, table: &Table) -> fmt::Result {
         }
 
         match index.right.as_ref() {
-            RValue::Literal(super::Literal::String(field)) if Self::is_valid_name(field) => {
-                write!(self.output, ".{}", std::str::from_utf8(field).unwrap())
+            RValue::Literal(super::Literal::String(field)) if
+                Self::is_valid_name(field.as_slice())
+            => {
+                let field_str = std::str::from_utf8(field.as_slice()).unwrap();
+                let cleaned = Self::clean_name(field_str);
+                write!(self.output, ".{}", cleaned)
             }
             _ => {
                 write!(self.output, "[")?;
@@ -573,102 +646,119 @@ pub(crate) fn format_table(&mut self, table: &Table) -> fmt::Result {
             write!(self.output, ")")?;
         }
 
-        write!(self.output, ":{}", method_call.method)?;
+        let method_name = method_call.method.to_string();
+        let cleaned = Self::clean_name(&method_name);
+        write!(self.output, ":{}", cleaned)?;
 
         write!(self.output, "(")?;
         self.format_arg_list(&method_call.arguments)?;
         write!(self.output, ")")
     }
 
-pub(crate) fn format_if(&mut self, r#if: &If) -> fmt::Result {
-    write!(self.output, "if ")?;
-    self.format_rvalue(&r#if.condition)?;
-    writeln!(self.output, " then")?;
+    pub(crate) fn format_if(&mut self, r#if: &If) -> fmt::Result {
+        write!(self.output, "if ")?;
+        self.format_rvalue(&r#if.condition)?;
+        writeln!(self.output, " then")?;
 
-    let then_block = r#if.then_block.lock();
-    if !then_block.is_empty() {
-        self.format_block(&then_block)?;
-        writeln!(self.output)?;
-    }
-
-    let else_block = r#if.else_block.lock();
-    if !else_block.is_empty() {
-        self.indent()?;
-        if let Some(else_if) = else_block.iter().exactly_one().ok().and_then(|s| s.as_if()) {
-            write!(self.output, "else")?;
-            return self.format_if(else_if);
+        let then_block = r#if.then_block.lock();
+        if !then_block.is_empty() {
+            self.format_block(&then_block)?;
+            writeln!(self.output)?;
         }
-        writeln!(self.output, "else")?;
-        self.format_block(&else_block)?;
-        writeln!(self.output)?;
-    }
 
-    self.indent()?;
-    write!(self.output, "end")
-}
-
-pub(crate) fn format_assign(&mut self, assign: &Assign) -> fmt::Result {
-    if assign.prefix {
-        write!(self.output, "local ")?;
-    }
-
-    if assign.left.len() == 1
-        && assign.right.len() == 1
-        && let RValue::Closure(closure) = &assign.right[0]
-    {
-        let left = &assign.left[0];
-        if assign.prefix || left.as_global().is_some() || {
-            if let LValue::Index(index) = left {
-                let mut index = index;
-                let mut valid = true;
-                loop {
-                    if let box RValue::Literal(Literal::String(key)) = &index.right
-                        && Self::is_valid_name(key)
-                    {
-                        match index.left {
-                            box RValue::Index(ref i) => {
-                                index = i;
-                                continue;
-                            }
-                            box RValue::Global(_) | box RValue::Local(_) => {}
-                            _ => valid = false,
-                        }
-                    } else {
-                        valid = false;
-                    }
-                    break;
-                }
-                valid
-            } else {
-                false
+        let else_block = r#if.else_block.lock();
+        if !else_block.is_empty() {
+            self.indent()?;
+            if
+                let Some(else_if) = else_block
+                    .iter()
+                    .exactly_one()
+                    .ok()
+                    .and_then(|s| s.as_if())
+            {
+                write!(self.output, "else")?;
+                return self.format_if(else_if);
             }
-        } {
-            return self.format_named_function(left, closure);
+            writeln!(self.output, "else")?;
+            self.format_block(&else_block)?;
+            writeln!(self.output)?;
         }
+
+        self.indent()?;
+        write!(self.output, "end")
     }
 
-    for (i, lvalue) in assign.left.iter().enumerate() {
-        if i != 0 {
-            write!(self.output, ", ")?;
+    pub(crate) fn format_assign(&mut self, assign: &Assign) -> fmt::Result {
+        if assign.prefix {
+            write!(self.output, "local ")?;
         }
-        self.format_lvalue(lvalue)?;
-    }
 
-    if !assign.right.is_empty() {
-        write!(self.output, " = ")?;
-        
-        for (i, rvalue) in assign.right.iter().enumerate() {
+        if
+            assign.left.len() == 1 &&
+            assign.right.len() == 1 &&
+            let RValue::Closure(closure) = &assign.right[0]
+        {
+            let left = &assign.left[0];
+            if
+                assign.prefix ||
+                left.as_global().is_some() ||
+                ({
+                    if let LValue::Index(index) = left {
+                        let mut index = index;
+                        let mut valid = true;
+                        loop {
+                            if let RValue::Literal(Literal::String(key)) = index.right.as_ref() {
+                                if Self::is_valid_name(key.as_slice()) {
+                                    match index.left.as_ref() {
+                                        RValue::Index(i) => {
+                                            index = i;
+                                            continue;
+                                        }
+                                        RValue::Global(_) | RValue::Local(_) => {}
+                                        _ => {
+                                            valid = false;
+                                        }
+                                    }
+                                } else {
+                                    valid = false;
+                                }
+                            } else {
+                                valid = false;
+                            }
+                            break;
+                        }
+                        valid
+                    } else {
+                        false
+                    }
+                })
+            {
+                return self.format_named_function(left, closure);
+            }
+        }
+
+        for (i, lvalue) in assign.left.iter().enumerate() {
             if i != 0 {
                 write!(self.output, ", ")?;
             }
-            self.format_rvalue(rvalue)?;
+            self.format_lvalue(lvalue)?;
         }
-    } else {
-        assert!(assign.prefix);
-    }
 
-    Ok(())
-}
+        if !assign.right.is_empty() {
+            write!(self.output, " = ")?;
+
+            for (i, rvalue) in assign.right.iter().enumerate() {
+                if i != 0 {
+                    write!(self.output, ", ")?;
+                }
+                self.format_rvalue(rvalue)?;
+            }
+        } else {
+            assert!(assign.prefix);
+        }
+
+        Ok(())
+    }
 
     pub(crate) fn format_while(&mut self, r#while: &While) -> fmt::Result {
         write!(self.output, "while ")?;
@@ -695,7 +785,9 @@ pub(crate) fn format_assign(&mut self, assign: &Assign) -> fmt::Result {
     }
 
     pub(crate) fn format_numeric_for(&mut self, numeric_for: &NumericFor) -> fmt::Result {
-        write!(self.output, "for {} = ", numeric_for.counter)?;
+        let counter_name = numeric_for.counter.to_string();
+        let cleaned = Self::clean_name(&counter_name);
+        write!(self.output, "for {} = ", cleaned)?;
         self.format_rvalue(&numeric_for.initial)?;
         write!(self.output, ", ")?;
         self.format_rvalue(&numeric_for.limit)?;
@@ -716,13 +808,16 @@ pub(crate) fn format_assign(&mut self, assign: &Assign) -> fmt::Result {
     }
 
     pub(crate) fn format_generic_for(&mut self, generic_for: &GenericFor) -> fmt::Result {
-        write!(
-            self.output,
-            "for {} in ",
-            generic_for.res_locals.iter().join(", ")
-        )?;
-        for (i, rvalue) in generic_for
-            .right
+        let cleaned_locals: Vec<String> = generic_for.res_locals
+            .iter()
+            .map(|l| {
+                let name = l.to_string();
+                Self::clean_name(&name)
+            })
+            .collect();
+
+        write!(self.output, "for {} in ", cleaned_locals.join(", "))?;
+        for (i, rvalue) in generic_for.right
             .iter()
             .enumerate()
             .rev()
@@ -731,8 +826,7 @@ pub(crate) fn format_assign(&mut self, assign: &Assign) -> fmt::Result {
             .collect_vec()
             .iter()
             .rev()
-            .enumerate()
-        {
+            .enumerate() {
             if i != 0 {
                 write!(self.output, ", ")?;
             }

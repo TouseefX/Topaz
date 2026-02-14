@@ -17,11 +17,13 @@ pub struct RegisterOrConstant(pub Either<Register, Constant>);
 
 impl From<u32> for RegisterOrConstant {
     fn from(value: u32) -> Self {
-        Self(if value > 255 {
-            Either::Right(Constant(value - 256))
-        } else {
-            Either::Left(Register(value as u8))
-        })
+        Self(
+            if value > 255 {
+                Either::Right(Constant(value - 256))
+            } else {
+                Either::Left(Register(value as u8))
+            }
+        )
     }
 }
 

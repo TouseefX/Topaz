@@ -1,10 +1,6 @@
-use crate::{Block, RcLocal};
+use crate::{ Block, RcLocal };
 use itertools::Itertools;
-use std::{
-    borrow::Cow,
-    collections::{BTreeMap, BTreeSet},
-    fmt::{Display, Formatter},
-};
+use std::{ borrow::Cow, collections::{ BTreeMap, BTreeSet }, fmt::{ Display, Formatter } };
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub enum Type {
@@ -29,31 +25,25 @@ impl Type {
     pub fn is_subtype_of(&self, t: &Self) -> bool {
         match t {
             Self::Any => true,
-            Self::Table {
-                box indexer,
-                fields,
-            } => {
+            Self::Table { box indexer, fields } => {
                 let t_fields = fields;
                 let (indexer_type, element_type) = indexer;
 
                 match self {
-                    Self::Table {
-                        box indexer,
-                        fields,
-                    } if indexer.0.is_subtype_of(indexer_type)
-                        && indexer.1.is_subtype_of(element_type) =>
-                    {
-                        t_fields
-                            .keys()
-                            .all(|k| fields[k].is_subtype_of(&t_fields[k]))
+                    Self::Table { box indexer, fields } if
+                        indexer.0.is_subtype_of(indexer_type) &&
+                        indexer.1.is_subtype_of(element_type)
+                    => {
+                        t_fields.keys().all(|k| fields[k].is_subtype_of(&t_fields[k]))
                     }
                     _ => false,
                 }
             }
-            Self::Union(union) => match self {
-                Self::Union(u) => union.iter().all(|t| u.contains(t)),
-                _ => union.contains(self),
-            },
+            Self::Union(union) =>
+                match self {
+                    Self::Union(u) => union.iter().all(|t| u.contains(t)),
+                    _ => union.contains(self),
+                }
             _ => false,
         }
     }
@@ -78,19 +68,17 @@ impl Type {
 
 impl Display for Type {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Type::Any => Cow::Borrowed("any"),
-                Type::Nil => Cow::Borrowed("nil"),
-                Type::Boolean => Cow::Borrowed("boolean"),
-                Type::Number => Cow::Borrowed("number"),
-                Type::String => Cow::Borrowed("string"),
-                Type::Table { indexer, fields } => {
-                    let (indexer_type, element_type) = indexer.as_ref();
+        write!(f, "{}", match self {
+            Type::Any => Cow::Borrowed("any"),
+            Type::Nil => Cow::Borrowed("nil"),
+            Type::Boolean => Cow::Borrowed("boolean"),
+            Type::Number => Cow::Borrowed("number"),
+            Type::String => Cow::Borrowed("string"),
+            Type::Table { indexer, fields } => {
+                let (indexer_type, element_type) = indexer.as_ref();
 
-                    Cow::Owned(format!(
+                Cow::Owned(
+                    format!(
                         "{{{}{}{}}}",
                         if indexer_type == &Type::Number && fields.is_empty() {
                             element_type.to_string()
@@ -102,30 +90,26 @@ impl Display for Type {
                             .iter()
                             .map(|(field, r#type)| { format!("{}: {}", field, r#type) })
                             .join(", ")
-                    ))
-                }
-                Type::Function(domain, codomain) => Cow::Owned(format!(
-                    "({}) -> {}",
-                    domain.iter().join(", "),
-                    if (codomain.len() == 1 && self.precedence() >= codomain[0].precedence())
-                        || codomain.len() > 1
+                    )
+                )
+            }
+            Type::Function(domain, codomain) =>
+                Cow::Owned(
+                    format!("({}) -> {}", domain.iter().join(", "), if
+                        (codomain.len() == 1 && self.precedence() >= codomain[0].precedence()) ||
+                        codomain.len() > 1
                     {
                         format!("({})", codomain.iter().join(", "))
                     } else {
                         codomain.iter().join(", ")
-                    }
-                )),
-                Type::Optional(r#type) => Cow::Owned(format!("{}?", r#type)),
-                Type::Union(types) => {
-                    Cow::Owned(types.iter().join(" | "))
-                }
-                Type::Intersection(types) => {
-                    Cow::Owned(types.iter().join(" & "))
-                }
-                Type::VarArg => Cow::Borrowed("..."),
-                Type::Vector => Cow::Borrowed("vector"),
-            }
-        )
+                    })
+                ),
+            Type::Optional(r#type) => Cow::Owned(format!("{}?", r#type)),
+            Type::Union(types) => { Cow::Owned(types.iter().join(" | ")) }
+            Type::Intersection(types) => { Cow::Owned(types.iter().join(" & ")) }
+            Type::VarArg => Cow::Borrowed("..."),
+            Type::Vector => Cow::Borrowed("vector"),
+        })
     }
 }
 

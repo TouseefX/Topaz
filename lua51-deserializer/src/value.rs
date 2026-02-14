@@ -1,10 +1,11 @@
 use enum_as_inner::EnumAsInner;
 use nom::{
     bytes::complete::take,
-    error::{Error, ErrorKind, ParseError},
+    error::{ Error, ErrorKind, ParseError },
     multi::count,
-    number::complete::{le_f64, le_u32, le_u8},
-    Err, IResult,
+    number::complete::{ le_f64, le_u32, le_u8 },
+    Err,
+    IResult,
 };
 
 #[derive(Debug, EnumAsInner)]
@@ -42,10 +43,7 @@ impl<'a> Value<'a> {
                 // exclude null terminator
                 Ok((input, Self::String(&value[..value.len() - 1])))
             }
-            _ => Err(Err::Failure(Error::from_error_kind(
-                input,
-                ErrorKind::Switch,
-            ))),
+            _ => Err(Err::Failure(Error::from_error_kind(input, ErrorKind::Switch))),
         }
     }
 }

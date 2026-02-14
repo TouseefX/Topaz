@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{formatter::Formatter, has_side_effects, LocalRw, RcLocal, Traverse};
+use crate::{ formatter::Formatter, has_side_effects, LocalRw, RcLocal, Traverse };
 
 use super::RValue;
 
@@ -29,7 +29,10 @@ impl Traverse for Return {
 
 impl LocalRw for Return {
     fn values_read(&self) -> Vec<&RcLocal> {
-        self.values.iter().flat_map(|r| r.values_read()).collect()
+        self.values
+            .iter()
+            .flat_map(|r| r.values_read())
+            .collect()
     }
 
     fn values_read_mut(&mut self) -> Vec<&mut RcLocal> {
@@ -42,11 +45,10 @@ impl LocalRw for Return {
 
 impl fmt::Display for Return {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        Formatter {
+        (Formatter {
             indentation_level: 0,
             indentation_mode: Default::default(),
             output: f,
-        }
-        .format_return(self)
+        }).format_return(self)
     }
 }

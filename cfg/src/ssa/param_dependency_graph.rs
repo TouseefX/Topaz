@@ -1,11 +1,7 @@
-use ast::{LocalRw, RcLocal};
+use ast::{ LocalRw, RcLocal };
 use indexmap::IndexSet;
-use petgraph::{
-    prelude::DiGraph,
-    stable_graph::NodeIndex,
-    visit::{DfsPostOrder, Walker},
-};
-use rustc_hash::{FxHashMap, FxHashSet};
+use petgraph::{ prelude::DiGraph, stable_graph::NodeIndex, visit::{ DfsPostOrder, Walker } };
+use rustc_hash::{ FxHashMap, FxHashSet };
 
 use crate::function::Function;
 
@@ -73,11 +69,7 @@ impl ParamDependencyGraph {
 
         let mut smaller_order = FxHashSet::default();
         for node in topological_order {
-            if self
-                .graph
-                .neighbors(node)
-                .any(|n| smaller_order.contains(&n))
-            {
+            if self.graph.neighbors(node).any(|n| smaller_order.contains(&n)) {
                 directed_fvs.insert(node);
             } else {
                 smaller_order.insert(node);

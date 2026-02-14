@@ -18,8 +18,8 @@ Options:
 ```
 
 ## Script
-
-When using `medal serve`, you can use the decompiler directly inside of your executor.
+            
+When using `topaz serve`, you can use the decompiler directly inside of your executor.
 These scripts assume you are self-hosting the decompiler.
 If you are using some sort of API, make sure to replace `http://localhost:3000` or `http://10.0.2.2:3000` with the correct API base.
 

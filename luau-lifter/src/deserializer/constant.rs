@@ -1,8 +1,5 @@
 use super::list::parse_list;
-use nom::{
-    number::complete::{le_f32, le_f64, le_u32, le_u8},
-    IResult,
-};
+use nom::{ number::complete::{ le_f32, le_f64, le_u32, le_u8 }, IResult };
 use nom_leb128::leb128_usize;
 
 const CONSTANT_NIL: u8 = 0;
