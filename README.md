@@ -1,55 +1,90 @@
 # Topaz
 
-Topaz is a decompiler for LuaU bytecode that trys to remake a script based off of that bytecode.
+Topaz is a decompiler for LuaU bytecode built off of the codebase of Medal.
 
-All Medal credits to this project goes to in honor and memory of:
-Jujhar Singh (KowalskiFX)
-Mathias Pedersen (Costomality)
+## Usage
 
-While details of how they passed and their relationship is unknown, it is better if their legacy does not get left forgotten.
+```bash
+Usage: topaz.exe <COMMAND>
 
-Keep the Singh and Pedersen family in your guys' prayers.
-We love you both.
+Commands:
+  decompile  Decompile a single bytecode file, either raw or base64 encoded
+  serve      Start a simple web server to handle decompiling
+  help       Print this message or the help of the given subcommand(s)
 
-## Run Topaz
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+## Script
+
+When using `medal serve`, you can use the decompiler directly inside of your executor.
+These scripts assume you are self-hosting the decompiler.
+If you are using some sort of API, make sure to replace `http://localhost:3000` or `http://10.0.2.2:3000` with the correct API base.
+
+### Windows
 
 ```lua
-local API_URL = "http://localhost:3000/";
+getgenv().decompile = function(script_instance)
+  local bytecode = getscriptbytecode(script_instance)
+  local encoded = crypt.base64encode(bytecode)
+  return request(
+    {
+      Url = "http://localhost:3000/luau/decompile",
+      Method = "POST",
+      Body = encoded
+    }
+  ).Body
+end
 
-local request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request;
-local base64Encode = base64_encode or crypt and crypt.base64.encode
-
-getgenv().decompile = function(Script)
-    local success, ScriptBytecode = pcall(getscriptbytecode, Script);
-    local ScriptBytecode = getscriptbytecode(Script);
-
-    if (not success) then
-	    print('Topaz Error: Failed To Get Script bytecode');
-	    return `Topaz Decomplier: Failed to Get Bytecode`;
-    end
-
-    if (base64Encode) then
-        ScriptBytecode = base64Encode(ScriptBytecode);
-    else
-        print('Topaz Warning: Your LuaU code executor does not support Base64!');
-    end
-
-    return request({
-        Url = `{API_URL}decompile`;
-        Method = "POST";
-        Body = ScriptBytecode;
-    }).Body;
-end;
-
-
-local synsaveinstance = loadstring(game:HttpGet("https://raw.githubusercontent.com/Team-Gauntlet/TopazSaveinstance/main/saveinstance.luau"))()
-
-local Options = {
-  SafeMode = true,
-  ShutdownWhenDone = true,
-  ShowStatus = true,
-  AntiIdle = true,
-  timeout = -1,
-}
-synsaveinstance(Options)
+loadstring(game:HttpGet("https://raw.githubusercontent.com/Team-Gauntlet/TopazSaveinstance/main/saveinstance.luau"))()({
+  mode = "scripts",
+  NilInstances = true,
+})
 ```
+
+### Android Emulator
+
+> [!NOTE]
+>
+> - If you have a proxy enabled in WiFi settings, add `10.0.2.2` to the exceptions or disable the proxy
+> - If you are using a VPN, allow LAN connections
+
+Run the web-server on your actual machine.
+
+If you are using an emulator, `localhost` will not work since that will refer to the emulator's device.
+Instead, we must use `10.0.2.2` instead.
+To test if everything is working, on your actual machine [http://localhost:3000/] should load fine, and on the emulator's browser, [http://10.0.2.2:3000/] should load. If your emulator is giving you HTTP connection fail errors, then you can try [ngrok](https://ngrok.com/) instead.
+
+```lua
+getgenv().decompile = function(script_instance)
+  local bytecode = getscriptbytecode(script_instance)
+  local encoded = crypt.base64encode(bytecode)
+  return request(
+    {
+      Url = "http://10.0.2.2:3000/luau/decompile",
+      Method = "POST",
+      Body = encoded
+    }
+  ).Body
+end
+
+loadstring(game:HttpGet("https://raw.githubusercontent.com/Team-Gauntlet/TopazSaveinstance/main/saveinstance.luau"))()({
+  mode = "scripts",
+  NilInstances = true,
+})
+```
+
+## License
+
+The [original license](https://github.com/shrimp-nz/medal/blob/main/LICENSE.txt) for medal is retained, but the license for this fork has been changed to stop people from profiting from open source work for free.
+
+## Credits
+
+All credits to the medal project goes to in honor and memory of
+
+- Jujhar Singh (KowalskiFX)
+- Mathias Pedersen (Customality)
+
+Keep the Singh and Pedersen family in your guys' prayers, we love you both.

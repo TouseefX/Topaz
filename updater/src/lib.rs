@@ -2,7 +2,8 @@ use colored::Colorize;
 use reqwest::Client;
 use serde::{ Deserialize, Serialize };
 use std::fs;
-use std::path::Path;
+use std::path::PathBuf;
+use std::io::Write;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Release {
@@ -50,6 +51,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(asset) = release.assets.iter().find(|a| a.name.contains(&asset_name)) {
         println!("{}", "Found matching binary!".green());
         println!("Download URL: {}", asset.browser_download_url.cyan());
+
+        let download_path = download_binary(&client, asset, &os).await?;
+        println!("{}", format!("Downloaded to: {}", download_path.display()).green());
+
         println!(
             "\n{}",
             format!(
@@ -57,6 +62,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 release.tag_name
             ).cyan()
         );
+
+        replace_binary(&download_path, &os)?;
     } else {
         println!("{}", format!("No matching binary found for {} ({})", os, arch).yellow());
         println!("Available assets:");
@@ -64,6 +71,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("  - {}", asset.name);
         }
     }
+
+    Ok(())
+}
+
+async fn download_binary(
+    client: &Client,
+    asset: &Asset,
+    os: &str
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let bytes = client.get(&asset.browser_download_url).send().await?.bytes().await?;
+
+    let temp_dir = std::env::temp_dir();
+    let file_name = if os == "windows" { "topaz-new.exe" } else { "topaz-new" };
+    let download_path = temp_dir.join(file_name);
+
+    let mut file = fs::File::create(&download_path)?;
+    file.write_all(&bytes)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&download_path, fs::Permissions::from_mode(0o755))?;
+    }
+
+    Ok(download_path)
+}
+
+fn replace_binary(new_binary_path: &PathBuf, os: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let current_exe = std::env::current_exe()?;
+    let exe_dir = current_exe.parent().ok_or("Could not determine exe directory")?;
+
+    let target_exe = if os == "windows" {
+        exe_dir.join("topaz.exe")
+    } else {
+        exe_dir.join("topaz")
+    };
+
+    let backup_exe = if os == "windows" {
+        exe_dir.join("topaz.exe.bak")
+    } else {
+        exe_dir.join("topaz.bak")
+    };
+
+    if target_exe.exists() {
+        fs::rename(&target_exe, &backup_exe)?;
+    }
+
+    fs::rename(new_binary_path, &target_exe)?;
+
+    if backup_exe.exists() {
+        fs::remove_file(&backup_exe)?;
+    }
+
+    println!("{}", "Binary updated successfully!".green());
 
     Ok(())
 }
