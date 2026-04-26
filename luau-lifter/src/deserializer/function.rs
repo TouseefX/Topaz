@@ -56,6 +56,9 @@ const OPCODES_WITH_AUX: &[OpCode] = &[
     OpCode::LOP_JUMPXEQKB,
     OpCode::LOP_JUMPXEQKN,
     OpCode::LOP_JUMPXEQKS,
+    OpCode::LOP_GETUDATAKS,
+    OpCode::LOP_SETUDATAKS,
+    OpCode::LOP_NAMECALLUDATA,
 ];
 
 
@@ -98,14 +101,11 @@ impl Function {
             };
 
             if OPCODES_WITH_AUX.contains(&op) {
-                
-                
                 let Some(&aux) = raw.get(pc + 1) else {
                     return Err(nom::error::ErrorKind::Eof);
                 };
                 pc += 2;
 
-                
                 match ins {
                     Instruction::BC { op_code, a, b, c, .. } => {
                         out.push(Instruction::BC { op_code, a, b, c, aux });
@@ -116,7 +116,6 @@ impl Function {
                     _ => unreachable!(),
                 }
 
-                
                 out.push(Instruction::BC {
                     op_code: OpCode::LOP_NOP,
                     a: 0, b: 0, c: 0, aux: 0,

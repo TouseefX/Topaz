@@ -267,7 +267,7 @@ impl Namer {
     fn hint_for_rvalue(rv: &RValue) -> &'static str {
         match rv {
             RValue::Literal(Literal::String(_)) => "s",
-            RValue::Literal(Literal::Number(_)) => "n",
+            RValue::Literal(Literal::Number(_)) | RValue::Literal(Literal::Integer(_)) => "n",
             RValue::Literal(Literal::Boolean(_)) => "b",
             RValue::Table(_) => "t",
             RValue::Closure(_) => "fn",

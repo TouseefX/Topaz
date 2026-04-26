@@ -45,6 +45,9 @@ impl Instruction {
             | 68
             | 70
             | 71..=75
+            | 81
+            | 82
+            | 83..=85
             | 251 => {
                 let (a, b, c) = Self::parse_abc(insn);
 
