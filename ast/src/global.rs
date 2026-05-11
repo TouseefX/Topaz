@@ -1,7 +1,7 @@
 use derive_more::From;
 use std::fmt;
 
-use crate::{ formatter::Formatter, LocalRw, SideEffects, Traverse };
+use crate::{formatter::Formatter, LocalRw, SideEffects, Traverse};
 
 #[derive(Debug, From, PartialEq, Eq, PartialOrd, Clone)]
 pub struct Global(pub Vec<u8>);
@@ -33,7 +33,11 @@ impl fmt::Display for Global {
         if Formatter::<fmt::Formatter>::is_valid_name(&self.0) {
             write!(f, "{}", std::str::from_utf8(&self.0).unwrap())
         } else {
-            write!(f, "__FENV[\"{}\"]", Formatter::<fmt::Formatter>::escape_string(&self.0))
+            write!(
+                f,
+                "__FENV[\"{}\"]",
+                Formatter::<fmt::Formatter>::escape_string(&self.0)
+            )
         }
     }
 }

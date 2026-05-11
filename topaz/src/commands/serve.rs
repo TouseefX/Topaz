@@ -2,7 +2,7 @@ use axum::{
     Router,
     body::Bytes,
     extract::Query,
-    routing::{ get, post },
+    routing::{get, post},
     extract::DefaultBodyLimit,
 };
 use serde::Deserialize;
@@ -12,7 +12,9 @@ use tracing::info;
 use crate::commands::decompile_no_io;
 
 pub async fn serve(port: u16, luau: bool, lua51: bool) -> Result<(), std::io::Error> {
-    let mut app = Router::new().route("/", get(ok)).layer(DefaultBodyLimit::disable());
+    let mut app = Router::new()
+        .route("/", get(ok))
+        .layer(DefaultBodyLimit::disable());
 
     if luau {
         app = app.route("/luau/decompile", post(decompile_luau));
@@ -28,7 +30,7 @@ pub async fn serve(port: u16, luau: bool, lua51: bool) -> Result<(), std::io::Er
 }
 
 async fn ok() -> &'static str {
-    "Web server is connected!"
+    "yep web-server is on"
 }
 
 #[inline]

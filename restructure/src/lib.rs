@@ -1,10 +1,10 @@
-use cfg::{ block::BranchType, function::Function };
+use cfg::{block::BranchType, function::Function};
 use itertools::Itertools;
-use rustc_hash::{ FxHashMap, FxHashSet };
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use petgraph::{
-    algo::dominators::{ simple_fast, Dominators },
-    stable_graph::{ EdgeIndex, NodeIndex, StableDiGraph },
+    algo::dominators::{simple_fast, Dominators},
+    stable_graph::{EdgeIndex, NodeIndex, StableDiGraph},
     visit::*,
 };
 use tuple::Map;
@@ -15,7 +15,7 @@ mod r#loop;
 
 // TODO: REFACTOR: move
 pub fn post_dominators<N: Default, E: Default>(
-    graph: &mut StableDiGraph<N, E>
+    graph: &mut StableDiGraph<N, E>,
 ) -> Dominators<NodeIndex> {
     let exits = graph
         .node_identifiers()
@@ -39,11 +39,15 @@ struct GraphStructurer {
 impl GraphStructurer {
     fn find_loop_headers(&mut self) {
         self.loop_headers.clear();
-        depth_first_search(self.function.graph(), Some(self.function.entry().unwrap()), |event| {
-            if let DfsEvent::BackEdge(_, header) = event {
-                self.loop_headers.insert(header);
-            }
-        });
+        depth_first_search(
+            self.function.graph(),
+            Some(self.function.entry().unwrap()),
+            |event| {
+                if let DfsEvent::BackEdge(_, header) = event {
+                    self.loop_headers.insert(header);
+                }
+            },
+        );
     }
     fn new(function: Function) -> Self {
         let mut this = Self {
@@ -63,7 +67,7 @@ impl GraphStructurer {
         &mut self,
         node: NodeIndex,
         dominators: &Dominators<NodeIndex>,
-        post_dom: &Dominators<NodeIndex>
+        post_dom: &Dominators<NodeIndex>,
     ) -> bool {
         let successors = self.function.successor_blocks(node).collect_vec();
 
@@ -85,7 +89,8 @@ impl GraphStructurer {
                 self.match_jump(node, Some(successors[0]))
             }
             2 => {
-                let (then_target, else_target) = self.function
+                let (then_target, else_target) = self
+                    .function
                     .conditional_edges(node)
                     .unwrap()
                     .map(|e| e.target());
@@ -105,10 +110,8 @@ impl GraphStructurer {
         let dfs = Dfs::new(self.function.graph(), self.function.entry().unwrap())
             .iter(self.function.graph())
             .collect::<FxHashSet<_>>();
-        let mut dfs_postorder = DfsPostOrder::new(
-            self.function.graph(),
-            self.function.entry().unwrap()
-        );
+        let mut dfs_postorder =
+            DfsPostOrder::new(self.function.graph(), self.function.entry().unwrap());
         let mut dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
         let mut post_dom = post_dominators(self.function.graph_mut());
 
@@ -128,23 +131,24 @@ impl GraphStructurer {
             // }
         }
 
-        for node in self.function
+        for node in self
+            .function
             .graph()
             .node_indices()
             .filter(|node| !dfs.contains(node))
-            .collect_vec() {
+            .collect_vec()
+        {
             // block may have been removed in a previous iteration
-            if
-                self.function.has_block(node) &&
-                self.function.predecessor_blocks(node).next().is_none()
+            if self.function.has_block(node)
+                && self.function.predecessor_blocks(node).next().is_none()
             {
-                if
-                    self.function
-                        .block(node)
-                        .unwrap()
-                        .first()
-                        .and_then(|s| s.as_label())
-                        .is_none()
+                if self
+                    .function
+                    .block(node)
+                    .unwrap()
+                    .first()
+                    .and_then(|s| s.as_label())
+                    .is_none()
                 {
                     self.function.remove_block(node);
                 } else {
@@ -160,10 +164,8 @@ impl GraphStructurer {
 
     fn insert_goto_for_edge(&mut self, edge: EdgeIndex) {
         let (source, target) = self.function.graph().edge_endpoints(edge).unwrap();
-        if
-            self.function.graph().edge_weight(edge).unwrap().branch_type ==
-                BranchType::Unconditional &&
-            self.function.predecessor_blocks(target).count() == 1
+        if self.function.graph().edge_weight(edge).unwrap().branch_type == BranchType::Unconditional
+            && self.function.predecessor_blocks(target).count() == 1
         {
             assert!(self.function.successor_blocks(source).count() == 1);
             // TODO: this code is repeated in match_jump, move to a new function
@@ -175,17 +177,15 @@ impl GraphStructurer {
             // TODO: make label an Rc and have a global counter for block name
             let label = ast::Label(format!("l{}", target.index()));
             let target_block = self.function.block_mut(target).unwrap();
-            if
-                target_block
-                    .first()
-                    .and_then(|s| s.as_label())
-                    .is_none()
-            {
+            if target_block.first().and_then(|s| s.as_label()).is_none() {
                 self.label_to_node.insert(label.clone(), target);
                 target_block.insert(0, label.clone().into());
             }
             let goto_block = self.function.new_block();
-            self.function.block_mut(goto_block).unwrap().push(ast::Goto::new(label).into());
+            self.function
+                .block_mut(goto_block)
+                .unwrap()
+                .push(ast::Goto::new(label).into());
 
             let edge = self.function.graph_mut().remove_edge(edge).unwrap();
             self.function.graph_mut().add_edge(source, goto_block, edge);
@@ -316,31 +316,38 @@ impl GraphStructurer {
                         stack.push(target_node);
                     }
                 }
-                if
-                    let Some(ast::Statement::Goto(goto)) = res_block.last() &&
-                    // TODO: keep label -> block map instead
-                    goto.0.0[1..] == node.index().to_string()
+                if let Some(ast::Statement::Goto(goto)) = res_block.last()
+                // TODO: keep label -> block map instead
+                    && goto.0.0[1..] == node.index().to_string()
                 {
                     res_block.pop();
                 }
-                if !block.first().is_some_and(|s| matches!(s, ast::Statement::Label(_))) {
+                if !block
+                    .first()
+                    .is_some_and(|s| matches!(s, ast::Statement::Label(_)))
+                {
                     res_block.push(ast::Comment::new(format!("block {}", node.index())).into());
                 }
-                res_block.extend(block.0);
+                res_block.extend(block.0)
             }
             // TODO: these nodes are never executed (i think), comment them out or dont include them
             for node in self.function.graph().node_indices().collect::<Vec<_>>() {
                 let block = self.function.remove_block(node).unwrap();
-                if !block.first().is_some_and(|s| matches!(s, ast::Statement::Label(_))) {
+                if !block
+                    .first()
+                    .is_some_and(|s| matches!(s, ast::Statement::Label(_)))
+                {
                     res_block.push(ast::Comment::new(format!("block {}", node.index())).into());
                 }
-                res_block.extend(block.0);
+                res_block.extend(block.0)
             }
 
             res_block
         } else {
             Self::remove_last_return(
-                self.function.remove_block(self.function.entry().unwrap()).unwrap()
+                self.function
+                    .remove_block(self.function.entry().unwrap())
+                    .unwrap(),
             )
         }
     }

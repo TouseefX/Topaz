@@ -2,10 +2,11 @@ use crate::{type_system::Infer, SideEffects, Traverse, Type, TypeSystem};
 use by_address::ByAddress;
 use derive_more::From;
 use enum_dispatch::enum_dispatch;
+use nohash_hasher::NoHashHasher;
 use parking_lot::Mutex;
 use std::{
     fmt::{self, Display},
-    hash::Hash,
+    hash::{Hash, Hasher},
 };
 use triomphe::Arc;
 
@@ -22,7 +23,7 @@ impl fmt::Display for Local {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.0 {
             Some(name) => write!(f, "{}", name),
-            None => write!(f, "_"),
+            None => write!(f, "UNNAMED_LOCAL"),
         }
     }
 }
@@ -40,7 +41,11 @@ impl Display for RcLocal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 .0.lock().0 {
             Some(name) => write!(f, "{}", name),
-            None => write!(f, "_"),
+            None => {
+                let mut hasher = NoHashHasher::<u8>::default();
+                self.hash(&mut hasher);
+                write!(f, "UNNAMED_{}", hasher.finish())
+            }
         }
     }
 }

@@ -6,15 +6,8 @@ use triomphe::Arc;
 
 use crate::{
     formatter::Formatter,
-    type_system::{ Infer, TypeSystem },
-    Block,
-    Literal,
-    LocalRw,
-    RcLocal,
-    Reduce,
-    SideEffects,
-    Traverse,
-    Type,
+    type_system::{Infer, TypeSystem},
+    Block, Literal, LocalRw, RcLocal, Reduce, SideEffects, Traverse, Type,
 };
 
 #[derive(Debug, PartialEq, Clone)]
@@ -63,11 +56,12 @@ impl Infer for Closure {
 
 impl fmt::Display for Closure {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        (Formatter {
+        Formatter {
             indentation_level: 0,
             indentation_mode: Default::default(),
             output: f,
-        }).format_closure(self)
+        }
+        .format_closure(self)
     }
 }
 
@@ -75,10 +69,8 @@ impl LocalRw for Closure {
     fn values_read(&self) -> Vec<&RcLocal> {
         self.upvalues
             .iter()
-            .map(|u| {
-                match u {
-                    Upvalue::Copy(l) | Upvalue::Ref(l) => l,
-                }
+            .map(|u| match u {
+                Upvalue::Copy(l) | Upvalue::Ref(l) => l,
             })
             .collect()
     }
@@ -86,10 +78,8 @@ impl LocalRw for Closure {
     fn values_read_mut(&mut self) -> Vec<&mut RcLocal> {
         self.upvalues
             .iter_mut()
-            .map(|u| {
-                match u {
-                    Upvalue::Copy(l) | Upvalue::Ref(l) => l,
-                }
+            .map(|u| match u {
+                Upvalue::Copy(l) | Upvalue::Ref(l) => l,
             })
             .collect()
     }

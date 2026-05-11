@@ -2,7 +2,10 @@ use std::path::Path;
 
 use base64::prelude::*;
 
-pub fn decompile_no_io<T>(bytecode: T, encode_key: u8, lua51: bool) -> String where T: Into<Vec<u8>> {
+pub fn decompile_no_io<T>(bytecode: T, encode_key: u8, lua51: bool) -> String
+where
+    T: Into<Vec<u8>>,
+{
     let mut bytecode = bytecode.into();
     if let Ok(decoded) = BASE64_STANDARD.decode(&bytecode) {
         bytecode = decoded;
@@ -19,7 +22,7 @@ pub fn decompile(
     input: &Path,
     output: &Path,
     encode_key: u8,
-    lua51: bool
+    lua51: bool,
 ) -> Result<(), std::io::Error> {
     let bytecode = std::fs::read(input)?;
     let out = decompile_no_io(bytecode, encode_key, lua51);

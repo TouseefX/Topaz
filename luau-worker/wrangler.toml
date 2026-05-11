@@ -5,7 +5,6 @@ compatibility_date = "2022-01-20"
 
 [vars]
 WORKERS_RS_VERSION = "0.0.9"
-AUTH_SECRET = "JRxwJlG8AA8xiSmd6JWFWI56b4ForVMbEMHwrXTyF65rKy0ZvhuhCfifZSSOeqFZ"
 
 [build]
 command = "cargo install -q worker-build && worker-build --release" # required

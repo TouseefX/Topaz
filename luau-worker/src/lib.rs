@@ -3,10 +3,10 @@ extern crate console_error_panic_hook;
 
 use base64::prelude::*;
 use luau_lifter::decompile_bytecode;
-use serde::{ Deserialize, Serialize };
+use serde::{Deserialize, Serialize};
 use worker::*;
 
-const AUTH_SECRET: &str = "JRxwJlG8AA8xiSmd6JWFWI56b4ForVMbEMHwrXTyF65rKy0ZvhuhCfifZSSOeqFZ";
+const AUTH_SECRET: &str = "ymjKH2O3BbO3bDSsKmpo3ek3vHxIWYLQfj0";
 
 #[derive(Deserialize)]
 struct DecompileMessage {
@@ -44,22 +44,22 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
             wasm_bindgen_futures::spawn_local(async move {
                 let mut event_stream = server.events().expect("could not open stream");
                 while let Some(event) = event_stream.next().await {
-                    if
-                        let WebsocketEvent::Message(msg) = event.expect(
-                            "received error in websocket"
-                        )
+                    if let WebsocketEvent::Message(msg) =
+                        event.expect("received error in websocket")
                     {
                         let msg = msg
                             .json::<DecompileMessage>()
                             .expect("malformed decompile message");
-                        let bytecode = BASE64_STANDARD.decode(msg.encoded_bytecode).expect(
-                            "bytecode must be base64 encoded"
-                        );
+                        let bytecode = BASE64_STANDARD
+                            .decode(msg.encoded_bytecode)
+                            .expect("bytecode must be base64 encoded");
                         let resp = DecompileResponse {
                             id: msg.id,
                             decompilation: decompile_bytecode(&bytecode, 1),
                         };
-                        server.send_with_str(serde_json::to_string(&resp).unwrap()).unwrap();
+                        server
+                            .send_with_str(serde_json::to_string(&resp).unwrap())
+                            .unwrap();
                     }
                 }
             });
@@ -83,5 +83,6 @@ pub async fn main(req: Request, env: Env, _ctx: worker::Context) -> Result<Respo
                 Err(_) => Response::error("invalid bytecode", 400),
             }
         })
-        .run(req, env).await
+        .run(req, env)
+        .await
 }

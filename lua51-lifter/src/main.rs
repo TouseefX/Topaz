@@ -1,11 +1,11 @@
-#![feature(box_patterns)]
-
-use lua51_lifter::decompile_bytecode;
-use std::{ fs::File, io::{ Read, Write }, path::Path, time::Instant };
+use std::{
+    fs::File,
+    io::{Read, Write},
+    path::Path,
+    time::Instant,
+};
 
 use clap::Parser;
-
-mod lifter;
 
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
@@ -29,12 +29,11 @@ fn main() -> anyhow::Result<()> {
     input.read_exact(&mut buffer)?;
 
     let start = Instant::now();
-    let res = decompile_bytecode(&buffer);
+    let res = lua51_lifter::decompile_bytecode(&buffer);
     let duration = start.elapsed();
 
-    // TODO: use BufWriter?
     let mut out = File::create(path.with_extension("dec.51.lua").file_name().unwrap())?;
-    writeln!(out, "-- decompiled by Sentinel (took {:?})", duration)?;
+    writeln!(out, "-- decompiled by Topaz (took {:?})", duration)?;
     writeln!(out, "{}", res)?;
 
     Ok(())

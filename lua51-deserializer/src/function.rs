@@ -1,9 +1,14 @@
-use nom::{ combinator::opt, multi::count, number::complete::{ le_u32, le_u8 }, IResult };
+use nom::{
+    combinator::opt,
+    multi::count,
+    number::complete::{le_u32, le_u8},
+    IResult,
+};
 
 use crate::{
-    instruction::{ position::Position, Instruction },
+    instruction::{position::Position, Instruction},
     local::Local,
-    value::{ self, Value },
+    value::{self, Value},
 };
 
 #[derive(Debug)]
@@ -24,8 +29,8 @@ pub struct Function<'a> {
 }
 
 impl<'a> Function<'a> {
-    pub fn parse(input: &'a [u8]) -> IResult<&'a [u8], Self> {
-        let (input, name) = value::parse_string(input)?;
+    pub fn parse(input: &'a [u8], size_t_width: u8) -> IResult<&'a [u8], Self> {
+        let (input, name) = value::parse_string(input, size_t_width)?;
         let (input, line_defined) = le_u32(input)?;
         let (input, last_line_defined) = le_u32(input)?;
         let (input, number_of_upvalues) = le_u8(input)?;
@@ -35,12 +40,12 @@ impl<'a> Function<'a> {
         let (input, code_length) = le_u32(input)?;
         let (input, code) = count(Instruction::parse, code_length as usize)(input)?;
         let (input, constants_length) = le_u32(input)?;
-        let (input, constants) = count(Value::parse, constants_length as usize)(input)?;
+        let (input, constants) = count(|i| Value::parse(i, size_t_width), constants_length as usize)(input)?;
         let (input, closures_length) = le_u32(input)?;
-        let (input, closures) = count(Self::parse, closures_length as usize)(input)?;
+        let (input, closures) = count(|i| Self::parse(i, size_t_width), closures_length as usize)(input)?;
         let (input, positions) = opt(Position::parse)(input)?;
-        let (input, locals) = opt(Local::parse_list)(input)?;
-        let (input, upvalues) = opt(value::parse_strings)(input)?;
+        let (input, locals) = opt(|i| Local::parse_list(i, size_t_width))(input)?;
+        let (input, upvalues) = opt(|i| value::parse_strings(i, size_t_width))(input)?;
 
         Ok((
             input,

@@ -1,13 +1,13 @@
 use std::fmt;
 
 use petgraph::{
-    stable_graph::{ NodeIndex, StableDiGraph },
-    visit::{ Dfs, EdgeRef, Walker },
+    stable_graph::{NodeIndex, StableDiGraph},
+    visit::{Dfs, EdgeRef, Walker},
     Direction,
 };
-use rustc_hash::{ FxHashMap, FxHashSet };
+use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::{ block::BlockEdge, function::Function };
+use crate::{block::BlockEdge, function::Function};
 
 pub trait NodeChecker {
     fn check(&self, node: NodeIndex) -> bool;
@@ -61,22 +61,24 @@ impl<'a> PatternChecker<'a> {
     fn check_successors(&self, _node: NodeIndex) {}
 
     fn check_pattern_rec(&self, pattern_node: NodeIndex, function_node: NodeIndex) -> bool {
-        let _function_successors = self.function
+        let _function_successors = self
+            .function
             .successor_blocks(function_node)
             .collect::<Vec<_>>();
 
-        let _pattern_successors = self.pattern.graph
+        let _pattern_successors = self
+            .pattern
+            .graph
             .neighbors_directed(pattern_node, Direction::Outgoing)
             .collect::<Vec<_>>();
 
         for function_edge in self.function.edges(pattern_node) {
             let function_node = function_edge.target();
             if let Some(&pattern_successor_node) = self.mapping.get(&function_node) {
-                if
-                    let Some(_pattern_edge) = self.pattern.graph.find_edge(
-                        pattern_node,
-                        pattern_successor_node
-                    )
+                if let Some(_pattern_edge) = self
+                    .pattern
+                    .graph
+                    .find_edge(pattern_node, pattern_successor_node)
                 {
                     todo!();
                 } else {

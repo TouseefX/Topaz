@@ -1,4 +1,4 @@
-use crate::{ LValue, RValue };
+use crate::{LValue, RValue};
 use enum_dispatch::enum_dispatch;
 use itertools::Either;
 
@@ -33,7 +33,10 @@ pub trait Traverse {
     //     });
     // }
 
-    fn traverse_rvalues<F>(&mut self, callback: &mut F) where F: FnMut(&mut RValue) {
+    fn traverse_rvalues<F>(&mut self, callback: &mut F)
+    where
+        F: FnMut(&mut RValue),
+    {
         for lvalue in self.lvalues_mut() {
             lvalue.traverse_rvalues(callback);
         }
@@ -44,7 +47,8 @@ pub trait Traverse {
     }
 
     fn post_traverse_rvalues<F, R>(&mut self, callback: &mut F) -> Option<R>
-        where F: FnMut(&mut RValue) -> Option<R>
+    where
+        F: FnMut(&mut RValue) -> Option<R>,
     {
         for lvalue in self.lvalues_mut() {
             if let Some(res) = lvalue.post_traverse_rvalues(callback) {
@@ -64,9 +68,9 @@ pub trait Traverse {
     }
 
     fn post_traverse_values<F, R>(&mut self, callback: &mut F) -> Option<R>
-        where
-            // TODO: REFACTOR: use an enum called Value instead of Either
-            F: FnMut(Either<&mut LValue, &mut RValue>) -> Option<R>
+    where
+        // TODO: REFACTOR: use an enum called Value instead of Either
+        F: FnMut(Either<&mut LValue, &mut RValue>) -> Option<R>,
     {
         for lvalue in self.lvalues_mut() {
             if let Some(res) = lvalue.post_traverse_values(callback) {
@@ -89,9 +93,9 @@ pub trait Traverse {
     }
 
     fn traverse_values<F, R>(&mut self, callback: &mut F) -> Option<R>
-        where
-            // TODO: REFACTOR: use an enum called Value instead of Either
-            F: FnMut(PreOrPost, Either<&mut LValue, &mut RValue>) -> Option<R>
+    where
+        // TODO: REFACTOR: use an enum called Value instead of Either
+        F: FnMut(PreOrPost, Either<&mut LValue, &mut RValue>) -> Option<R>,
     {
         for lvalue in self.lvalues_mut() {
             if let Some(res) = callback(PreOrPost::Pre, Either::Left(lvalue)) {

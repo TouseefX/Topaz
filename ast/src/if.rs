@@ -1,9 +1,9 @@
 use parking_lot::Mutex;
 use triomphe::Arc;
 
-use crate::{ formatter::Formatter, LocalRw, RcLocal, SideEffects, Traverse };
+use crate::{formatter::Formatter, LocalRw, RcLocal, SideEffects, Traverse};
 
-use super::{ Block, RValue };
+use super::{Block, RValue};
 
 use std::fmt;
 
@@ -60,10 +60,11 @@ impl LocalRw for If {
 
 impl fmt::Display for If {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        (Formatter {
+        Formatter {
             indentation_level: 0,
             indentation_mode: Default::default(),
             output: f,
-        }).format_if(self)
+        }
+        .format_if(self)
     }
 }

@@ -28,7 +28,11 @@ impl LocalDeclarer {
         let node = self.graph.add_node((Some(block.clone()), stat_index));
         self.block_to_node.insert(block.clone().into(), node);
         for (stat_index, stat) in block.lock().iter().enumerate() {
+            // for loops already declare their own locals :)
             if !matches!(stat, Statement::GenericFor(_) | Statement::NumericFor(_)) {
+                // we only visit locals written because locals are guaranteed to be written
+                // before they are read.
+                // TODO: move to seperate function and visit breadth-first?
                 for local in stat.values_written() {
                     self.local_usages
                         .entry(local.clone())
@@ -68,18 +72,6 @@ impl LocalDeclarer {
         node
     }
 
-    fn ensure_local_named(local: &RcLocal) {
-        let mut inner = local.0.lock();
-        let needs_rename = match &inner.0 {
-            Some(name) => name.is_empty() || name.contains(':'),
-            None => true,
-        };
-        if needs_rename {
-            let addr = Arc::as_ptr(&local.0) as usize;
-            inner.0 = Some(format!("_local_{:x}", addr));
-        }
-    }
-
     pub fn declare_locals(
         mut self,
         root_block: Arc<Mutex<Block>>,
@@ -109,6 +101,7 @@ impl LocalDeclarer {
                 {
                     (common_dominator, first_stat_index)
                 } else {
+                    // find the left-most dominated node
                     let mut first_stat_index = None;
                     for child in self
                         .graph
@@ -123,9 +116,11 @@ impl LocalDeclarer {
                     (common_dominator, first_stat_index.unwrap())
                 }
             };
-            while let (block, parent_stat_index) = self.graph.node_weight(node).unwrap()
-                && block.is_none()
-            {
+            while {
+                let (block, _) = self.graph.node_weight(node).unwrap();
+                block.is_none()
+            } {
+                let (_, parent_stat_index) = self.graph.node_weight(node).unwrap();
                 let parent = self
                     .graph
                     .neighbors_directed(node, Direction::Incoming)
@@ -170,16 +165,12 @@ impl LocalDeclarer {
                     }
                     _ => {}
                 }
-                if locals.is_empty() {
-                    continue;
+                if !locals.is_empty() {
+                    let mut declaration =
+                        Assign::new(locals.into_iter().map(|l| l.into()).collect_vec(), vec![]);
+                    declaration.prefix = true;
+                    block.insert(stat_index, declaration.into());
                 }
-                for local in locals.iter() {
-                    Self::ensure_local_named(local);
-                }
-                let mut declaration =
-                    Assign::new(locals.into_iter().map(|l| l.into()).collect_vec(), vec![]);
-                declaration.prefix = true;
-                block.insert(stat_index, declaration.into());
             }
         }
     }

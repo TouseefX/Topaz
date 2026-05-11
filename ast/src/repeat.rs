@@ -1,7 +1,7 @@
 use parking_lot::Mutex;
 use triomphe::Arc;
 
-use crate::{ formatter::Formatter, has_side_effects, Block, LocalRw, RValue, RcLocal, Traverse };
+use crate::{formatter::Formatter, has_side_effects, Block, LocalRw, RValue, RcLocal, Traverse};
 use std::fmt;
 
 // TODO: move condition after block
@@ -51,10 +51,11 @@ impl LocalRw for Repeat {
 
 impl fmt::Display for Repeat {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        (Formatter {
+        Formatter {
             indentation_level: 0,
             indentation_mode: Default::default(),
             output: f,
-        }).format_repeat(self)
+        }
+        .format_repeat(self)
     }
 }

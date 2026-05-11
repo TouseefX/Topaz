@@ -1,13 +1,13 @@
-use ast::{ LocalRw, RcLocal };
+use ast::{LocalRw, RcLocal};
 use contracts::requires;
 
 use petgraph::{
-    stable_graph::{ EdgeReference, Neighbors, NodeIndex, StableDiGraph },
-    visit::{ EdgeRef, IntoEdgesDirected },
+    stable_graph::{EdgeReference, Neighbors, NodeIndex, StableDiGraph},
+    visit::{EdgeRef, IntoEdgesDirected},
     Direction,
 };
 
-use crate::block::{ BlockEdge, BranchType };
+use crate::block::{BlockEdge, BranchType};
 
 #[derive(Debug, Clone, Default)]
 pub struct Function {
@@ -65,7 +65,9 @@ impl Function {
     }
 
     pub fn blocks(&self) -> impl Iterator<Item = (NodeIndex, &ast::Block)> {
-        self.graph.node_indices().map(|i| (i, self.graph.node_weight(i).unwrap()))
+        self.graph
+            .node_indices()
+            .map(|i| (i, self.graph.node_weight(i).unwrap()))
     }
 
     pub fn blocks_mut(&mut self) -> impl Iterator<Item = &mut ast::Block> {
@@ -82,16 +84,14 @@ impl Function {
 
     pub fn edges_to_block(&self, node: NodeIndex) -> impl Iterator<Item = (NodeIndex, &BlockEdge)> {
         let mut edges = self.predecessor_blocks(node).detach();
-        std::iter
-            ::from_fn(move || edges.next_edge(&self.graph))
-            .filter_map(move |e| {
-                let (source, target) = self.graph.edge_endpoints(e).unwrap();
-                if target == node {
-                    Some((source, self.graph.edge_weight(e).unwrap()))
-                } else {
-                    None
-                }
-            })
+        std::iter::from_fn(move || edges.next_edge(&self.graph)).filter_map(move |e| {
+            let (source, target) = self.graph.edge_endpoints(e).unwrap();
+            if target == node {
+                Some((source, self.graph.edge_weight(e).unwrap()))
+            } else {
+                None
+            }
+        })
     }
 
     pub fn edges(&self, node: NodeIndex) -> impl Iterator<Item = EdgeReference<BlockEdge>> {
@@ -103,7 +103,8 @@ impl Function {
         for (target, edge) in self
             .edges(node)
             .map(|e| (e.target(), e.id()))
-            .collect::<Vec<_>>() {
+            .collect::<Vec<_>>()
+        {
             edges.push((target, self.graph.remove_edge(edge).unwrap()));
         }
         edges
@@ -113,7 +114,7 @@ impl Function {
     pub fn set_edges(
         &mut self,
         node: NodeIndex,
-        new_edges: Vec<(NodeIndex, BlockEdge)>
+        new_edges: Vec<(NodeIndex, BlockEdge)>,
     ) -> Vec<(NodeIndex, BlockEdge)> {
         let prev_edges = self.remove_edges(node);
         for (target, edge) in new_edges {
@@ -124,9 +125,12 @@ impl Function {
 
     pub fn conditional_edges(
         &self,
-        node: NodeIndex
+        node: NodeIndex,
     ) -> Option<(EdgeReference<BlockEdge>, EdgeReference<BlockEdge>)> {
-        let edges = self.graph.edges_directed(node, Direction::Outgoing).collect::<Vec<_>>();
+        let edges = self
+            .graph
+            .edges_directed(node, Direction::Outgoing)
+            .collect::<Vec<_>>();
         if let [e0, e1] = edges[..] {
             let mut res = (e0, e1);
             if res.1.weight().branch_type == BranchType::Then {
@@ -141,7 +145,10 @@ impl Function {
     }
 
     pub fn unconditional_edge(&self, node: NodeIndex) -> Option<EdgeReference<BlockEdge>> {
-        let edges = self.graph.edges_directed(node, Direction::Outgoing).collect::<Vec<_>>();
+        let edges = self
+            .graph
+            .edges_directed(node, Direction::Outgoing)
+            .collect::<Vec<_>>();
         if let [e] = edges[..] {
             Some(e)
         } else {
@@ -154,15 +161,15 @@ impl Function {
     pub fn values_read(&self, node: NodeIndex) -> impl Iterator<Item = &RcLocal> {
         self.block(node)
             .unwrap()
-            .0.iter()
+            .0
+            .iter()
             .flat_map(|s| s.values_read())
-            .chain(
-                self.edges(node).flat_map(|e| {
-                    e.weight()
-                        .arguments.iter()
-                        .flat_map(|(_, a)| a.values_read())
-                })
-            )
+            .chain(self.edges(node).flat_map(|e| {
+                e.weight()
+                    .arguments
+                    .iter()
+                    .flat_map(|(_, a)| a.values_read())
+            }))
     }
 
     pub fn new_block(&mut self) -> NodeIndex {

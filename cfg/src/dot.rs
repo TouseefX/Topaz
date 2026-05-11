@@ -1,10 +1,17 @@
-use std::{ borrow::{ Borrow, Cow }, cell::RefCell, io::Write };
+use std::{
+    borrow::{Borrow, Cow},
+    cell::RefCell,
+    io::Write,
+};
 
 use ast::LocalRw;
-use dot::{ GraphWalk, LabelText, Labeller };
+use dot::{GraphWalk, LabelText, Labeller};
 
 use itertools::Itertools;
-use petgraph::{ stable_graph::{ EdgeIndex, NodeIndex }, visit::{ Bfs, Walker } };
+use petgraph::{
+    stable_graph::{EdgeIndex, NodeIndex},
+    visit::{Bfs, Walker},
+};
 
 use crate::function::Function;
 
@@ -32,26 +39,31 @@ impl<'a> Labeller<'a, NodeIndex, EdgeIndex> for FunctionLabeller<'a> {
 
     fn node_label<'b>(&'b self, n: &NodeIndex) -> dot::LabelText<'b> {
         let block = self.function.block(*n).unwrap();
-        let prefix = if self.function.entry() == &Some(*n) { "entry" } else { "" };
-        dot::LabelText
-            ::LabelStr(
-                block
-                    .iter()
-                    .map(|s| {
-                        for local in s.values() {
-                            let name = &mut local.0.0.lock().0;
-                            if name.is_none() {
-                                // TODO: ugly
-                                *name = Some(format!("v{}", self.counter.borrow()));
-                                *self.counter.borrow_mut() += 1;
-                            }
+        let prefix = if self.function.entry() == &Some(*n) {
+            "entry"
+        } else {
+            ""
+        };
+        dot::LabelText::LabelStr(
+            block
+                .iter()
+                .map(|s| {
+                    for local in s.values() {
+                        let name = &mut local.0 .0.lock().0;
+                        if name.is_none() {
+                            // TODO: ugly
+                            *name = Some(format!("v{}", self.counter.borrow()));
+                            *self.counter.borrow_mut() += 1;
                         }
-                        s
-                    })
-                    .join("\n")
-                    .into()
-            )
-            .prefix_line(dot::LabelText::LabelStr(format!("{} {}", n.index(), prefix).into()))
+                    }
+                    s
+                })
+                .join("\n")
+                .into(),
+        )
+        .prefix_line(dot::LabelText::LabelStr(
+            format!("{} {}", n.index(), prefix).into(),
+        ))
     }
 
     fn edge_label<'b>(&'b self, e: &EdgeIndex) -> dot::LabelText<'b> {
@@ -93,7 +105,7 @@ impl<'a> GraphWalk<'a, NodeIndex, EdgeIndex> for FunctionLabeller<'a> {
         Cow::Owned(
             Bfs::new(self.function.graph(), self.function.entry().unwrap())
                 .iter(self.function.graph())
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
         )
     }
 
@@ -112,10 +124,10 @@ impl<'a> GraphWalk<'a, NodeIndex, EdgeIndex> for FunctionLabeller<'a> {
 
 pub fn render_to<W: Write>(function: &Function, output: &mut W) -> std::io::Result<()> {
     dot::render(
-        &(FunctionLabeller {
+        &FunctionLabeller {
             function,
             counter: RefCell::new(1),
-        }),
-        output
+        },
+        output,
     )
 }

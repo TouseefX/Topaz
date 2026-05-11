@@ -365,6 +365,27 @@ pub enum OpCode {
     // C: constant table index (0..255)
     LOP_IDIVK,
 
+    // GETUDATAKS: load value from userdata into target register using constant string as a key
+    // A: target register
+    // B: userdata register
+    // C: predicted slot index (based on hash)
+    // AUX: constant table index
+    LOP_GETUDATAKS,
+
+    // SETUDATAKS: store source register into userdata using constant string as a key
+    // A: source register
+    // B: userdata register
+    // C: predicted slot index (based on hash)
+    // AUX: constant table index
+    LOP_SETUDATAKS,
+
+    // NAMECALLUDATA: prepare to call specified method on userdata by name
+    // A: target register
+    // B: source register
+    // C: predicted slot index (based on hash)
+    // AUX: constant table index
+    LOP_NAMECALLUDATA,
+
     // Enum entry for number of opcodes, not a valid opcode by itself!
     LOP__COUNT,
 }

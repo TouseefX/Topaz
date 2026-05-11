@@ -1,15 +1,8 @@
 use crate::{
-    formatter::Formatter,
-    Literal,
-    LocalRw,
-    RValue,
-    RcLocal,
-    Reduce,
-    SideEffects,
-    Traverse,
+    formatter::Formatter, Literal, LocalRw, RValue, RcLocal, Reduce, SideEffects, Traverse,
 };
 
-use std::{ fmt, iter };
+use std::{fmt, iter};
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Table(pub Vec<(Option<RValue>, RValue)>);
@@ -124,10 +117,11 @@ impl SideEffects for Table {
 
 impl fmt::Display for Table {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        (Formatter {
+        Formatter {
             indentation_level: 0,
             indentation_mode: Default::default(),
             output: f,
-        }).format_table(self)
+        }
+        .format_table(self)
     }
 }

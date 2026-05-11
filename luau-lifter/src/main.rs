@@ -1,7 +1,6 @@
 fn main() {
     let file_name = std::env::args().nth(1).expect("expected exactly one file");
-    let key = std::env
-        ::args()
+    let key = std::env::args()
         .nth(2)
         .or_else(|| None)
         .map(|s| if s == "-e" { 203 } else { panic!() })

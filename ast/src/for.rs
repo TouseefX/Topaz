@@ -1,13 +1,5 @@
 use crate::{
-    has_side_effects,
-    Assign,
-    Block,
-    LValue,
-    LocalRw,
-    RValue,
-    RcLocal,
-    SideEffects,
-    Traverse,
+    has_side_effects, Assign, Block, LValue, LocalRw, RValue, RcLocal, SideEffects, Traverse,
 };
 use itertools::Itertools;
 use parking_lot::Mutex;
@@ -53,7 +45,8 @@ impl Traverse for NumForInit {
 
 impl LocalRw for NumForInit {
     fn values_read(&self) -> Vec<&RcLocal> {
-        self.counter.1
+        self.counter
+            .1
             .values_read()
             .into_iter()
             .chain(self.limit.1.values_read())
@@ -62,7 +55,8 @@ impl LocalRw for NumForInit {
     }
 
     fn values_read_mut(&mut self) -> Vec<&mut RcLocal> {
-        self.counter.1
+        self.counter
+            .1
             .values_read_mut()
             .into_iter()
             .chain(self.limit.1.values_read_mut())
@@ -71,7 +65,8 @@ impl LocalRw for NumForInit {
     }
 
     fn values_written(&self) -> Vec<&RcLocal> {
-        self.counter.0
+        self.counter
+            .0
             .values_written()
             .into_iter()
             .chain(self.limit.0.values_written())
@@ -80,7 +75,8 @@ impl LocalRw for NumForInit {
     }
 
     fn values_written_mut(&mut self) -> Vec<&mut RcLocal> {
-        self.counter.0
+        self.counter
+            .0
             .values_written_mut()
             .into_iter()
             .chain(self.limit.0.values_written_mut())
@@ -94,12 +90,7 @@ impl fmt::Display for NumForInit {
         write!(
             f,
             "-- NumForInit\nlocal {}, {}, {} = {}, {}, {}\n-- end NumForInit",
-            self.counter.0,
-            self.limit.0,
-            self.step.0,
-            self.counter.1,
-            self.limit.1,
-            self.step.1
+            self.counter.0, self.limit.0, self.step.0, self.counter.1, self.limit.1, self.step.1
         )
     }
 }
@@ -143,7 +134,8 @@ impl Traverse for NumForNext {
 
 impl LocalRw for NumForNext {
     fn values_read(&self) -> Vec<&RcLocal> {
-        self.counter.1
+        self.counter
+            .1
             .values_read()
             .into_iter()
             .chain(self.step.values_read().into_iter())
@@ -152,7 +144,8 @@ impl LocalRw for NumForNext {
     }
 
     fn values_read_mut(&mut self) -> Vec<&mut RcLocal> {
-        self.counter.1
+        self.counter
+            .1
             .values_read_mut()
             .into_iter()
             .chain(self.step.values_read_mut().into_iter())
@@ -174,11 +167,7 @@ impl fmt::Display for NumForNext {
         write!(
             f,
             "-- NumForNext\n{} = {} + {};\nif {} <= {}\n-- end NumForNext",
-            self.counter.0,
-            self.counter.1,
-            self.step,
-            self.counter.0,
-            self.limit
+            self.counter.0, self.counter.1, self.step, self.counter.0, self.limit
         )
     }
 }
@@ -209,7 +198,7 @@ impl NumericFor {
         limit: RValue,
         step: RValue,
         counter: RcLocal,
-        block: Block
+        block: Block,
     ) -> Self {
         Self {
             initial,
@@ -282,16 +271,14 @@ pub struct GenericForInit(pub Assign);
 
 impl GenericForInit {
     pub fn new(generator: RcLocal, state: RcLocal, initial_control: RcLocal) -> Self {
-        Self(
-            Assign::new(
-                vec![
-                    generator.clone().into(),
-                    state.clone().into(),
-                    initial_control.clone().into()
-                ],
-                vec![generator.into(), state.into(), initial_control.into()]
-            )
-        )
+        Self(Assign::new(
+            vec![
+                generator.clone().into(),
+                state.clone().into(),
+                initial_control.clone().into(),
+            ],
+            vec![generator.into(), state.into(), initial_control.into()],
+        ))
     }
 }
 
@@ -338,8 +325,7 @@ impl fmt::Display for GenericForInit {
         write!(
             f,
             "-- GenericForInit\n{}\n[internal control] = {}\n-- end GenericForInit",
-            self.0,
-            self.0.left[2]
+            self.0, self.0.left[2]
         )
     }
 }
@@ -424,7 +410,7 @@ impl fmt::Display for GenericForNext {
             self.generator,
             self.state,
             self.res_locals[0],
-            self.res_locals[0]
+            self.res_locals[0],
         )
     }
 }
@@ -457,10 +443,7 @@ has_side_effects!(GenericFor);
 
 impl LocalRw for GenericFor {
     fn values_read(&self) -> Vec<&RcLocal> {
-        self.right
-            .iter()
-            .flat_map(|r| r.values_read())
-            .collect()
+        self.right.iter().flat_map(|r| r.values_read()).collect()
     }
 
     fn values_read_mut(&mut self) -> Vec<&mut RcLocal> {

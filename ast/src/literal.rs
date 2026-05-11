@@ -3,13 +3,7 @@ use enum_as_inner::EnumAsInner;
 use std::fmt;
 
 use crate::{
-    formatter::Formatter,
-    type_system::Infer,
-    LocalRw,
-    Reduce,
-    SideEffects,
-    Traverse,
-    Type,
+    formatter::Formatter, type_system::Infer, LocalRw, Reduce, SideEffects, Traverse, Type,
     TypeSystem,
 };
 
@@ -30,11 +24,12 @@ impl Reduce for Literal {
     fn reduce_condition(self) -> crate::RValue {
         Literal::Boolean(match self {
             Literal::Boolean(false) | Literal::Nil => false,
-            | Literal::Boolean(true)
+            Literal::Boolean(true)
             | Literal::Number(_)
             | Literal::String(_)
             | Literal::Vector(..) => true,
-        }).into()
+        })
+        .into()
     }
 }
 
@@ -77,7 +72,11 @@ impl fmt::Display for Literal {
                 write!(f, "{}", printed.strip_suffix(".0").unwrap_or(printed))
             }
             Literal::String(value) => {
-                write!(f, "\"{}\"", Formatter::<fmt::Formatter>::escape_string(value))
+                write!(
+                    f,
+                    "\"{}\"",
+                    Formatter::<fmt::Formatter>::escape_string(value)
+                )
             }
             Literal::Vector(x, y, z) => write!(f, "Vector3.new({}, {}, {})", x, y, z),
         }

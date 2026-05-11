@@ -2,11 +2,11 @@ use std::collections::HashMap;
 
 use itertools::Either;
 
-use crate::{ Block, LocalRw, RValue, RcLocal, Statement, Traverse };
+use crate::{Block, LocalRw, RValue, RcLocal, Statement, Traverse};
 
 pub fn replace_locals<H: std::hash::BuildHasher>(
     block: &mut Block,
-    map: &HashMap<RcLocal, RcLocal, H>
+    map: &HashMap<RcLocal, RcLocal, H>,
 ) {
     for statement in &mut block.0 {
         for local in statement.values_read_mut() {
@@ -20,14 +20,12 @@ pub fn replace_locals<H: std::hash::BuildHasher>(
             }
         }
         // TODO: traverse_values
-        statement.post_traverse_values(
-            &mut (|value| -> Option<()> {
-                if let Either::Right(RValue::Closure(closure)) = value {
-                    replace_locals(&mut closure.function.lock().body, map);
-                }
-                None
-            })
-        );
+        statement.post_traverse_values(&mut |value| -> Option<()> {
+            if let Either::Right(RValue::Closure(closure)) = value {
+                replace_locals(&mut closure.function.lock().body, map)
+            };
+            None
+        });
         match statement {
             Statement::If(r#if) => {
                 replace_locals(&mut r#if.then_block.lock(), map);

@@ -1,96 +1,111 @@
 use rustc_hash::FxHashSet;
 use triomphe::Arc;
 
-use crate::{Block, Literal, RValue, RcLocal, Statement, Traverse, Upvalue};
+use crate::{Block, Global, Literal, RValue, RcLocal, Statement, Traverse, Upvalue};
 
 struct Namer {
     rename: bool,
     counter: usize,
     upvalues: FxHashSet<RcLocal>,
+    numeric_for_depth: usize,
 }
 
+const FOR_LETTERS: &[&str] = &["i", "j", "k", "l", "m", "n"];
+
 impl Namer {
-    fn extract_name_hint(rvalue: &RValue) -> Option<String> {
-        match rvalue {
-            RValue::Closure(closure) => {
-                let function = closure.function.lock();
-                if let Some(name) = &function.name {
-                    if !name.is_empty() {
-                        return Some(Self::sanitize_name(name));
-                    }
+    fn is_synthetic_name(name: &str) -> bool {
+        if name.is_empty() || name == "_" {
+            return true;
+        }
+        if name.len() == 1 && (name == "v" || name == "p") {
+            return true;
+        }
+        if (name.starts_with('v') || name.starts_with('p')) && name.len() > 1 {
+            return name[1..].chars().all(|c| c.is_ascii_digit());
+        }
+        false
+    }
+
+    fn name_local_with_prefix(&mut self, prefix: &str, local: &RcLocal) {
+        let mut lock = local.0 .0.lock();
+        if lock.0.is_some() && !self.rename {
+            return;
+        }
+        if lock.0.is_some() && self.rename {
+            if let Some(ref name) = lock.0 {
+                if !Self::is_synthetic_name(name) {
+                    return;
                 }
-                None
             }
-            RValue::MethodCall(method_call) => {
-                if let Some(RValue::Literal(Literal::String(arg))) = method_call.arguments.first() {
-                    if let Ok(s) = std::str::from_utf8(arg) {
-                        return Some(Self::sanitize_name(s));
-                    }
+        }
+        if Arc::count(&local.0 .0) == 1 {
+            lock.0 = Some("_".to_string());
+            return;
+        }
+        let suffix = self.counter;
+        self.counter += 1;
+        let upv = if self.upvalues.contains(local) { "_u" } else { "" };
+        lock.0 = Some(format!("{prefix}{upv}{suffix}"));
+    }
+
+    fn name_local_fixed(&mut self, fixed: &str, local: &RcLocal) {
+        let mut lock = local.0 .0.lock();
+        if lock.0.is_some() && !self.rename {
+            return;
+        }
+        if lock.0.is_some() && self.rename {
+            if let Some(ref name) = lock.0 {
+                if !Self::is_synthetic_name(name) {
+                    return;
                 }
-                None
             }
-            RValue::Index(index) => match &*index.right {
-                RValue::Literal(Literal::String(string)) => {
-                    if let Ok(s) = std::str::from_utf8(string) {
-                        return Some(Self::sanitize_name(s));
-                    }
-                    None
-                }
+        }
+        if Arc::count(&local.0 .0) == 1 {
+            lock.0 = Some("_".to_string());
+            return;
+        }
+        lock.0 = Some(fixed.to_string());
+    }
+
+    fn for_letter(&self) -> &'static str {
+        FOR_LETTERS[self.numeric_for_depth.min(FOR_LETTERS.len() - 1)]
+    }
+
+    fn gen_for_convention(right: &[RValue]) -> Option<(&'static str, &'static str)> {
+        let first = right.first()?;
+        let global_name = |g: &Global| std::str::from_utf8(&g.0).ok().map(|s| s.to_string());
+        let name = match first {
+            RValue::Call(call) => match &*call.value {
+                RValue::Global(g) => global_name(g),
                 _ => None,
             },
-            RValue::Global(global) => Some(Self::sanitize_name(&global.to_string())),
+            RValue::Global(g) => global_name(g),
+            _ => None,
+        }?;
+        match name.as_str() {
+            "pairs" => Some(("k", "v")),
+            "ipairs" => Some(("i", "v")),
+            "next" => Some(("k", "v")),
             _ => None,
         }
     }
 
-    fn sanitize_name(name: &str) -> String {
-        let sanitized: String = name
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '_')
-            .collect();
-
-        if sanitized.chars().next().map_or(false, |c| c.is_numeric()) {
-            format!("_{}", sanitized)
-        } else if sanitized.is_empty() {
-            "var".to_string()
-        } else {
-            sanitized
-        }
-    }
-
-    fn get_prefix_from_rvalue(rvalue: &RValue) -> &'static str {
-        match rvalue {
-            RValue::Table(_) => "t",           
-            RValue::Closure(_) => "f",        
-            _ => "v",                          
-        }
-    }
-
-    fn name_local(&mut self, prefix: &str, local: &RcLocal, hint: Option<&RValue>) {
-        let mut lock = local.0 .0.lock();
-        if self.rename || lock.0.is_none() {
-            if Arc::strong_count(&local.0 .0) == 1 {
-                lock.0 = Some("_".to_string());
-            } else {
-                let type_prefix = if let Some(rvalue) = hint {
-                    Self::get_prefix_from_rvalue(rvalue)
-                } else {
-                    prefix
-                };
-
-                let name = if let Some(rvalue) = hint {
-                    if let Some(hint_name) = Self::extract_name_hint(rvalue) {
-                        format!("{}_{}_{}", type_prefix, hint_name, self.counter)
-                    } else {
-                        format!("{}{}", type_prefix, self.counter)
+    fn hint_for_rvalue(rv: &RValue) -> &'static str {
+        match rv {
+            RValue::Literal(Literal::String(_)) => "s",
+            RValue::Literal(Literal::Number(_)) => "n",
+            RValue::Literal(Literal::Boolean(_)) => "b",
+            RValue::Table(_) => "t",
+            RValue::Closure(_) => "fn",
+            RValue::Call(call) => {
+                if let RValue::Global(g) = &*call.value {
+                    if std::str::from_utf8(&g.0).ok() == Some("require") {
+                        return "mod";
                     }
-                } else {
-                    format!("{}{}", prefix, self.counter)
-                };
-
-                lock.0 = Some(name);
-                self.counter += 1;
+                }
+                "v"
             }
+            _ => "v",
         }
     }
 
@@ -100,7 +115,7 @@ impl Namer {
                 if let itertools::Either::Right(RValue::Closure(closure)) = value {
                     let mut function = closure.function.lock();
                     for param in &function.parameters {
-                        self.name_local("a", param, None);  
+                        self.name_local_with_prefix("p", param);
                     }
                     self.name_locals(&mut function.body);
                 };
@@ -109,10 +124,12 @@ impl Namer {
             match statement {
                 Statement::Assign(assign) if assign.prefix => {
                     for (i, lvalue) in assign.left.iter().enumerate() {
-                        if let Some(local) = lvalue.as_local() {
-                            let hint = assign.right.get(i);
-                            self.name_local("l", local, hint);
-                        }
+                        let hint = assign
+                            .right
+                            .get(i)
+                            .map(Self::hint_for_rvalue)
+                            .unwrap_or("v");
+                        self.name_local_with_prefix(hint, lvalue.as_local().unwrap());
                     }
                 }
                 Statement::If(r#if) => {
@@ -126,12 +143,28 @@ impl Namer {
                     self.name_locals(&mut repeat.block.lock());
                 }
                 Statement::NumericFor(numeric_for) => {
-                    self.name_local("i", &numeric_for.counter, None);  
+                    let letter = self.for_letter();
+                    self.name_local_fixed(letter, &numeric_for.counter);
+                    self.numeric_for_depth += 1;
                     self.name_locals(&mut numeric_for.block.lock());
+                    self.numeric_for_depth -= 1;
                 }
                 Statement::GenericFor(generic_for) => {
-                    for res_local in &generic_for.res_locals {
-                        self.name_local("v", res_local, None);  
+                    let convention = Self::gen_for_convention(&generic_for.right);
+                    if let Some((k_name, v_name)) = convention {
+                        if generic_for.res_locals.len() == 1 {
+                            self.name_local_fixed(v_name, &generic_for.res_locals[0]);
+                        } else {
+                            self.name_local_fixed(k_name, &generic_for.res_locals[0]);
+                            self.name_local_fixed(v_name, &generic_for.res_locals[1]);
+                            for res_local in &generic_for.res_locals[2..] {
+                                self.name_local_with_prefix("v", res_local);
+                            }
+                        }
+                    } else {
+                        for res_local in &generic_for.res_locals {
+                            self.name_local_with_prefix("v", res_local);
+                        }
                     }
                     self.name_locals(&mut generic_for.block.lock());
                 }
@@ -185,6 +218,7 @@ pub fn name_locals(block: &mut Block, rename: bool) {
         rename,
         counter: 1,
         upvalues: FxHashSet::default(),
+        numeric_for_depth: 0,
     };
     namer.find_upvalues(block);
     namer.name_locals(block);

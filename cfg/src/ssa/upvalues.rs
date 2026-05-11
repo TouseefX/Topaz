@@ -1,6 +1,6 @@
 use petgraph::stable_graph::NodeIndex;
 use rangemap::RangeInclusiveMap;
-use rustc_hash::{ FxHashMap, FxHashSet };
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::function::Function;
 
@@ -8,7 +8,7 @@ use crate::function::Function;
 pub(crate) struct UpvaluesOpen {
     pub open: FxHashMap<
         NodeIndex,
-        FxHashMap<ast::RcLocal, RangeInclusiveMap<usize, Vec<(NodeIndex, usize)>>>
+        FxHashMap<ast::RcLocal, RangeInclusiveMap<usize, Vec<(NodeIndex, usize)>>>,
     >,
     old_locals: FxHashMap<ast::RcLocal, ast::RcLocal>,
 }
@@ -31,23 +31,21 @@ impl UpvaluesOpen {
                 // this is because the lifter isnt guaranteed to be lifting bytecode
                 // it could be lifting lua source code for deobfuscation purposes
                 if let ast::Statement::Assign(assign) = statement {
-                    for opened in assign.right
+                    for opened in assign
+                        .right
                         .iter()
                         .filter_map(|r| r.as_closure())
                         .flat_map(|c| c.upvalues.iter())
-                        .filter_map(|u| {
-                            match u {
-                                ast::Upvalue::Copy(_) => None,
-                                ast::Upvalue::Ref(l) => Some(l),
-                            }
+                        .filter_map(|u| match u {
+                            ast::Upvalue::Copy(_) => None,
+                            ast::Upvalue::Ref(l) => Some(l),
                         })
-                        .map(|l| this.old_locals[l].clone()) {
+                        .map(|l| this.old_locals[l].clone())
+                    {
                         let open_ranges = block_opened.entry(opened).or_default();
                         let mut open_locations = Vec::new();
-                        if
-                            let Some((_prev_range, prev_locations)) = open_ranges.get_key_value(
-                                &stat_index
-                            )
+                        if let Some((_prev_range, prev_locations)) =
+                            open_ranges.get_key_value(&stat_index)
                         {
                             // TODO: this assert fails in Luau with the below code,
                             // but i dont know why. it appears to work fine with the
@@ -86,7 +84,7 @@ impl UpvaluesOpen {
                     let open_at_end = this.open[&node]
                         .iter()
                         .filter_map(|(l, m)| {
-                            Some((l.clone(), m.get(&block.len().saturating_sub(1))?.clone()))
+                            Some((l.clone(), m.get(&(block.len().saturating_sub(1)))?.clone()))
                         })
                         .collect::<Vec<_>>();
                     let successor_open = this.open.entry(successor).or_default();

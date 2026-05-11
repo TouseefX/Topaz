@@ -1,6 +1,6 @@
 use itertools::Itertools;
 
-use crate::{ LocalRw, RcLocal, SideEffects, Traverse };
+use crate::{LocalRw, RcLocal, SideEffects, Traverse};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Close {
