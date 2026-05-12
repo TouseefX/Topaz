@@ -59,16 +59,32 @@ fn walk_for_tails(block: &Block, out: &mut FxHashMap<String, Vec<Statement>>) {
     }
 }
 
+const MAX_TAIL_LEN: usize = 8;
+
 fn extract_short_tail(stmts: &[Statement], from: usize) -> Option<Vec<Statement>> {
     if from >= stmts.len() {
         return None;
     }
-    match &stmts[from] {
-        Statement::Return(_) | Statement::Break(_) | Statement::Continue(_) => {
-            Some(vec![stmts[from].clone()])
+    let mut tail = Vec::with_capacity(2);
+    let mut i = from;
+    while i < stmts.len() && tail.len() < MAX_TAIL_LEN {
+        let stmt = &stmts[i];
+        match stmt {
+            Statement::Return(_) | Statement::Break(_) | Statement::Continue(_) => {
+                tail.push(stmt.clone());
+                return Some(tail);
+            }
+            Statement::Call(_) | Statement::MethodCall(_) | Statement::Empty(_) => {
+                tail.push(stmt.clone());
+            }
+            Statement::Assign(a) if !a.prefix => {
+                tail.push(stmt.clone());
+            }
+            _ => return None,
         }
-        _ => None,
+        i += 1;
     }
+    None
 }
 
 fn replace_gotos(block: &mut Block, tails: &FxHashMap<String, Vec<Statement>>) {
