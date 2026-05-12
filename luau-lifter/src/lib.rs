@@ -4,8 +4,8 @@ mod lifter;
 mod op_code;
 
 use ast::{
-    local_declarations::LocalDeclarer, name_locals::name_locals, replace_locals::replace_locals,
-    Traverse,
+    inline_gotos::inline_short_gotos, local_declarations::LocalDeclarer,
+    name_locals::name_locals, replace_locals::replace_locals, Traverse,
 };
 
 use by_address::ByAddress;
@@ -179,6 +179,7 @@ pub fn decompile_bytecode(bytecode: &[u8], encode_key: u8) -> String {
             upvalues.remove(&main);
             let mut body = Arc::try_unwrap(main.0).unwrap().into_inner().body;
             link_upvalues(&mut body, &mut upvalues);
+            inline_short_gotos(&mut body);
             name_locals(&mut body, true);
             body.to_string()
         }

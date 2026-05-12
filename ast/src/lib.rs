@@ -24,6 +24,7 @@ mod global;
 mod goto;
 mod r#if;
 mod index;
+pub mod inline_gotos;
 mod literal;
 mod local;
 

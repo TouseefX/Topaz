@@ -1,16 +1,25 @@
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use triomphe::Arc;
 
-use crate::{Block, Global, Literal, RValue, RcLocal, Statement, Traverse, Upvalue};
+use crate::{
+    Block, Call, Global, Literal, MethodCall, RValue, RcLocal, Statement, Traverse, Upvalue,
+};
 
 struct Namer {
     rename: bool,
     counter: usize,
     upvalues: FxHashSet<RcLocal>,
     numeric_for_depth: usize,
+    name_uses: FxHashMap<String, usize>,
 }
 
 const FOR_LETTERS: &[&str] = &["i", "j", "k", "l", "m", "n"];
+const SYNTHETIC_PREFIXES: &[&str] = &["v", "p", "t", "s", "n", "b", "k", "fn", "mod"];
+
+const LUA_KEYWORDS: &[&str] = &[
+    "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in",
+    "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
+];
 
 impl Namer {
     fn is_synthetic_name(name: &str) -> bool {
@@ -20,20 +29,165 @@ impl Namer {
         if name.len() == 1 && (name == "v" || name == "p") {
             return true;
         }
-        if (name.starts_with('v') || name.starts_with('p')) && name.len() > 1 {
-            return name[1..].chars().all(|c| c.is_ascii_digit());
+        for &prefix in SYNTHETIC_PREFIXES {
+            if let Some(rest) = name.strip_prefix(prefix) {
+                let rest = rest.strip_prefix("_u").unwrap_or(rest);
+                if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                    return true;
+                }
+            }
         }
         false
     }
 
-    fn name_local_with_prefix(&mut self, prefix: &str, local: &RcLocal) {
-        let mut lock = local.0 .0.lock();
-        if lock.0.is_some() && !self.rename {
-            return;
+    fn is_valid_identifier(name: &str) -> bool {
+        if name.is_empty() {
+            return false;
         }
-        if lock.0.is_some() && self.rename {
-            if let Some(ref name) = lock.0 {
-                if !Self::is_synthetic_name(name) {
+        let mut chars = name.chars();
+        let first = chars.next().unwrap();
+        if !(first.is_ascii_alphabetic() || first == '_') {
+            return false;
+        }
+        if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return false;
+        }
+        !LUA_KEYWORDS.contains(&name)
+    }
+
+    fn lower_first(s: &str) -> String {
+        let mut chars = s.chars();
+        match chars.next() {
+            Some(c) => c.to_ascii_lowercase().to_string() + chars.as_str(),
+            None => String::new(),
+        }
+    }
+
+    fn string_lit(rv: &RValue) -> Option<&str> {
+        if let RValue::Literal(Literal::String(s)) = rv {
+            std::str::from_utf8(s).ok()
+        } else {
+            None
+        }
+    }
+
+    fn global_name(g: &Global) -> Option<&str> {
+        std::str::from_utf8(&g.0).ok()
+    }
+
+    fn last_field(rv: &RValue) -> Option<String> {
+        match rv {
+            RValue::Index(idx) => Self::string_lit(&idx.right).map(str::to_string),
+            RValue::MethodCall(mc) => match mc.method.as_str() {
+                "WaitForChild" | "FindFirstChild" | "FindFirstChildOfClass"
+                | "FindFirstChildWhichIsA" | "FindFirstAncestor" | "GetService" => {
+                    mc.arguments.first().and_then(Self::string_lit).map(str::to_string)
+                }
+                _ => Some(mc.method.clone()),
+            },
+            RValue::Call(call) => Self::last_field(&call.value),
+            RValue::Global(g) => Self::global_name(g).map(str::to_string),
+            RValue::Local(_) => None,
+            _ => None,
+        }
+    }
+
+    fn first_string_arg(mc: &MethodCall) -> Option<&str> {
+        mc.arguments.first().and_then(Self::string_lit)
+    }
+
+    fn name_from_method_call(mc: &MethodCall) -> Option<String> {
+        match mc.method.as_str() {
+            "GetService"
+            | "WaitForChild"
+            | "FindFirstChild"
+            | "FindFirstChildOfClass"
+            | "FindFirstChildWhichIsA"
+            | "FindFirstAncestor"
+            | "FindFirstAncestorOfClass"
+            | "FindFirstAncestorWhichIsA" => {
+                Self::first_string_arg(mc).map(Self::lower_first)
+            }
+            "GetChildren" => Some("children".to_string()),
+            "GetDescendants" => Some("descendants".to_string()),
+            "GetPlayers" => Some("players".to_string()),
+            "GetMouse" => Some("mouse".to_string()),
+            "GetPropertyChangedSignal" => Self::first_string_arg(mc)
+                .map(|s| format!("{}Changed", Self::lower_first(s))),
+            "Connect" | "ConnectParallel" | "Once" => Some("connection".to_string()),
+            "Clone" => Self::last_field(&mc.value).map(|s| Self::lower_first(&s)),
+            _ => None,
+        }
+    }
+
+    fn name_from_call(call: &Call) -> Option<String> {
+        match &*call.value {
+            RValue::Global(g) => match Self::global_name(g)? {
+                "require" => {
+                    let arg = call.arguments.first()?;
+                    Self::last_field(arg).map(|s| Self::lower_first(&s))
+                }
+                "tostring" => Some("str".to_string()),
+                "tonumber" => Some("num".to_string()),
+                "type" | "typeof" => Some("ty".to_string()),
+                "newproxy" => Some("proxy".to_string()),
+                "setmetatable" => call
+                    .arguments
+                    .first()
+                    .and_then(Self::last_field)
+                    .map(|s| Self::lower_first(&s)),
+                _ => None,
+            },
+            RValue::Index(idx) => {
+                let method = Self::string_lit(&idx.right)?;
+                if method == "new" {
+                    Self::last_field(&idx.left).map(|s| Self::lower_first(&s))
+                } else if method == "fromName" || method == "named" {
+                    call.arguments.first().and_then(Self::string_lit).map(Self::lower_first)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn derive_name(rv: &RValue) -> Option<String> {
+        let raw = match rv {
+            RValue::Call(call) => Self::name_from_call(call),
+            RValue::MethodCall(mc) => Self::name_from_method_call(mc),
+            RValue::Index(idx) => Self::string_lit(&idx.right).map(Self::lower_first),
+            RValue::Global(g) => Self::global_name(g).map(Self::lower_first),
+            _ => None,
+        }?;
+        if Self::is_valid_identifier(&raw) {
+            Some(raw)
+        } else {
+            None
+        }
+    }
+
+    fn unique_name(&mut self, base: &str) -> String {
+        let candidate = base.to_string();
+        let count = self.name_uses.entry(candidate.clone()).or_insert(0);
+        if *count == 0 {
+            *count = 1;
+            candidate
+        } else {
+            let n = *count;
+            *count += 1;
+            format!("{}{}", candidate, n + 1)
+        }
+    }
+
+    fn name_local_smart(&mut self, hint: &str, rvalue: Option<&RValue>, local: &RcLocal) {
+        let mut lock = local.0 .0.lock();
+        if lock.0.is_some() {
+            if !self.rename {
+                return;
+            }
+            if let Some(ref existing) = lock.0 {
+                if !Self::is_synthetic_name(existing) {
                     return;
                 }
             }
@@ -42,10 +196,21 @@ impl Namer {
             lock.0 = Some("_".to_string());
             return;
         }
-        let suffix = self.counter;
-        self.counter += 1;
-        let upv = if self.upvalues.contains(local) { "_u" } else { "" };
-        lock.0 = Some(format!("{prefix}{upv}{suffix}"));
+        drop(lock);
+
+        let name = if let Some(derived) = rvalue.and_then(Self::derive_name) {
+            self.unique_name(&derived)
+        } else {
+            let suffix = self.counter;
+            self.counter += 1;
+            let upv = if self.upvalues.contains(local) { "_u" } else { "" };
+            format!("{hint}{upv}{suffix}")
+        };
+        local.0 .0.lock().0 = Some(name);
+    }
+
+    fn name_local_with_prefix(&mut self, prefix: &str, local: &RcLocal) {
+        self.name_local_smart(prefix, None, local);
     }
 
     fn name_local_fixed(&mut self, fixed: &str, local: &RcLocal) {
@@ -124,12 +289,9 @@ impl Namer {
             match statement {
                 Statement::Assign(assign) if assign.prefix => {
                     for (i, lvalue) in assign.left.iter().enumerate() {
-                        let hint = assign
-                            .right
-                            .get(i)
-                            .map(Self::hint_for_rvalue)
-                            .unwrap_or("v");
-                        self.name_local_with_prefix(hint, lvalue.as_local().unwrap());
+                        let rv = assign.right.get(i);
+                        let hint = rv.map(Self::hint_for_rvalue).unwrap_or("v");
+                        self.name_local_smart(hint, rv, lvalue.as_local().unwrap());
                     }
                 }
                 Statement::If(r#if) => {
@@ -219,6 +381,7 @@ pub fn name_locals(block: &mut Block, rename: bool) {
         counter: 1,
         upvalues: FxHashSet::default(),
         numeric_for_depth: 0,
+        name_uses: FxHashMap::default(),
     };
     namer.find_upvalues(block);
     namer.name_locals(block);
