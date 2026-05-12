@@ -2,7 +2,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use triomphe::Arc;
 
 use crate::{
-    Block, Call, Global, Literal, MethodCall, RValue, RcLocal, Statement, Traverse, Upvalue,
+    Block, Call, Global, Literal, MethodCall, RValue, RcLocal, Select, Statement, Traverse,
+    Upvalue,
 };
 
 struct Namer {
@@ -75,17 +76,23 @@ impl Namer {
         std::str::from_utf8(&g.0).ok()
     }
 
+    fn method_call_last(mc: &MethodCall) -> Option<String> {
+        match mc.method.as_str() {
+            "WaitForChild" | "FindFirstChild" | "FindFirstChildOfClass"
+            | "FindFirstChildWhichIsA" | "FindFirstAncestor" | "GetService" => {
+                mc.arguments.first().and_then(Self::string_lit).map(str::to_string)
+            }
+            _ => Some(mc.method.clone()),
+        }
+    }
+
     fn last_field(rv: &RValue) -> Option<String> {
         match rv {
             RValue::Index(idx) => Self::string_lit(&idx.right).map(str::to_string),
-            RValue::MethodCall(mc) => match mc.method.as_str() {
-                "WaitForChild" | "FindFirstChild" | "FindFirstChildOfClass"
-                | "FindFirstChildWhichIsA" | "FindFirstAncestor" | "GetService" => {
-                    mc.arguments.first().and_then(Self::string_lit).map(str::to_string)
-                }
-                _ => Some(mc.method.clone()),
-            },
+            RValue::MethodCall(mc) => Self::method_call_last(mc),
             RValue::Call(call) => Self::last_field(&call.value),
+            RValue::Select(Select::Call(call)) => Self::last_field(&call.value),
+            RValue::Select(Select::MethodCall(mc)) => Self::method_call_last(mc),
             RValue::Global(g) => Self::global_name(g).map(str::to_string),
             RValue::Local(_) => None,
             _ => None,
@@ -156,6 +163,8 @@ impl Namer {
         let raw = match rv {
             RValue::Call(call) => Self::name_from_call(call),
             RValue::MethodCall(mc) => Self::name_from_method_call(mc),
+            RValue::Select(Select::Call(call)) => Self::name_from_call(call),
+            RValue::Select(Select::MethodCall(mc)) => Self::name_from_method_call(mc),
             RValue::Index(idx) => Self::string_lit(&idx.right).map(Self::lower_first),
             RValue::Global(g) => Self::global_name(g).map(Self::lower_first),
             _ => None,
