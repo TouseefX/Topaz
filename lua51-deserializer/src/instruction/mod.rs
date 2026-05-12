@@ -18,9 +18,8 @@ struct RawInstruction(OperationCode, Layout);
 
 impl RawInstruction {
     pub fn parse(input: &[u8]) -> IResult<&[u8], Self> {
-        // TODO: we read the operation code and then the instruction including the operation code
-        // while parsing the layout.
-        // we should instead read the instruction here and pass it to Layout::parse
+        
+        
         let operation_code = OperationCode::parse(input).map(|r| r.1)?;
         let (input, layout) = Layout::parse(input, operation_code.to_u8().unwrap())?;
 
@@ -163,28 +162,26 @@ pub enum Instruction {
     },
     Return(Register, u8),
     IterateNumericForLoop {
-        // TODO: change to struct instead of vec
-        // internal_counter, limit, step, external_counter
+        
+        
         control: Vec<Register>,
         skip: i32,
     },
     InitNumericForLoop {
-        // TODO: change to struct instead of vec
-        // internal_counter, limit, step, external_counter
-        // the name "control" refers to just the counter
+        
+        
         control: Vec<Register>,
         skip: i32,
     },
     IterateGenericForLoop {
-        // ex. `next` in `for i, v in next, {}, 5`
+        
         generator: Register,
-        // ex. `{}` in `for i, v in next, {}, 5`
+        
         state: Register,
-        // internal control variable
-        // initial value ex. `5` in `for i, v in next, {}, 5`
-        // assigned to external control (vars[0]) at the start of the loop body
+        
+        
         internal_control: Register,
-        // variables returned by generator call, starting with the external control
+        
         vars: Vec<Register>,
     },
     SetList {
@@ -373,7 +370,7 @@ impl Instruction {
                     internal_control: Register(a + 2),
                     vars: (a + 3..a + 3 + c as u8).map(Register).collect(),
                 };
-                // must have at least external control variable
+                
                 assert!(match &res {
                     Self::IterateGenericForLoop { vars, .. } => !vars.is_empty(),
                     _ => unreachable!(),

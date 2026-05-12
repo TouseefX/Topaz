@@ -13,7 +13,7 @@ mod conditional;
 mod jump;
 mod r#loop;
 
-// TODO: REFACTOR: move
+
 pub fn post_dominators<N: Default, E: Default>(
     graph: &mut StableDiGraph<N, E>,
 ) -> Dominators<NodeIndex> {
@@ -71,10 +71,10 @@ impl GraphStructurer {
     ) -> bool {
         let successors = self.function.successor_blocks(node).collect_vec();
 
-        // cfg::dot::render_to(&self.function, &mut std::io::stdout()).unwrap();
+        
         if self.try_collapse_loop(node, dominators, post_dom) {
             self.find_loop_headers();
-            // println!("matched loop");
+            
             return true;
         }
 
@@ -85,7 +85,7 @@ impl GraphStructurer {
         let changed = match successors.len() {
             0 => false,
             1 => {
-                // remove unnecessary jumps to allow pattern matching
+                
                 self.match_jump(node, Some(successors[0]))
             }
             2 => {
@@ -100,9 +100,7 @@ impl GraphStructurer {
             _ => unreachable!(),
         };
 
-        //println!("after");
-        //dot::render_to(&self.function, &mut std::io::stdout()).unwrap();
-
+        
         changed
     }
 
@@ -115,20 +113,18 @@ impl GraphStructurer {
         let mut dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
         let mut post_dom = post_dominators(self.function.graph_mut());
 
-        // cfg::dot::render_to(&self.function, &mut std::io::stdout()).unwrap();
-
+        
         let mut changed = false;
         while let Some(node) = dfs_postorder.next(self.function.graph()) {
-            // println!("matching {:?}", node);
+            
             let matched = self.try_match_pattern(node, &dominators, &post_dom);
             if matched {
                 dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
                 post_dom = post_dominators(self.function.graph_mut());
             }
             changed |= matched;
-            // if matched {
-            //     cfg::dot::render_to(&self.function, &mut std::io::stdout()).unwrap();
-            // }
+            
+            
         }
 
         for node in self
@@ -138,7 +134,7 @@ impl GraphStructurer {
             .filter(|node| !dfs.contains(node))
             .collect_vec()
         {
-            // block may have been removed in a previous iteration
+            
             if self.function.has_block(node)
                 && self.function.predecessor_blocks(node).next().is_none()
             {
@@ -152,7 +148,7 @@ impl GraphStructurer {
                 {
                     self.function.remove_block(node);
                 } else {
-                    //let dominators = simple_fast(self.function.graph(), node);
+                    
                     let matched = self.try_match_pattern(node, &dominators, &post_dom);
                     changed |= matched;
                 }
@@ -168,13 +164,13 @@ impl GraphStructurer {
             && self.function.predecessor_blocks(target).count() == 1
         {
             assert!(self.function.successor_blocks(source).count() == 1);
-            // TODO: this code is repeated in match_jump, move to a new function
+            
             let edges = self.function.remove_edges(target);
             let block = self.function.remove_block(target).unwrap();
             self.function.block_mut(source).unwrap().extend(block.0);
             self.function.set_edges(source, edges);
         } else {
-            // TODO: make label an Rc and have a global counter for block name
+            
             let label = ast::Label(format!("l{}", target.index()));
             let target_block = self.function.block_mut(target).unwrap();
             if target_block.first().and_then(|s| s.as_label()).is_none() {
@@ -208,16 +204,14 @@ impl GraphStructurer {
             if self.function.graph().node_count() == 1 {
                 break;
             }
-            // last resort refinement
+            
             let edges = self.function.graph().edge_indices().collect::<Vec<_>>();
-            // https://edmcman.github.io/papers/usenix13.pdf
-            // we prefer to remove edges whose source does not dominate its target, nor whose target dominates its source
-            // TODO: try all possible paths and return the one with the least gotos, i don't think there's any other way
-            // to get best output
+            
+            
             let mut changed = false;
             for &edge in &edges {
-                // edge might have been invalidated by a previous iteration due to insert_goto_for_edge
-                // calling remove_block(target)
+                
+                
                 if self.function.graph().edge_weight(edge).is_none() {
                     continue;
                 }
@@ -226,7 +220,7 @@ impl GraphStructurer {
                 let dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
                 let target_dominators = dominators.dominators(target);
                 let source_dominators = dominators.dominators(source);
-                // TODO: check if blocks in dfs instead
+                
                 if target_dominators.is_none() || source_dominators.is_none() {
                     continue;
                 }
@@ -246,8 +240,8 @@ impl GraphStructurer {
 
             if !changed {
                 for edge in edges {
-                    // edge might have been invalidated by a previous iteration due to insert_goto_for_edge
-                    // calling remove_block(target)
+                    
+                    
                     if self.function.graph().edge_weight(edge).is_none() {
                         continue;
                     }
@@ -309,15 +303,15 @@ impl GraphStructurer {
                 let mut goto_destinations = FxHashSet::default();
                 collect_gotos(&block, &mut goto_destinations);
                 for label in goto_destinations {
-                    // TODO: block might have been merged/structured into another, output that block instead
-                    // will require collecting label definitions in addition to references (gotos)
+                    
+                    
                     let target_node = self.label_to_node[&label];
                     if self.function.has_block(target_node) {
                         stack.push(target_node);
                     }
                 }
                 if let Some(ast::Statement::Goto(goto)) = res_block.last()
-                // TODO: keep label -> block map instead
+                
                     && goto.0.0[1..] == node.index().to_string()
                 {
                     res_block.pop();
@@ -330,7 +324,7 @@ impl GraphStructurer {
                 }
                 res_block.extend(block.0)
             }
-            // TODO: these nodes are never executed (i think), comment them out or dont include them
+            
             for node in self.function.graph().node_indices().collect::<Vec<_>>() {
                 let block = self.function.remove_block(node).unwrap();
                 if !block

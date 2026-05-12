@@ -31,14 +31,13 @@ pub struct Lifter<'a, 'b> {
 
 impl<'a, 'b> Lifter<'a, 'b> {
     fn compute_register_names(&self) -> Vec<Option<String>> {
-        // In Lua 5.1, each debug local's register is the count of debug locals
-        // that are active (alive) at its start_pc. Debug locals are listed in
-        // the order they become active, and Lua uses stack-based register alloc.
+        
+        
         let max_stack = self.bytecode.maximum_stack_size as usize;
         let mut names: Vec<Option<String>> = vec![None; max_stack];
         let locals = &self.bytecode.locals;
 
-        // Collect ALL debug locals per register, pick the first user-visible name
+        
         for (i, local) in locals.iter().enumerate() {
             let reg = locals[..i]
                 .iter()
@@ -58,8 +57,7 @@ impl<'a, 'b> Lifter<'a, 'b> {
         names
     }
 
-    /// Returns the set of registers used as for-loop internal variables (A, A+1, A+2).
-    /// These registers should have their names cleared before SSA to prevent contamination.
+    
     fn for_loop_internal_registers(&self) -> rustc_hash::FxHashSet<u8> {
         let mut internals = rustc_hash::FxHashSet::default();
         for insn in &self.bytecode.code {
@@ -114,9 +112,7 @@ impl<'a, 'b> Lifter<'a, 'b> {
         }
     }
 
-    // TODO: support jumps to invalid destinations
-    // including cases where there is usize::MAX instructions and the last instruction
-    // skips forward, overflowing
+    
     fn create_block_map(&mut self) {
         self.nodes.insert(0, self.function.new_block());
         for (insn_index, insn) in self.bytecode.code.iter().enumerate() {
@@ -124,7 +120,7 @@ impl<'a, 'b> Lifter<'a, 'b> {
                 Instruction::SetList {
                     block_number: 0, ..
                 } => {
-                    // TODO: skip next instruction
+                    
                     todo!();
                 }
                 Instruction::LoadBoolean {
@@ -216,13 +212,13 @@ impl<'a, 'b> Lifter<'a, 'b> {
         }
     }
 
-    // TODO: rename to one of: lift_instructions, lift_range, lift_instruction_range, lift_block?
+    
     fn lift_instruction(&mut self, start: usize, end: usize, statements: &mut Vec<Statement>) {
         if end > start {
             statements.reserve(end - start + 1);
         }
         let mut top: Option<(ast::RValue, u8)> = None;
-        // TODO: we should consume the instructions, reducing clones
+        
         let mut iter = self.bytecode.code[start..=end].iter();
         while let Some(instruction) = iter.next() {
             match instruction {
@@ -649,7 +645,7 @@ impl<'a, 'b> Lifter<'a, 'b> {
                         top = Some((vararg.into(), destination.0));
                     }
                 }
-                // TODO: STYLE: rename to NewClosure?
+                
                 Instruction::Closure {
                     destination,
                     function,
@@ -732,7 +728,7 @@ impl<'a, 'b> Lifter<'a, 'b> {
                     statements.push(setlist.into());
                 }
                 Instruction::Close(start) => {
-                    // TODO: REFACTOR: self.locals.iter() + skip
+                    
                     let locals = (start.0..self.bytecode.maximum_stack_size)
                         .map(|i| self.locals[&Register(i)].clone())
                         .collect();
@@ -857,7 +853,7 @@ impl<'a, 'b> Lifter<'a, 'b> {
         }
     }
 
-    // TODO: REFACTOR: this function doesnt need to exist
+    
     fn get_node(&'a self, index: &'a usize) -> NodeIndex {
         self.nodes[index]
     }
@@ -865,9 +861,8 @@ impl<'a, 'b> Lifter<'a, 'b> {
     fn lift_blocks(&mut self) {
         let ranges = self.code_ranges();
         for (start, end) in ranges {
-            // TODO: gotta be a better way
-            // we need to do this in case that the body of a for loop is after the for loop instruction
-            // see: IterateNumericForLoop
+            
+            
             let mut statements =
                 std::mem::take(self.function.block_mut(self.nodes[&start]).unwrap());
             self.lift_instruction(start, end, &mut statements);
@@ -959,8 +954,7 @@ impl<'a, 'b> Lifter<'a, 'b> {
         context.allocate_locals();
         context.lift_blocks();
 
-        // TODO: STYLE: instead of naming NodeIndex vars `{}_node`, we should name them
-        // `{}_index`, or if it's the corresponding var for `block`, `block_index`
+        
         let stack_init_node = context.function.new_block();
         let stack_init_block = context.function.block_mut(stack_init_node).unwrap();
         stack_init_block.reserve(context.locals.len());

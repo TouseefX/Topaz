@@ -23,7 +23,10 @@ impl Bytecode {
                 let (input, chunk) = Chunk::parse(input, encode_key, status_code)?;
                 Ok((input, Bytecode::Chunk(chunk)))
             }
-            _ => panic!("Unsupported bytecode version: {}", status_code),
+            _ => Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Tag,
+            ))),
         }
     }
 }

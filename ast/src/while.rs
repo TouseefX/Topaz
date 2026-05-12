@@ -12,7 +12,7 @@ pub struct While {
 
 impl PartialEq for While {
     fn eq(&self, _other: &Self) -> bool {
-        // TODO: compare block
+        
         false
     }
 }

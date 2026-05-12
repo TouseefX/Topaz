@@ -31,7 +31,7 @@ pub struct Unary {
 
 impl SideEffects for Unary {
     fn has_side_effects(&self) -> bool {
-        // TODO: do this properly
+        
         matches!(
             self.operation,
             UnaryOperation::Negate | UnaryOperation::Length | UnaryOperation::BNot
@@ -51,7 +51,7 @@ impl Traverse for Unary {
 
 impl Reduce for Unary {
     fn reduce(self) -> RValue {
-        // TODO: unnecessary clone
+        
         let does_reduce = |r: &RValue| &r.clone().reduce_condition() != r;
 
         fn is_boolean(r: &RValue) -> bool {
@@ -63,7 +63,7 @@ impl Reduce for Unary {
                     operation: BinaryOperation::And | BinaryOperation::Or,
                 }) => is_boolean(left) && is_boolean(right),
                 RValue::Literal(Literal::Boolean(_)) => true,
-                // no point matching strings, numbers and tables since reduce_condition has already been called
+                
                 _ => false,
             }
         }
@@ -96,7 +96,7 @@ impl Reduce for Unary {
                 RValue::Literal(Literal::Number(-value))
             }
             (RValue::Literal(Literal::String(value)), UnaryOperation::Length) => {
-                // TODO: is this accurate w/ unicode in Luau?
+                
                 RValue::Literal(Literal::Number(value.len() as f64))
             }
             (
@@ -185,7 +185,7 @@ impl Reduce for Unary {
                 }),
                 UnaryOperation::Not,
             ) if (operation == BinaryOperation::And || operation == BinaryOperation::Or)
-            // TODO: unnecessary clones
+            
                 && (does_reduce(&Unary {
                     value: left.clone(),
                     operation: UnaryOperation::Not,
@@ -228,7 +228,7 @@ impl Reduce for Unary {
     }
 
     fn reduce_condition(self) -> RValue {
-        // TODO: unnecessary clone
+        
         let does_reduce = |r: &RValue| &r.clone().reduce_condition() != r;
 
         match (self.value.reduce_condition(), self.operation) {
@@ -245,7 +245,7 @@ impl Reduce for Unary {
             (RValue::Literal(Literal::Number(value)), UnaryOperation::Negate) => {
                 RValue::Literal(Literal::Number(-value))
             }
-            // __len has to return number, numbers are always truthy
+            
             (_, UnaryOperation::Length) => RValue::Literal(Literal::Boolean(true)),
             (
                 RValue::Binary(Binary {
@@ -333,7 +333,7 @@ impl Reduce for Unary {
                 }),
                 UnaryOperation::Not,
             ) if (operation == BinaryOperation::And || operation == BinaryOperation::Or)
-            // TODO: unnecessary clones
+            
                 && (does_reduce(&Unary {
                     value: left.clone(),
                     operation: UnaryOperation::Not,

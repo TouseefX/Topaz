@@ -38,7 +38,7 @@ impl GraphStructurer {
                     &mut then_block,
                     std::mem::take(&mut else_block),
                 );
-                // TODO: unnecessary clone (also other cases)
+                
                 if_stat.condition =
                     ast::Unary::new(if_stat.condition.clone(), ast::UnaryOperation::Not)
                         .reduce_condition();
@@ -56,7 +56,7 @@ impl GraphStructurer {
                                 .reduce_condition();
                         Some(then_block)
                     }
-                    // TODO: `Some(std::mem::take(&mut if_stat.else_block))`?
+                    
                     std::cmp::Ordering::Equal => None,
                 }
             }
@@ -65,8 +65,7 @@ impl GraphStructurer {
         }
     }
 
-    // a -> b -> d + a -> c -> d
-    // results in a -> d
+    
     fn match_diamond_conditional(
         &mut self,
         entry: NodeIndex,
@@ -78,7 +77,7 @@ impl GraphStructurer {
 
         if then_successors.len() > 1 || else_successors.len() > 1 {
             if self.is_loop_header(entry) {
-                // TODO: ugly
+                
                 let t = if let Some(index) = then_successors.iter().position(|n| *n == entry) {
                     then_successors.swap_remove(index);
                     true
@@ -148,7 +147,7 @@ impl GraphStructurer {
         let else_block = self.function.remove_block(else_node).unwrap();
 
         let block = self.function.block_mut(entry).unwrap();
-        // TODO: STYLE: rename to r#if?
+        
         let if_stat = block.last_mut().unwrap().as_if_mut().unwrap();
         if_stat.then_block = Arc::new(then_block.into());
         if_stat.else_block = Arc::new(else_block.into());
@@ -156,7 +155,7 @@ impl GraphStructurer {
 
         let after = Self::expand_if(if_stat);
         if if_stat.then_block.lock().is_empty() {
-            // TODO: unnecessary clone
+            
             if_stat.condition =
                 ast::Unary::new(if_stat.condition.clone(), ast::UnaryOperation::Not)
                     .reduce_condition();
@@ -180,8 +179,7 @@ impl GraphStructurer {
         true
     }
 
-    // a -> b -> c + a -> c
-    // results in a -> c
+    
     fn match_triangle_conditional(
         &mut self,
         entry: NodeIndex,
@@ -215,8 +213,7 @@ impl GraphStructurer {
                         .reduce_condition()
             }
 
-            //Self::simplify_if(if_stat);
-
+            
             self.function.set_edges(
                 entry,
                 vec![(else_node, BlockEdge::new(BranchType::Unconditional))],
@@ -231,7 +228,7 @@ impl GraphStructurer {
             || _match_triangle_conditional(else_node, then_node, true)
     }
 
-    // a -> b a -> c
+    
     pub(crate) fn refine_virtual_edge_jump(
         &mut self,
         post_dom: &Dominators<NodeIndex>,
@@ -241,7 +238,7 @@ impl GraphStructurer {
         next: Option<NodeIndex>,
     ) -> bool {
         if node == header {
-            // TODO: only check back edges?
+            
             if !self
                 .function
                 .predecessor_blocks(header)
@@ -345,7 +342,7 @@ impl GraphStructurer {
     ) -> bool {
         let block = self.function.block_mut(entry).unwrap();
         if block.last_mut().unwrap().as_if_mut().is_none() {
-            // for loops
+            
             return false;
         }
 

@@ -27,9 +27,8 @@ impl UpvaluesOpen {
             let block = function.block(node).unwrap();
             let block_opened = this.open.entry(node).or_default();
             for (stat_index, statement) in block.iter().enumerate() {
-                // TODO: use traverse rvalues instead
-                // this is because the lifter isnt guaranteed to be lifting bytecode
-                // it could be lifting lua source code for deobfuscation purposes
+                
+                
                 if let ast::Statement::Assign(assign) = statement {
                     for opened in assign
                         .right
@@ -47,21 +46,8 @@ impl UpvaluesOpen {
                         if let Some((_prev_range, prev_locations)) =
                             open_ranges.get_key_value(&stat_index)
                         {
-                            // TODO: this assert fails in Luau with the below code,
-                            // but i dont know why. it appears to work fine with the
-                            // assert commented out, but we should double check it.
-                            /*
-                            local u = a
-
-                            if u then
-                                print'hi'
-                            end
-
-                            function f()
-                                return u
-                            end
-                            */
-                            // assert!(prev_range.contains(&(block.len() - 1)));
+                            
+                            
                             open_locations.extend(prev_locations);
                         }
                         open_locations.push((node, stat_index));
@@ -76,9 +62,8 @@ impl UpvaluesOpen {
                 }
             }
             for successor in function.successor_blocks(node) {
-                // TODO: is there any case where successor is visited but has open stuff
-                // that wasnt already discovered?
-                // maybe possible with multiple opens
+                
+                
                 if !visited.contains(&successor) {
                     let successor_block = function.block(successor).unwrap();
                     let open_at_end = this.open[&node]
@@ -90,7 +75,7 @@ impl UpvaluesOpen {
                     let successor_open = this.open.entry(successor).or_default();
                     for (open, mut locations) in open_at_end {
                         let open_ranges = successor_open.entry(open).or_default();
-                        // TODO: sorta ugly doing a saturating subtraction, use uninclusive ranges instead?
+                        
                         let range = 0..=successor_block.len().saturating_sub(1);
                         if let Some((prev_range, prev_locations)) = open_ranges.get_key_value(&0) {
                             assert_eq!(prev_range, &range);

@@ -26,7 +26,7 @@ mod r#if;
 mod index;
 mod literal;
 mod local;
-//mod name_gen;
+
 pub mod local_declarations;
 pub mod name_locals;
 mod repeat;
@@ -112,7 +112,7 @@ impl type_system::Infer for RValue {
             RValue::Local(local) => local.infer(system),
             RValue::Global(_) => Type::Any,
             RValue::Call(_) => Type::Any,
-            //RValue::Table(table) => table.infer(system),
+            
             RValue::Literal(literal) => literal.infer(system),
             RValue::Index(_) => Type::Any,
             RValue::Unary(_) => Type::Any,
@@ -307,11 +307,11 @@ impl fmt::Display for Comment {
 impl fmt::Display for Statement {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            // TODO: STYLE: order in same order as `Statement` enum
+            
             Statement::Call(call) => write!(f, "{}", call),
             Statement::MethodCall(method_call) => write!(f, "{}", method_call),
             Statement::Assign(assign) => write!(f, "{}", assign),
-            // TODO: STYLE: replace all `if_` with `r#if`, etc
+            
             Statement::If(if_) => write!(f, "{}", if_),
             Statement::Goto(goto) => write!(f, "{}", goto),
             Statement::Label(label) => write!(f, "{}", label),
@@ -337,7 +337,7 @@ impl fmt::Display for Statement {
 #[derive(Debug, PartialEq, Clone, Default, From)]
 pub struct Block(pub Vec<Statement>);
 
-// rust-analyzer doesnt like derive_more :/
+
 impl Deref for Block {
     type Target = Vec<Statement>;
 

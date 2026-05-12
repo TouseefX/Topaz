@@ -20,7 +20,10 @@ impl Chunk {
             (input, 0)
         };
         if types_version > 3 {
-            panic!("unsupported types version");
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Tag,
+            )));
         }
         let (input, string_table) = parse_list(input, parse_string)?;
         let input = if types_version == 3 {

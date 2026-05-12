@@ -80,7 +80,7 @@ impl std::fmt::Display for SetList {
             "__set_list({}, {}, {{{}}})",
             self.object_local,
             self.index,
-            // TODO: bad
+            
             formatter::format_arg_list(
                 &self
                     .values

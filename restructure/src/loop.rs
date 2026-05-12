@@ -27,7 +27,7 @@ impl GraphStructurer {
             .unwrap_or(false)
     }
 
-    // TODO: for init should always be at the end of a block?
+    
     fn find_for_init(&mut self, for_loop: NodeIndex) -> (NodeIndex, usize) {
         let predecessors = self
             .function
@@ -41,7 +41,7 @@ impl GraphStructurer {
                 .iter_mut()
                 .enumerate()
                 .rev()
-                // TODO: REFACTOR: this is confusing
+                
                 .find(|(_, s)| {
                     s.has_side_effects()
                         || s.as_num_for_init().is_some()
@@ -66,9 +66,8 @@ impl GraphStructurer {
     ) -> bool {
         if !self.is_loop_header(header) {
             if self.is_for_next(header) {
-                // https://github.com/luau-lang/luau/issues/679
-                // we cant get rid of the for loop cuz it's feature not a bug
-
+                
+                
                 let (then_node, else_node) = self
                     .function
                     .conditional_edges(header)
@@ -252,9 +251,7 @@ impl GraphStructurer {
                 init_ast.push(new_stat);
                 self.function.remove_block(header);
 
-                // TODO: REFACTOR: make a seperate function that set_edges unconditional
-                // and calls match_jump
-                // remove edges do the same
+                
                 if let Some(next) = next {
                     self.function.set_edges(
                         init_block,
@@ -268,7 +265,7 @@ impl GraphStructurer {
 
             true
         } else if successors.len() == 2 {
-            //if successors.iter().find(|s| self.function.successor_blocks(s).exactly_one() == Ok())
+            
             let (mut next, mut body) = (successors[0], successors[1]);
             if post_dom.immediate_dominator(header) == Some(body) {
                 std::mem::swap(&mut next, &mut body);
@@ -296,7 +293,7 @@ impl GraphStructurer {
             let continues = self
                 .function
                 .predecessor_blocks(header)
-                // TODO: the line below fixes `for i = 1, 10 do end`, but a different approach might be preferable
+                
                 .filter(|&n| n != header)
                 .filter(|&n| {
                     dominators
@@ -317,7 +314,7 @@ impl GraphStructurer {
                         .map(|d| d.collect_vec())
                         .unwrap_or_default(),
                 );
-            // TODO: add for next support?
+            
             if !self.is_for_next(header)
                 && let Some(new_next) = common_post_doms.into_iter().find(|&p| {
                     self.function.has_block(p)
@@ -327,7 +324,7 @@ impl GraphStructurer {
                 })
                 && new_next != next
             {
-                // TODO: this is uh, yeah
+                
                 next = new_next;
                 let condition_block = self.function.new_block();
                 body = condition_block;
@@ -360,9 +357,8 @@ impl GraphStructurer {
                 .filter(|&n| n != header)
                 .filter(|&n| dominators.dominators(n).unwrap().contains(&body))
                 .collect_vec();
-            //println!("breaks: {:?}", breaks);
+            
 
-            // TODO: is this needed?
             if self
                 .function
                 .predecessor_blocks(header)
@@ -428,7 +424,7 @@ impl GraphStructurer {
                         let mut body_block =
                             std::mem::take(self.function.block_mut(header).unwrap());
                         if header_else_target != body {
-                            // TODO: is this correct?
+                            
                             if_condition = ast::Unary::new(if_condition, ast::UnaryOperation::Not)
                                 .reduce_condition();
                         }
@@ -504,8 +500,7 @@ impl GraphStructurer {
                     init_ast.push(new_stat);
                     self.function.remove_block(header);
 
-                    // TODO: REFACTOR: make a seperate function that set_edges unconditional
-                    // and calls match_jump
+                    
                     self.function.set_edges(
                         init_block,
                         vec![(next, BlockEdge::new(BranchType::Unconditional))],

@@ -9,9 +9,8 @@ use petgraph::{
 };
 
 impl super::GraphStructurer {
-    // TODO: STYLE: better name
-    // TODO: this is the same as in structuring.rs but w/o block params
-    // maybe we can use the same function?
+    
+    
     pub(crate) fn try_remove_unnecessary_condition(&mut self, node: NodeIndex) -> bool {
         let block = self.function.block(node).unwrap();
         if !block.is_empty()
@@ -96,7 +95,7 @@ impl super::GraphStructurer {
                         self.function.set_edges(node, edges);
                         true
                     } else if self.function.entry() != &Some(node) && !self.is_loop_header(node) {
-                        // TODO: test
+                        
                         for (source, edge) in self
                             .function
                             .graph()
@@ -122,8 +121,8 @@ impl super::GraphStructurer {
                 false
             }
         }
-        // node is terminating
-        // TODO: block_is_no_op returns true for blocks with comments, do we wanna remove the block if it has comments?
+        
+        
         else if Self::block_is_no_op(self.function.block(node).unwrap())
             && self.function.entry() != &Some(node)
             && !self.is_loop_header(node)

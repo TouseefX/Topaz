@@ -43,14 +43,8 @@ impl Reduce for Closure {
 impl Infer for Closure {
     fn infer<'a: 'b, 'b>(&'a mut self, _system: &mut TypeSystem<'b>) -> Type {
         todo!()
-        // let return_values = system.analyze_block(&mut self.body);
-        // let parameters = self
-        //     .parameters
-        //     .iter_mut()
-        //     .map(|l| l.infer(system))
-        //     .collect_vec();
-
-        // Type::Function(parameters, return_values)
+        
+        
     }
 }
 

@@ -43,7 +43,7 @@ pub struct Pattern {
 
 impl Pattern {
     fn new(root: NodeIndex, graph: PatternGraph) -> Self {
-        // make sure all nodes in pattern are connected
+        
         assert!(Dfs::new(&graph, root).iter(&graph).count() == graph.node_count());
         Self { root, graph }
     }
@@ -112,6 +112,6 @@ impl Pattern {
 
 #[derive(Debug, Default)]
 pub struct Match {
-    // pattern node to function node
+    
     pub mapping: FxHashMap<NodeIndex, NodeIndex>,
 }

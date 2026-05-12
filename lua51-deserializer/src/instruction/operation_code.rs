@@ -69,11 +69,7 @@ impl OperationCode {
     }
 
     pub fn instruction_layout(&self) -> LayoutDiscriminants {
-        /*
-           0 = BC
-           1 = BX
-           2 = BSx
-        */
+        
 
         match self {
             Self::Move => LayoutDiscriminants::BC,

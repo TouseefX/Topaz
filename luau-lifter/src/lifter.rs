@@ -96,7 +96,7 @@ impl<'a> Lifter<'a> {
 
         blocks.sort_unstable();
 
-        // TODO: code_ranges in lua51-lifter
+        
         let block_ranges = blocks
             .iter()
             .rev()
@@ -302,7 +302,7 @@ impl<'a> Lifter<'a> {
                     c,
                     aux,
                 } => match op_code {
-                    // TODO: do we want to nil initialize all registers here?
+                    
                     OpCode::LOP_PREPVARARGS => {}
                     OpCode::LOP_MOVE => {
                         let a = self.register(a as _);
@@ -561,7 +561,7 @@ impl<'a> Lifter<'a> {
                                 ..
                             } => {
                                 assert!(a == namecall_base);
-                                // TODO: repeated code :(
+                                
                                 let arguments = if b != 0 {
                                     (a + 2..a + b)
                                         .map(|r| self.register(r as _).into())
@@ -574,7 +574,7 @@ impl<'a> Lifter<'a> {
                                         .collect()
                                 };
 
-                                // TODO: make sure `a:method with space()` doesnt happen
+                                
                                 let call = ast::MethodCall::new(
                                     namecall_object.into(),
                                     namecall_method,
@@ -1142,7 +1142,7 @@ impl<'a> Lifter<'a> {
                         }
                     }
                     OpCode::LOP_FORNPREP => {
-                        // TODO: do this properly
+                        
                         let limit = self.register(a as _);
                         let step = self.register((a + 1) as _);
                         let counter = self.register((a + 2) as _);
@@ -1199,10 +1199,8 @@ impl<'a> Lifter<'a> {
                             BlockEdge::new(BranchType::Unconditional),
                         ));
                     }
-                    // TODO: i think vm can assume generator is next/inext based on aux,
-                    // so what happens if the generator passed isnt next and the env isnt tainted?
-                    // this could be done with some custom bytecode
-                    // same applies to fastcall
+                    
+                    
                     OpCode::LOP_FORGLOOP => {
                         let generator = self.register(a as _);
                         let state = self.register((a + 1) as _);
@@ -1273,11 +1271,11 @@ impl<'a> Lifter<'a> {
                                     b: source,
                                     ..
                                 } => match capture_type {
-                                    // capture value
+                                    
                                     0 => ast::Upvalue::Copy(self.register(source as _)),
-                                    // capture ref
+                                    
                                     1 => ast::Upvalue::Ref(self.register(source as _)),
-                                    // capture upval
+                                    
                                     2 => ast::Upvalue::Ref(self.upvalues[source as usize].clone()),
                                     _ => unreachable!(),
                                 },
@@ -1363,7 +1361,7 @@ impl<'a> Lifter<'a> {
             BytecodeConstant::Boolean(v) => ast::Literal::Boolean(*v),
             BytecodeConstant::Number(v) => ast::Literal::Number(*v),
             BytecodeConstant::String(v) => {
-                // TODO: what does the official deserializer do if v == 0?
+                
                 ast::Literal::String(self.string_table[*v - 1].clone())
             }
             BytecodeConstant::Vector(x, y, z, _) => ast::Literal::Vector(*x, *y, *z),

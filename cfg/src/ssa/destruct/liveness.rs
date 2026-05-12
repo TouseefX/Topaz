@@ -7,22 +7,22 @@ use crate::function::Function;
 
 #[derive(Debug, Default)]
 struct BlockLiveness<'a> {
-    // the locals that are used in this block
+    
     uses: FxHashSet<&'a RcLocal>,
-    // the locals that are defined in this block
+    
     defs: FxHashSet<&'a RcLocal>,
-    // the locals that are used by arguments passed from this block to its successor
+    
     arg_out_uses: FxHashSet<&'a RcLocal>,
-    // the locals that are defined by the parameters passed to this block by its predecessor
+    
     params: FxHashSet<&'a RcLocal>,
     live_sets: LiveSets,
 }
 
 #[derive(Debug, Default)]
 pub struct LiveSets {
-    // the set LiveIn(B) = params(B) ⋃ ( [uses(B) ⋃ live_out(B)] ∖ defs(B))
+    
     pub live_in: FxHashSet<RcLocal>,
-    // the set LiveOut(B) = ( ⋃_{S ∊ successor(B)} [live_in(S)∖params(S)] ) ⋃ arg_out_uses(B)
+    
     pub live_out: FxHashSet<RcLocal>,
 }
 
@@ -42,7 +42,7 @@ impl<'a> Liveness<'a> {
         while let Some(node) = stack.pop() {
             let block_liveness = liveness.block_liveness.get_mut(&node).unwrap();
             if block_liveness.defs.contains(variable)
-                // block already visited
+                
                 || block_liveness.live_sets.live_in.contains(variable)
             {
                 continue;

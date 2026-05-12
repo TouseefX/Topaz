@@ -110,7 +110,7 @@ impl Function {
         edges
     }
 
-    // returns previous edges
+    
     pub fn set_edges(
         &mut self,
         node: NodeIndex,
@@ -156,7 +156,7 @@ impl Function {
         }
     }
 
-    // TODO: disable_contracts for production builds
+    
     #[requires(self.has_block(node))]
     pub fn values_read(&self, node: NodeIndex) -> impl Iterator<Item = &RcLocal> {
         self.block(node)

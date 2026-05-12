@@ -20,13 +20,3 @@ pub fn deserialize(bytecode: &[u8], encode_key: u8) -> Result<bytecode::Bytecode
     }
 }
 
-/*#[test]
-fn main() -> anyhow::Result<()> {
-    let compiler = Compiler::new()
-        .set_debug_level(1).set_optimization_level(2);
-    let bytecode = compiler.compile("asd = test");
-    println!("{:#?}", bytecode);
-    let deserialized = deserialize(&bytecode);
-    println!("{:#?}", deserialized);
-    Ok(())
-}*/

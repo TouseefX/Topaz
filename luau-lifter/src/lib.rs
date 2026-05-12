@@ -59,7 +59,21 @@ struct Args {
     verbose: bool,
 }
 
+
+pub fn detect_encode_key(bytecode: &[u8], preferred: u8) -> u8 {
+    if deserializer::deserialize(bytecode, preferred).is_ok() {
+        return preferred;
+    }
+    for &candidate in &[1u8, 203] {
+        if candidate != preferred && deserializer::deserialize(bytecode, candidate).is_ok() {
+            return candidate;
+        }
+    }
+    preferred
+}
+
 pub fn dump_cfgs(bytecode: &[u8], encode_key: u8) -> Vec<cfg::CfgSnapshot> {
+    let encode_key = detect_encode_key(bytecode, encode_key);
     let chunk = match deserializer::deserialize(bytecode, encode_key) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
@@ -90,7 +104,11 @@ pub fn dump_cfgs(bytecode: &[u8], encode_key: u8) -> Vec<cfg::CfgSnapshot> {
 }
 
 pub fn decompile_bytecode(bytecode: &[u8], encode_key: u8) -> String {
-    let chunk = deserializer::deserialize(bytecode, encode_key).unwrap();
+    let encode_key = detect_encode_key(bytecode, encode_key);
+    let chunk = match deserializer::deserialize(bytecode, encode_key) {
+        Ok(c) => c,
+        Err(e) => return format!("failed to deserialize bytecode: {e}"),
+    };
     match chunk {
         Bytecode::Error(msg) => msg,
         Bytecode::Chunk(chunk) => {

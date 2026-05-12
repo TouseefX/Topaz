@@ -4,7 +4,7 @@ use triomphe::Arc;
 use crate::{formatter::Formatter, has_side_effects, Block, LocalRw, RValue, RcLocal, Traverse};
 use std::fmt;
 
-// TODO: move condition after block
+
 #[derive(Debug, Clone)]
 pub struct Repeat {
     pub condition: RValue,
@@ -13,7 +13,7 @@ pub struct Repeat {
 
 impl PartialEq for Repeat {
     fn eq(&self, _other: &Self) -> bool {
-        // TODO: compare block
+        
         false
     }
 }

@@ -8,8 +8,8 @@ use triomphe::Arc;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct NumForInit {
-    // TODO: REFACTOR: store 3 `Assign`s instead
-    // TODO: STYLE: rename to `control`? that's what lua calls it
+    
+    
     pub counter: (LValue, RValue),
     pub limit: (LValue, RValue),
     pub step: (LValue, RValue),
@@ -25,8 +25,7 @@ impl NumForInit {
     }
 }
 
-// NumForInit checks if counter, limit and step are numbers
-// this can result in an error, so it has side effects.
+
 has_side_effects!(NumForInit);
 
 impl Traverse for NumForInit {
@@ -97,15 +96,14 @@ impl fmt::Display for NumForInit {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct NumForNext {
-    // TODO: REFACTOR: store an `Assign` and an `If` instead?
-    // TODO: REFACTOR: this is the worst s$H##()WT ever literally
-    // TODO: STYLE: rename to `control`? that's what lua calls it
-    pub counter: (LValue, RValue), // RcLocal, // cant be of type RcLocal because Traverse
+    
+    
+    pub counter: (LValue, RValue),
     pub limit: RValue,
     pub step: RValue,
 }
 
-// NumForNext can error if the types of counter, limit and step are wrong
+
 has_side_effects!(NumForNext);
 
 impl NumForNext {
@@ -172,20 +170,20 @@ impl fmt::Display for NumForNext {
     }
 }
 
-// TODO: STYLE: this should probably be named "NumFor"
+
 #[derive(Debug, Clone)]
 pub struct NumericFor {
     pub initial: RValue,
     pub limit: RValue,
     pub step: RValue,
-    // TODO: STYLE: rename to `control`? (thats what lua calls it)
+    
     pub counter: RcLocal,
     pub block: Arc<Mutex<Block>>,
 }
 
 impl PartialEq for NumericFor {
     fn eq(&self, _other: &Self) -> bool {
-        // TODO: compare block
+        
         false
     }
 }
@@ -330,12 +328,10 @@ impl fmt::Display for GenericForInit {
     }
 }
 
-// TODO: STYLE: i think GenericFor is a bad name, lua calls iterators "generators",
-// so maybe uh GenerativeFor? LOL
-// or GenFor?
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct GenericForNext {
-    // TODO: REFACTOR: store an `Assign` with a `Call` and an `If` instead?
+    
     pub res_locals: Vec<LValue>,
     pub generator: RValue,
     pub state: RValue,
@@ -352,7 +348,7 @@ impl GenericForNext {
     }
 }
 
-// GenericForNext can error
+
 has_side_effects!(GenericForNext);
 
 impl Traverse for GenericForNext {
@@ -424,7 +420,7 @@ pub struct GenericFor {
 
 impl PartialEq for GenericFor {
     fn eq(&self, _other: &Self) -> bool {
-        // TODO: compare block
+        
         false
     }
 }

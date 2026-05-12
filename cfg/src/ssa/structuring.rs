@@ -57,8 +57,8 @@ pub struct ConditionalSequencePattern {
 pub struct GenericForNextPattern {
     body_node: NodeIndex,
     res_locals: Vec<ast::RcLocal>,
-    // generator is not necessarily a local in Luau
-    // it is commonly something like: `generator or __get_builtin("iter")`
+    
+    
     generator: ast::RValue,
     state: ast::RcLocal,
     internal_control: ast::RcLocal,
@@ -118,7 +118,7 @@ fn match_conditional_sequence(
     function: &Function,
     node: NodeIndex,
 ) -> Option<ConditionalSequencePattern> {
-    // TODO: check if len() == 1?
+    
     let block = function.block(node).unwrap();
     if let Some(r#if) = block.last().and_then(|s| s.as_if()) {
         let first_condition = r#if.condition.clone();
@@ -140,8 +140,8 @@ fn match_conditional_sequence(
                 {
                     if second_block.len() == 2 {
                         if let ast::Statement::Assign(assign) = &second_block[0] {
-                            // TODO: make sure this variable isnt used anywhere but this block
-                            // and the args passed to other.
+                            
+                            
                             let values_written = assign.values_written();
                             if values_written.len() == 1
                                 && second_conditional_if.condition
@@ -270,7 +270,7 @@ fn match_conditional_sequence(
 
 pub fn structure_conditionals(function: &mut Function) -> bool {
     let mut did_structure = false;
-    // TODO: does this need to be in dfs post order?
+    
     let mut dfs = DfsPostOrder::new(function.graph(), function.entry().unwrap());
     while let Some(node) = dfs.next(function.graph()) {
         if simplify_condition(function, node) {
@@ -281,7 +281,7 @@ pub fn structure_conditionals(function: &mut Function) -> bool {
         }
 
         if let Some(pattern) = match_conditional_sequence(function, node)
-            // TODO: can we continue?
+            
             && &Some(pattern.second_node) != function.entry()
         {
             let second_to_sc_edges = function
@@ -327,7 +327,7 @@ pub fn structure_conditionals(function: &mut Function) -> bool {
             }
             if pattern.inverted {
                 let removed_if = removed_block.last_mut().unwrap().as_if_mut().unwrap();
-                // TODO: unnecessary clone?
+                
                 removed_if.condition =
                     ast::Unary::new(removed_if.condition.clone(), UnaryOperation::Not)
                         .reduce_condition();
@@ -344,11 +344,10 @@ pub fn structure_conditionals(function: &mut Function) -> bool {
     did_structure
 }
 
-// TODO: REFACTOR: move to ast
-// None = unknown
+
 fn is_truthy(rvalue: ast::RValue) -> Option<bool> {
     match rvalue.reduce_condition() {
-        // __len has to return number, but __unm can return any value
+        
         ast::RValue::Unary(ast::Unary {
             operation: ast::UnaryOperation::Length,
             ..
@@ -363,7 +362,7 @@ fn is_truthy(rvalue: ast::RValue) -> Option<bool> {
     }
 }
 
-// TODO: STYLE: rename
+
 fn make_bool_conditional(
     function: &mut Function,
     node: NodeIndex,
@@ -387,7 +386,7 @@ fn make_bool_conditional(
         };
         Some(cond.reduce())
     } else {
-        // TODO: `v0 and v1 and v2`, v0, v1 and v2 are truthy, but only v2 is treated as such
+        
         let then_truthy = match is_truthy(then_value.clone()) {
             Some(truthy) => truthy,
             None if !then_value.has_side_effects() => {
@@ -403,7 +402,7 @@ fn make_bool_conditional(
             }
             None => false,
         };
-        // TODO: if condition is `and not else_value` or `not else_value` then truthy?
+        
         let else_truthy = is_truthy(else_value.clone()).is_some_and(|v| v);
         let cond = if !then_truthy && !else_truthy {
             return None;
@@ -442,24 +441,21 @@ fn make_bool_conditional(
     }
 }
 
-// TODO: `return if g then true else false` in luau?
-// local a; if g then a = true else a = false end; return a -> return g and true or false
-// local a; if g then a = false else a = true end; return a -> return not g
-// local a; if g == 1 then a = true else a = false end; return a -> return g == 1
+
 fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool {
     let match_triangle = |assigner, next, next_args: FxHashMap<ast::RcLocal, ast::RValue>| {
         if let Some(edge_to_next) = function.unconditional_edge(assigner)
             && edge_to_next.target() == next
             && edge_to_next.weight().arguments.iter().all(|(p, _)| next_args.contains_key(p))
             && let Some(assign) = single_assign(function.block(assigner).unwrap())
-            // TODO: allow multiple unused (excl. first) locals in left
+            
             && assign.left.len() == 1 && assign.right.len() == 1
             && let ast::LValue::Local(assigned_local) = &assign.left[0]
             && next_args.len() == 1 && let Ok((param, ast::RValue::Local(arg))) = edge_to_next.weight().arguments.iter().exactly_one()
             && arg == assigned_local
         {
-            // TODO: make sure assigned_local is only used in the assigner and it's params to next
-            // TODO: unnecessary clone
+            
+            
             Some((param, assign.right[0].clone(), next_args[param].clone()))
         } else {
             None
@@ -484,7 +480,7 @@ fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool 
                 .exactly_one()
             {
                 let (then_edge, else_edge) = (then_edge.id(), else_edge.id());
-                // TODO: unnecessary clones
+                
                 let res_local = res_local.clone();
                 let then_value = then_value.clone();
                 let else_value = else_value.clone();
@@ -621,10 +617,10 @@ fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool 
             && let Ok(else_next) = function.successor_blocks(else_edge.target()).exactly_one()
             && then_next == else_next
             && let Some(then_assign) = single_assign(function.block(then_edge.target()).unwrap())
-            // TODO: allow multiple unused (excl. first) locals in left
+            
             && then_assign.left.len() == 1 && then_assign.right.len() == 1
             && let Some(else_assign) = single_assign(function.block(else_edge.target()).unwrap())
-            // TODO: allow multiple unused (excl. first) locals in left
+            
             && else_assign.left.len() == 1 && else_assign.right.len() == 1
             && let Ok((then_param, ast::RValue::Local(then_arg))) = then_edge.weight().arguments.iter().exactly_one()
             && let Ok((else_param, ast::RValue::Local(else_arg))) = else_edge.weight().arguments.iter().exactly_one()
@@ -632,8 +628,8 @@ fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool 
             && then_assign.left[0].as_local() == Some(then_arg)
             && else_assign.left[0].as_local() == Some(else_arg)
         {
-            // TODO: make sure then_arg and else_arg arent used outside their respective assigner blocks
-            // and the arguments passed to next
+            
+            
             let res_local = then_param.clone();
             let then_value = then_assign.right[0].clone();
             let else_value = else_assign.right[0].clone();
@@ -696,7 +692,7 @@ fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool 
             })) = function.block(else_target).unwrap().iter().exactly_one()
             && let Ok(else_value) = else_values.iter().exactly_one()
         {
-            // TODO: unnecessary clones
+            
             let then_value = then_value.clone();
             let else_value = else_value.clone();
 
@@ -716,11 +712,11 @@ fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool 
     } else {
         false
     }
-    //todo!();
+    
 }
 
 fn match_method_call(call: &ast::Call) -> Option<(&ast::RValue, &str)> {
-    // TODO: make sure `a:method with space()` doesnt happen
+    
     if !call.arguments.is_empty()
         && !call.arguments[0].has_side_effects()
         && let Some(ast::Index {
@@ -739,7 +735,7 @@ fn match_method_call(call: &ast::Call) -> Option<(&ast::RValue, &str)> {
     }
 }
 
-// This code does not apply to Luau
+
 pub fn structure_method_calls(function: &mut Function) -> bool {
     let mut did_structure = false;
     for block in function.blocks_mut() {
@@ -785,18 +781,13 @@ pub fn structure_method_calls(function: &mut Function) -> bool {
     did_structure
 }
 
-// TODO: STYLE: better argument names
-// `before -> skip -> after` to `before -> after`.
-// multiple `before -> skip` edges can exist.
-// multiple `skip -> after` edges can exist, but we decide which to use based on
-// the edge index
-// updates edges
+
 fn skip_over_node(
     function: &mut Function,
     before_node: NodeIndex,
     skip_to_after: EdgeIndex,
-    // params from (skip_node, after_node)
-    // parameters: &[(ast::RcLocal, ast::RValue)],
+    
+    
 ) -> bool {
     let (skip_node, after_node) = function.graph().edge_endpoints(skip_to_after).unwrap();
     let mut did_structure = false;
@@ -820,10 +811,8 @@ fn skip_over_node(
             .arguments
             .clone();
         new_arguments.extend(skip_to_after_args.iter().cloned());
-        // TODO: eliminate duplicate arguments where possible
+        
 
-        // all arguments in edges to a block must have the same parameters
-        // TODO: make arguments a map so order doesnt matter
         if !new_arguments
             .iter()
             .map(|(p, _)| p)
@@ -850,7 +839,7 @@ fn try_remove_unnecessary_condition(function: &mut Function, node: NodeIndex) ->
         && then_edge.weight().arguments == else_edge.weight().arguments
     {
         let target = then_edge.target();
-        // TODO: check if this works (+ restructuring/src/jump.rs)
+        
         let cond = function
             .block_mut(node)
             .unwrap()
@@ -890,7 +879,7 @@ fn try_remove_unnecessary_condition(function: &mut Function, node: NodeIndex) ->
     }
 }
 
-// TODO: same as in structurer
+
 fn is_for_next(function: &Function, node: NodeIndex) -> bool {
     function
         .block(node)
@@ -905,12 +894,11 @@ fn is_for_next(function: &Function, node: NodeIndex) -> bool {
         .unwrap_or(false)
 }
 
-// TODO: REFACTOR: same as match_jump in restructure, maybe can use some common code?
-// TODO: STYLE: rename to merge_blocks or something
+
 pub fn structure_jumps(function: &mut Function, dominators: &Dominators<NodeIndex>) -> bool {
     let mut did_structure = false;
     for node in function.graph().node_indices().collect_vec() {
-        // we call function.remove_block, that might've resulted in node being removed
+        
         if function.block(node).is_some()
             && let Some(jump) = function.unconditional_edge(node)
             && let jump_target = jump.target()
@@ -919,7 +907,7 @@ pub fn structure_jumps(function: &mut Function, dominators: &Dominators<NodeInde
         {
             let jump_edge = jump.id();
             let block = function.block(node).unwrap();
-            // TODO: block_is_no_op?
+            
             if block.is_empty() {
                 let mut remove = true;
                 for pred in function.predecessor_blocks(node).collect_vec() {
@@ -940,10 +928,10 @@ pub fn structure_jumps(function: &mut Function, dominators: &Dominators<NodeInde
                     .dominators(jump_target)
                     .map(|mut d| d.contains(&node))
                     .unwrap_or(false)
-                // TODO: remove args or smthn idk
+                
                 && function.graph().edge_weight(jump_edge).unwrap().arguments.is_empty()
             {
-                // assert!(function.graph().edge_weight(jump_edge).unwrap().arguments.is_empty());
+                
                 let edges = function.remove_edges(jump_target);
                 let body = function.remove_block(jump_target).unwrap();
                 if &Some(jump_target) == function.entry() {

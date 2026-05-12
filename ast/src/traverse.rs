@@ -21,18 +21,7 @@ pub trait Traverse {
         Vec::new()
     }
 
-    // fn traverse_lvalues(
-    //     &mut self,
-    //     lvalue_callback: &impl Fn(&mut LValue),
-    //     rvalue_callback: &impl Fn(&mut RValue),
-    // ) {
-    //     self.rvalues_mut().into_iter().for_each(rvalue_callback);
-    //     self.lvalues_mut().into_iter().for_each(lvalue_callback);
-    //     self.lvalues_mut().into_iter().for_each(|lvalue| {
-    //         lvalue.traverse_lvalues(lvalue_callback, rvalue_callback);
-    //     });
-    // }
-
+    
     fn traverse_rvalues<F>(&mut self, callback: &mut F)
     where
         F: FnMut(&mut RValue),
@@ -69,7 +58,7 @@ pub trait Traverse {
 
     fn post_traverse_values<F, R>(&mut self, callback: &mut F) -> Option<R>
     where
-        // TODO: REFACTOR: use an enum called Value instead of Either
+        
         F: FnMut(Either<&mut LValue, &mut RValue>) -> Option<R>,
     {
         for lvalue in self.lvalues_mut() {
@@ -94,7 +83,7 @@ pub trait Traverse {
 
     fn traverse_values<F, R>(&mut self, callback: &mut F) -> Option<R>
     where
-        // TODO: REFACTOR: use an enum called Value instead of Either
+        
         F: FnMut(PreOrPost, Either<&mut LValue, &mut RValue>) -> Option<R>,
     {
         for lvalue in self.lvalues_mut() {

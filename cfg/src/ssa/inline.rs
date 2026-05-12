@@ -65,7 +65,7 @@ impl<'a> Inliner<'a> {
                                         Box::new(new_rvalue.take().unwrap()),
                                     );
                                     *operation = match *operation {
-                                        // TODO: __eq metamethod?
+                                        
                                         ast::BinaryOperation::Equal => ast::BinaryOperation::Equal,
                                         ast::BinaryOperation::NotEqual => {
                                             ast::BinaryOperation::NotEqual
@@ -95,33 +95,31 @@ impl<'a> Inliner<'a> {
                             match rvalue {
                                 ast::RValue::Local(local) if local == read => {
                                     *rvalue = new_rvalue.take().unwrap();
-                                    // success!
+                                    
                                     return Some(true);
                                 }
                                 _ => {}
                             }
                             if new_rvalue_has_side_effects && rvalue.has_side_effects() {
-                                // failure :(
+                                
                                 return Some(false);
                             }
                         }
                     }
                 }
-                // keep searching
+                
                 None
             })
             .unwrap_or(false)
     }
 
-    // TODO: dont clone rvalues
-    // TODO: REFACTOR: move to ssa module?
-    // TODO: inline into block arguments
+    
     fn inline_rvalues(self) {
         let node_indices = self.function.graph().node_indices().collect::<Vec<_>>();
         for node in node_indices {
             let block = self.function.block_mut(node).unwrap();
 
-            // TODO: rename values_read to locals_read
+            
             let mut stat_to_values_read = Vec::with_capacity(block.len());
             for stat in &block.0 {
                 stat_to_values_read.push(
@@ -136,12 +134,7 @@ impl<'a> Inliner<'a> {
                 );
             }
 
-            // visit all statements that read at least one local with only one usage,
-            // this is the statement we will inline into
-            // then seek backwards from the previous statement to the start of the block
-            // until we find a statement that assigns to a single-use local that
-            // is used in the statement we are inlining into.
-            // TODO: push multiple use local assignments forward to their first use
+            
             let mut index = 0;
             'w: while index < block.len() {
                 let mut groups_written = FxHashSet::default();
@@ -155,25 +148,16 @@ impl<'a> Inliner<'a> {
                         index += 1;
                         continue 'w;
                     }
-                    // we cant inline across upvalue writes because an inlining candidate with side effects,
-                    // for ex. a non-local function call, might access the upvalue
+                    
+                    
                     for value_written in block[stat_index].values_written() {
                         if self.upvalue_to_group.contains_key(value_written) {
-                            // TODO: set allow_side_effects to false instead
+                            
                             allow_side_effects = false;
                         }
                     }
 
-                    /*
-                    -- we dont want to inline `tostring(a)` into `print(b)`
-                    local print = print
-                    local a = 1
-                    while true do
-                        local b = tostring(a)
-                        a = 1
-                        print(b)
-                    end
-                    */
+                    
                     if block[stat_index]
                         .values_read()
                         .into_iter()
@@ -213,22 +197,21 @@ impl<'a> Inliner<'a> {
                                 ) {
                                     assert!(new_rvalue.is_none());
 
-                                    // TODO: PERF: this is probably inefficient
+                                    
                                     for rvalue in block[index].rvalues_mut() {
                                         *rvalue =
                                             std::mem::replace(rvalue, ast::Literal::Nil.into())
                                                 .reduce();
                                     }
 
-                                    // TODO: PERF: remove `local_usages[l] == 1` filter in stat_to_values_read
-                                    // and use stat_to_values_read here
+                                    
                                     for local in block[stat_index].values_read() {
                                         let local_usage_count =
                                             self.local_usages.get_mut(local).unwrap();
                                         *local_usage_count = local_usage_count.saturating_sub(1);
                                     }
-                                    // we dont need to update local usages because tracking usages for a local
-                                    // with no declarations serves no purpose
+                                    
+                                    
                                     block[stat_index] = ast::Empty {}.into();
                                     *read = None;
                                     continue 'w;
@@ -287,15 +270,14 @@ impl<'a> Inliner<'a> {
                                         .collect_vec();
                                     generic_for_init.0.right.push(new_rvalue);
 
-                                    // TODO: PERF: remove `local_usages[l] == 1` filter in stat_to_values_read
-                                    // and use stat_to_values_read here
+                                    
                                     for local in block[stat_index].values_read() {
                                         let local_usage_count =
                                             self.local_usages.get_mut(local).unwrap();
                                         *local_usage_count = local_usage_count.saturating_sub(1);
                                     }
-                                    // we dont need to update local usages because tracking usages for a local
-                                    // with no declarations serves no purpose
+                                    
+                                    
                                     block[stat_index] = ast::Empty {}.into();
                                     for old_local in old_locals {
                                         *stat_to_values_read[index]
@@ -319,10 +301,10 @@ impl<'a> Inliner<'a> {
                 }
                 index += 1;
             }
-            // we cant inline anything with side effects or anything that depends on other params
-            // because block params are executed in parallel.
+            
+            
             for edge in self.function.edges(node).map(|e| e.id()).collect_vec() {
-                // TODO: rename values_read to locals_read
+                
                 let mut arg_to_values_read = self
                     .function
                     .graph()
@@ -355,26 +337,17 @@ impl<'a> Inliner<'a> {
                             continue 'w;
                         }
                         let block = self.function.block_mut(node).unwrap();
-                        // we cant inline across upvalue writes because an inlining candidate with side effects,
-                        // for ex. a non-local function call, might access the upvalue
+                        
+                        
                         for value_written in block[stat_index].values_written() {
                             if self.upvalue_to_group.contains_key(value_written) {
-                                // TODO: set allow_side_effects to false instead
+                                
                                 index += 1;
                                 continue 'w;
                             }
                         }
 
-                        /*
-                        -- we dont want to inline `tostring(a)` into `print(b)`
-                        local print = print
-                        local a = 1
-                        while true do
-                            local b = tostring(a)
-                            a = 1
-                            print(b)
-                        end
-                        */
+                        
                         if block[stat_index]
                             .values_read()
                             .into_iter()
@@ -424,16 +397,14 @@ impl<'a> Inliner<'a> {
                                     assert!(new_rvalue.is_none());
                                     let block = self.function.block_mut(node).unwrap();
 
-                                    // TODO: PERF: remove `local_usages[l] == 1` filter in stat_to_values_read
-                                    // and use stat_to_values_read here
+                                    
                                     for local in block[stat_index].values_read() {
                                         let local_usage_count =
                                             self.local_usages.get_mut(local).unwrap();
                                         *local_usage_count = local_usage_count.saturating_sub(1);
                                     }
-                                    // we dont need to update local usages because tracking usages for a local
-                                    // with no declarations serves no purpose
-
+                                    
+                                    
                                     block[stat_index] = ast::Empty {}.into();
                                     *read = None;
                                     continue 'w;
@@ -488,7 +459,7 @@ pub fn inline(
         )
         .inline_rvalues();
 
-        // remove unused locals
+        
         for block in function.blocks_mut() {
             for stat_index in 0..block.len() {
                 if let ast::Statement::Assign(assign) = &block[stat_index]
@@ -498,12 +469,12 @@ pub fn inline(
                 {
                     let rvalue = &assign.right[0];
                     let has_side_effects = rvalue.has_side_effects();
-                    // TODO: REFACTOR: is_some_and
+                    
                     if !upvalue_to_group.contains_key(local)
                         && local_usages.get(local).map_or(true, |&u| u == 0)
                     {
                         if has_side_effects {
-                            // TODO: PERF: dont clone
+                            
                             let new_stat = match rvalue {
                                 ast::RValue::Call(call)
                                 | ast::RValue::Select(ast::Select::Call(call)) => {
@@ -529,11 +500,11 @@ pub fn inline(
         }
 
         for block in function.blocks_mut() {
-            // we check block.ast.len() elsewhere and do `i - ` here and elsewhere so we need to get rid of empty statements
-            // TODO: fix ^
+            
+            
             block.retain(|s| s.as_empty().is_none());
 
-            // `t = {} t.a = 1` -> `t = { a = 1 }`
+            
             let mut i = 0;
             while i < block.len() {
                 if let ast::Statement::Assign(assign) = &block[i]
@@ -590,7 +561,7 @@ pub fn inline(
                 }
             }
 
-            // if the first statement is a set_list, we cant inline it anyway
+            
             for i in 1..block.len() {
                 if let ast::Statement::SetList(set_list) = &block[i] {
                     let object_local = set_list.object_local.clone();
@@ -610,8 +581,8 @@ pub fn inline(
                         for value in set_list.values {
                             table.0.push((None, value));
                         }
-                        // table already has tail?
-                        // TODO: REFACTOR: is_some_and
+                        
+                        
                         assert!(!table.0.last().map_or(false, |(k, v)| k.is_none()
                             && matches!(
                                 v,
@@ -624,15 +595,14 @@ pub fn inline(
                         }
                         changed = true;
                     }
-                    // todo: only inline in changed blocks
-                    //cfg::dot::render_to(function, &mut std::io::stdout());
-                    //break 'outer;
+                    
+                    
                 }
             }
         }
     }
-    // we check block.ast.len() elsewhere and do `i - ` here and elsewhere so we need to get rid of empty statements
-    // TODO: fix ^
+    
+    
     for block in function.blocks_mut() {
         block.retain(|s| s.as_empty().is_none());
     }

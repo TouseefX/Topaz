@@ -94,7 +94,7 @@ impl Traverse for Binary {
 
 impl SideEffects for Binary {
     fn has_side_effects(&self) -> bool {
-        // TODO: do this properly
+        
         match self.operation {
             BinaryOperation::And | BinaryOperation::Or => {
                 self.left.has_side_effects() || self.right.has_side_effects()
@@ -106,8 +106,8 @@ impl SideEffects for Binary {
 
 impl<'a: 'b, 'b> Reduce for Binary {
     fn reduce(self) -> RValue {
-        // TODO: true == true, true == false, etc.
-        // really anything without side effects should be true if l == r
+        
+        
         match (self.left.reduce(), self.right.reduce(), self.operation) {
             (
                 RValue::Unary(Unary {
@@ -175,7 +175,7 @@ impl<'a: 'b, 'b> Reduce for Binary {
                 BinaryOperation::Or,
             ) => value,
             (left, right, BinaryOperation::Or) if left == right => left,
-            // TODO: concat numbers
+            
             (
                 RValue::Literal(Literal::String(left)),
                 RValue::Literal(Literal::String(right)),
@@ -258,7 +258,7 @@ impl<'a: 'b, 'b> Reduce for Binary {
                 BinaryOperation::Or => left.reduce(),
                 _ => unreachable!(),
             },
-            // TODO: concat numbers
+            
             (
                 RValue::Literal(Literal::String(left)),
                 RValue::Literal(Literal::String(right)),

@@ -19,15 +19,9 @@ impl Call {
     }
 }
 
-// call can error
+
 has_side_effects!(Call);
-// impl SideEffects for Call {
-//     fn has_side_effects(&self) -> bool {
-//         matches!(self.value, box RValue::Local(_))
-//             || self.value.has_side_effects()
-//             || self.arguments.iter().any(|arg| arg.has_side_effects())
-//     }
-// }
+
 
 impl Traverse for Call {
     fn rvalues_mut(&mut self) -> Vec<&mut RValue> {
@@ -74,7 +68,7 @@ impl fmt::Display for Call {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodCall {
-    // TODO: STYLE: rename to object?
+    
     pub value: Box<RValue>,
     pub method: String,
     pub arguments: Vec<RValue>,
@@ -90,7 +84,7 @@ impl MethodCall {
     }
 }
 
-// this should reflect Index
+
 has_side_effects!(MethodCall);
 
 impl Traverse for MethodCall {

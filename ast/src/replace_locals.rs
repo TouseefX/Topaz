@@ -19,7 +19,7 @@ pub fn replace_locals<H: std::hash::BuildHasher>(
                 *local = new_local.clone();
             }
         }
-        // TODO: traverse_values
+        
         statement.post_traverse_values(&mut |value| -> Option<()> {
             if let Either::Right(RValue::Closure(closure)) = value {
                 replace_locals(&mut closure.function.lock().body, map)

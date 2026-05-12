@@ -13,7 +13,7 @@ pub enum BranchType {
 #[derive(Debug, Clone, Default)]
 pub struct BlockEdge {
     pub branch_type: BranchType,
-    // TODO: why is this not a hash map?
+    
     pub arguments: Vec<(RcLocal, RValue)>,
 }
 

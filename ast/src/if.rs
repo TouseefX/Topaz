@@ -16,7 +16,7 @@ pub struct If {
 
 impl PartialEq for If {
     fn eq(&self, _other: &Self) -> bool {
-        // TODO: compare block
+        
         false
     }
 }
@@ -42,7 +42,7 @@ impl Traverse for If {
 }
 
 impl SideEffects for If {
-    // TODO: side effects for blocks
+    
     fn has_side_effects(&self) -> bool {
         true
     }

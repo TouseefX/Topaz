@@ -11,9 +11,9 @@ use super::OperationCode;
 #[derive(Debug, EnumDiscriminants)]
 pub enum Layout {
     BC { a: u8, b: u16, c: u16 },
-    // b extended
+    
     BX { a: u8, b_x: u32 },
-    // b signed, extended
+    
     BSx { a: u8, b_sx: i32 },
 }
 
@@ -39,7 +39,7 @@ impl Layout {
             Some(LayoutDiscriminants::BSx) => {
                 let a = ((instruction >> 6) & 0xFF) as u8;
                 let b_x = (instruction >> 14) & 0x3FFFF;
-                // subtract maximum 18 bit signed int
+                
                 let b_sx = b_x as i32 - (((1 << 18) - 1) >> 1);
 
                 Ok((input, Self::BSx { a, b_sx }))

@@ -51,7 +51,7 @@ impl<'a> Labeller<'a, NodeIndex, EdgeIndex> for FunctionLabeller<'a> {
                     for local in s.values() {
                         let name = &mut local.0 .0.lock().0;
                         if name.is_none() {
-                            // TODO: ugly
+                            
                             *name = Some(format!("v{}", self.counter.borrow()));
                             *self.counter.borrow_mut() += 1;
                         }

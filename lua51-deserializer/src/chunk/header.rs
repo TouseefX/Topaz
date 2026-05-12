@@ -39,7 +39,7 @@ impl Header {
                 ErrorKind::Switch,
             ))),
         }?;
-        // TODO: try_into instead
+        
         let (input, endianness) = match le_u8(input)? {
             (input, 0) => Ok((input, Endianness::Big)),
             (input, 1) => Ok((input, Endianness::Little)),
