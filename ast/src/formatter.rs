@@ -258,7 +258,6 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             } else {
                 if !sequential_keys {
                     if let Some(key) = key {
-                    if let Some(key) = key {
                         let use_bare_notation = match key {
                             RValue::Literal(Literal::String(s)) => Self::is_valid_name(s),
                             _ => false,
