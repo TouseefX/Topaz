@@ -3,6 +3,33 @@ use std::fmt;
 use crate::{formatter::Formatter, RcLocal, SideEffects, Traverse};
 
 use super::{LValue, LocalRw, RValue};
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompoundOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Pow,
+    Concat,
+    IDiv,
+}
+
+impl fmt::Display for CompoundOp {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            CompoundOp::Add => write!(f, "+="),
+            CompoundOp::Sub => write!(f, "-="),
+            CompoundOp::Mul => write!(f, "*="),
+            CompoundOp::Div => write!(f, "/="),
+            CompoundOp::Mod => write!(f, "%="),
+            CompoundOp::Pow => write!(f, "^="),
+            CompoundOp::Concat => write!(f, "..="),
+            CompoundOp::IDiv => write!(f, "//="),
+        }
+    }
+}
+
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assign {
@@ -10,6 +37,7 @@ pub struct Assign {
     pub right: Vec<RValue>,
     pub prefix: bool,
     pub parallel: bool,
+    pub compound_op: Option<CompoundOp>,
 }
 
 impl Assign {
@@ -19,6 +47,7 @@ impl Assign {
             right,
             prefix: false,
             parallel: false,
+            compound_op: None,
         }
     }
 }

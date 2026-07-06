@@ -38,6 +38,7 @@ impl super::GraphStructurer {
                         right: vec![cond],
                         prefix: true,
                         parallel: false,
+                    compound_op: None,
                     }
                     .into(),
                 ),

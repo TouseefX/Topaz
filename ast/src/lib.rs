@@ -358,3 +358,10 @@ impl fmt::Display for Block {
         Formatter::format(self, f, Default::default())
     }
 }
+
+// New modules for Oracle-quality features
+pub mod compound_assign;
+pub mod context_naming;
+pub mod post_process;
+pub mod table_cleanup;
+pub mod unused_vars;

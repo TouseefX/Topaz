@@ -8,6 +8,7 @@ use ast::{
     name_locals::name_locals, replace_locals::replace_locals, Traverse,
 };
 
+use ast::post_process;
 use by_address::ByAddress;
 use cfg::{
     function::Function,
@@ -251,6 +252,9 @@ fn decompile_function(
     {
         let mut ast_function = ast_function.lock();
         ast_function.body = Arc::try_unwrap(block).unwrap().into_inner();
+        
+        // Apply post-processing to this function's body
+        post_process::apply_all(&mut ast_function.body);
         ast_function.parameters = params;
         ast_function.is_variadic = is_variadic;
     }

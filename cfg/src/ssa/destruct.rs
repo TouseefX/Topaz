@@ -804,6 +804,7 @@ impl<'a> Destructor<'a> {
                     right: param_map.values().map(|v| v.clone().into()).collect(),
                     prefix: false,
                     parallel: true,
+                    compound_op: None,
                 }
                 .into(),
             );
@@ -844,6 +845,7 @@ impl<'a> Destructor<'a> {
                     right: Vec::with_capacity(args.len()),
                     prefix: false,
                     parallel: true,
+                    compound_op: None,
                 };
 
                 for (param, arg) in args {

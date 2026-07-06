@@ -258,9 +258,21 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             } else {
                 if !sequential_keys {
                     if let Some(key) = key {
-                        write!(self.output, "[")?;
-                        self.format_rvalue(key)?;
-                        write!(self.output, "] = ")?;
+                    if let Some(key) = key {
+                        let use_bare_notation = match key {
+                            RValue::Literal(Literal::String(s)) => Self::is_valid_name(s),
+                            _ => false,
+                        };
+                        
+                        if use_bare_notation {
+                            if let RValue::Literal(Literal::String(s)) = key {
+                                write!(self.output, "{} = ", std::str::from_utf8(s).unwrap())?;
+                            }
+                        } else {
+                            write!(self.output, "[")?;
+                            self.format_rvalue(key)?;
+                            write!(self.output, "] = ")?;
+                        }
                     }
                 }
                 self.format_rvalue(value)?;
@@ -600,6 +612,14 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 
     pub(crate) fn format_assign(&mut self, assign: &Assign) -> fmt::Result {
         if assign.prefix {
+        // Handle compound assignments (e.g. x += 1)
+        if let Some(compound_op) = &assign.compound_op {
+            assert!(assign.left.len() == 1 && assign.right.len() == 1);
+            self.format_lvalue(&assign.left[0])?;
+            write!(self.output, " {} ", compound_op)?;
+            return self.format_rvalue(&assign.right[0]);
+        }
+
             write!(self.output, "local ")?;
         }
 

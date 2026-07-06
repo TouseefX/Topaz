@@ -857,6 +857,7 @@ fn try_remove_unnecessary_condition(function: &mut Function, node: NodeIndex) ->
                     right: vec![cond],
                     prefix: true,
                     parallel: false,
+                compound_op: None,
                 }
                 .into(),
             ),
