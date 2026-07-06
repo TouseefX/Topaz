@@ -38,7 +38,7 @@ getgenv().decompile = function(script_instance)
   ).Body
 end
 
-loadstring(game:HttpGet("https://raw.githubusercontent.com/Team-Gauntlet/TopazSaveinstance/main/saveinstance.luau"))()({
+loadstring(game:HttpGet("https://raw.githubusercontent.com/Infinity-Networking/TopazSaveinstance/main/saveinstance.luau"))()({
   mode = "scripts",
   NilInstances = true,
 })
@@ -70,7 +70,7 @@ getgenv().decompile = function(script_instance)
   ).Body
 end
 
-loadstring(game:HttpGet("https://raw.githubusercontent.com/Team-Gauntlet/TopazSaveinstance/main/saveinstance.luau"))()({
+loadstring(game:HttpGet("https://raw.githubusercontent.com/Infinity-Networking/TopazSaveinstance/main/saveinstance.luau"))()({
   mode = "scripts",
   NilInstances = true,
 })
