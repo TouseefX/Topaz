@@ -115,6 +115,7 @@ pub fn decompile_bytecode(bytecode: &[u8]) -> String {
     ast::context_naming::apply_context_naming(&mut body);
     propagate_names(&mut body);
     inline_short_gotos(&mut body);
+    ast::guard_clauses::apply_guard_clauses(&mut body);
     name_locals(&mut body, false);
 
     body.to_string()
