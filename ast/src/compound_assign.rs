@@ -104,3 +104,105 @@ pub fn detect_compound_assignments(block: &mut Block) -> usize {
     
     count
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Binary, BinaryOperation, Literal, LValue, RcLocal, RValue};
+
+    /// Regression test for a critical bug where `x = x + y` was rendered as
+    /// the semantically broken `x = y`, silently dropping the accumulator
+    /// read. This happened because `formatter::format_assign` checked
+    /// `assign.compound_op` inside the `if assign.prefix` branch, but
+    /// `try_convert_assign` (below) only ever sets `compound_op` on
+    /// non-prefix assignments -- making the `+=`-printing branch dead code,
+    /// so execution fell through to the generic printer using
+    /// `assign.right[0]`, which by that point had already been rewritten to
+    /// just the right-hand operand of the original binary expression.
+    ///
+    /// This test exercises the full pipeline (convert, then print) so it
+    /// would catch either half of that regression: a broken
+    /// `try_convert_assign` that mangles `assign.right`, or a broken
+    /// formatter that ignores `compound_op`.
+    #[test]
+    fn compound_assign_round_trips_through_formatter() {
+        let cases: &[(BinaryOperation, &str)] = &[
+            (BinaryOperation::Add, "+="),
+            (BinaryOperation::Sub, "-="),
+            (BinaryOperation::Mul, "*="),
+            (BinaryOperation::Div, "/="),
+            (BinaryOperation::Mod, "%="),
+            (BinaryOperation::Pow, "^="),
+            (BinaryOperation::Concat, "..="),
+            (BinaryOperation::IDiv, "//="),
+        ];
+
+        for &(op, expected_op_str) in cases {
+            let total = RcLocal::new(crate::Local::new(Some("total".to_string())));
+            let step: RValue = if op == BinaryOperation::Concat {
+                Literal::String(b"y".to_vec()).into()
+            } else {
+                Literal::Number(1.0).into()
+            };
+
+            let mut assign = crate::Assign::new(
+                vec![LValue::Local(total.clone())],
+                vec![Binary::new(RValue::Local(total.clone()), step, op).into()],
+            );
+
+            assert!(
+                try_convert_assign(&mut assign),
+                "expected {op:?} pattern to be recognized as a compound assignment"
+            );
+            assert_eq!(assign.compound_op.is_some(), true);
+
+            // The right-hand side must now be *only* the step operand -- if
+            // this regresses to still containing the self-referential
+            // binary expression, formatting would double up the read.
+            assert!(
+                !matches!(&assign.right[0], RValue::Binary(_)),
+                "right-hand side should have been reduced to just the step operand"
+            );
+
+            let printed = assign.to_string();
+            assert!(
+                printed.contains(expected_op_str),
+                "expected printed compound assignment to contain `{expected_op_str}`, got: {printed:?}"
+            );
+            // The critical regression check: the accumulator variable must
+            // still appear on the right-hand side of the operator (i.e. the
+            // read of `total` must not have been silently dropped, turning
+            // `total += y` into the broken `total = y`).
+            assert!(
+                !printed.trim_start().starts_with("total ="),
+                "compound assignment must not be printed as a plain `total = ...` \
+                 assignment (this is the exact bug where `total = total + i` \
+                 silently became `total = i`): got {printed:?}"
+            );
+        }
+    }
+
+    /// A local declaration (`local x = x + y`) can never be a compound
+    /// assignment -- there is no prior value of `x` to add to. Verifies
+    /// `try_convert_assign` correctly refuses prefix assignments.
+    #[test]
+    fn compound_assign_never_applies_to_local_declarations() {
+        let x = RcLocal::new(crate::Local::new(Some("x".to_string())));
+        let mut assign = crate::Assign::new(
+            vec![LValue::Local(x.clone())],
+            vec![Binary::new(
+                RValue::Local(x.clone()),
+                Literal::Number(1.0).into(),
+                BinaryOperation::Add,
+            )
+            .into()],
+        );
+        assign.prefix = true;
+
+        assert!(
+            !try_convert_assign(&mut assign),
+            "a `local` declaration must never be converted into a compound assignment"
+        );
+        assert!(assign.compound_op.is_none());
+    }
+}

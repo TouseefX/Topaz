@@ -11,7 +11,7 @@ use indexmap::IndexMap;
 use lifter::Lifter;
 use parking_lot::Mutex;
 use petgraph::algo::dominators::simple_fast;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use triomphe::Arc;
 
 use lua51_deserializer::chunk::Chunk;
@@ -122,10 +122,57 @@ pub fn decompile_bytecode(bytecode: &[u8]) -> String {
 }
 
 fn propagate_names(body: &mut ast::Block) {
-    propagate_names_block(body);
+    let mut captured = FxHashSet::default();
+    collect_captured_upvalues(body, &mut captured);
+    propagate_names_block(body, &captured);
 }
 
-fn propagate_names_block(block: &mut ast::Block) {
+/// Collects every local that is captured (by copy or by reference) as an
+/// upvalue of some nested closure, anywhere in the function tree rooted at
+/// `block`.
+///
+/// These locals must never have their display name overwritten by the
+/// generic "copy the name from the other side of a plain assignment"
+/// heuristic in `propagate_names_block`: a captured variable is shared with
+/// (and semantically distinct from) whatever unrelated locals happen to live
+/// in the closures that capture it, and blindly renaming it to match a
+/// sibling can make two different variables print with the identical name,
+/// silently corrupting the decompiled source (e.g. turning
+/// `aId = idCounter` into the textually-identical-looking but broken
+/// `Id = Id` once both locals are named "Id").
+fn collect_captured_upvalues(block: &mut ast::Block, out: &mut FxHashSet<ast::RcLocal>) {
+    for stat in &mut block.0 {
+        stat.traverse_rvalues(&mut |rvalue| {
+            if let ast::RValue::Closure(closure) = rvalue {
+                out.extend(closure.upvalues.iter().map(|u| match u {
+                    ast::Upvalue::Copy(l) | ast::Upvalue::Ref(l) => l.clone(),
+                }));
+                collect_captured_upvalues(&mut closure.function.lock().body, out);
+            }
+        });
+        match stat {
+            ast::Statement::If(r#if) => {
+                collect_captured_upvalues(&mut r#if.then_block.lock(), out);
+                collect_captured_upvalues(&mut r#if.else_block.lock(), out);
+            }
+            ast::Statement::While(r#while) => {
+                collect_captured_upvalues(&mut r#while.block.lock(), out);
+            }
+            ast::Statement::Repeat(repeat) => {
+                collect_captured_upvalues(&mut repeat.block.lock(), out);
+            }
+            ast::Statement::NumericFor(numeric_for) => {
+                collect_captured_upvalues(&mut numeric_for.block.lock(), out);
+            }
+            ast::Statement::GenericFor(generic_for) => {
+                collect_captured_upvalues(&mut generic_for.block.lock(), out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn propagate_names_block(block: &mut ast::Block, captured: &FxHashSet<ast::RcLocal>) {
 
     for _ in 0..2 {
         for stat in block.0.iter() {
@@ -136,17 +183,21 @@ fn propagate_names_block(block: &mut ast::Block) {
                         if let Some(lhs_name) = lhs_name {
 
                             if let ast::RValue::Local(rhs) = &assign.right[0] {
-                                let mut rhs_lock = rhs.0 .0.lock();
-                                if rhs_lock.0.is_none() {
-                                    rhs_lock.0 = Some(lhs_name);
+                                if !captured.contains(rhs) {
+                                    let mut rhs_lock = rhs.0 .0.lock();
+                                    if rhs_lock.0.is_none() {
+                                        rhs_lock.0 = Some(lhs_name);
+                                    }
                                 }
                             }
                         } else {
 
                             if let ast::RValue::Local(rhs) = &assign.right[0] {
-                                let rhs_name = rhs.0 .0.lock().0.clone();
-                                if let Some(rhs_name) = rhs_name {
-                                    lhs.0 .0.lock().0 = Some(rhs_name);
+                                if !captured.contains(lhs) {
+                                    let rhs_name = rhs.0 .0.lock().0.clone();
+                                    if let Some(rhs_name) = rhs_name {
+                                        lhs.0 .0.lock().0 = Some(rhs_name);
+                                    }
                                 }
                             }
                         }
@@ -178,25 +229,25 @@ fn propagate_names_block(block: &mut ast::Block) {
     for stat in &mut block.0 {
         stat.traverse_rvalues(&mut |rvalue| {
             if let ast::RValue::Closure(closure) = rvalue {
-                propagate_names_block(&mut closure.function.lock().body);
+                propagate_names_block(&mut closure.function.lock().body, captured);
             }
         });
         match stat {
             ast::Statement::If(r#if) => {
-                propagate_names_block(&mut r#if.then_block.lock());
-                propagate_names_block(&mut r#if.else_block.lock());
+                propagate_names_block(&mut r#if.then_block.lock(), captured);
+                propagate_names_block(&mut r#if.else_block.lock(), captured);
             }
             ast::Statement::While(r#while) => {
-                propagate_names_block(&mut r#while.block.lock());
+                propagate_names_block(&mut r#while.block.lock(), captured);
             }
             ast::Statement::Repeat(repeat) => {
-                propagate_names_block(&mut repeat.block.lock());
+                propagate_names_block(&mut repeat.block.lock(), captured);
             }
             ast::Statement::NumericFor(numeric_for) => {
-                propagate_names_block(&mut numeric_for.block.lock());
+                propagate_names_block(&mut numeric_for.block.lock(), captured);
             }
             ast::Statement::GenericFor(generic_for) => {
-                propagate_names_block(&mut generic_for.block.lock());
+                propagate_names_block(&mut generic_for.block.lock(), captured);
             }
             _ => {}
         }

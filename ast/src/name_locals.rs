@@ -193,10 +193,20 @@ impl Namer {
         let mut lock = local.0 .0.lock();
         if lock.0.is_some() {
             if !self.rename {
+                // Register the pre-existing name so that later calls to
+                // `unique_name` for an unrelated local don't hand out the
+                // exact same name and create a collision (two distinct
+                // variables printing identically, which can silently
+                // corrupt the decompiled source -- see the NodeSorter
+                // `Id = Id` regression).
+                if let Some(ref existing) = lock.0 {
+                    self.name_uses.entry(existing.clone()).or_insert(1);
+                }
                 return;
             }
             if let Some(ref existing) = lock.0 {
                 if !is_synthetic_name(existing) {
+                    self.name_uses.entry(existing.clone()).or_insert(1);
                     return;
                 }
             }

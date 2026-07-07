@@ -644,8 +644,17 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     }
 
     pub(crate) fn format_assign(&mut self, assign: &Assign) -> fmt::Result {
-        if assign.prefix {
-        // Handle compound assignments (e.g. x += 1)
+        // Handle compound assignments (e.g. x += 1). These are always
+        // non-prefix plain reassignments (see
+        // `compound_assign::try_convert_assign`, which never sets
+        // `compound_op` on a `local` declaration), so this must be checked
+        // before the `assign.prefix` branch below -- otherwise this branch
+        // is unreachable dead code and compound assignments fall through to
+        // the generic printer using `assign.right[0]`, which by this point
+        // has already been rewritten to just the right-hand operand of the
+        // original binary expression (e.g. `total = total + i` becomes
+        // `total = i` instead of `total += i`), silently corrupting the
+        // decompiled program's behavior.
         if let Some(compound_op) = &assign.compound_op {
             assert!(assign.left.len() == 1 && assign.right.len() == 1);
             self.format_lvalue(&assign.left[0])?;
@@ -653,6 +662,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             return self.format_rvalue(&assign.right[0]);
         }
 
+        if assign.prefix {
             write!(self.output, "local ")?;
         }
 
