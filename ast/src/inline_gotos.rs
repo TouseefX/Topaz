@@ -3,11 +3,19 @@ use rustc_hash::FxHashMap;
 use crate::{Block, RValue, Statement, Traverse};
 
 pub fn inline_short_gotos(block: &mut Block) {
-    let tails = collect_short_tails(block);
-    if !tails.is_empty() {
-        replace_gotos(block, &tails);
-        prune_unused_labels(block, &tails);
+    for _ in 0..10 {
+        let tails = collect_short_tails(block);
+        if tails.is_empty() {
+            break;
+        }
+        let mut changed = false;
+        replace_gotos(block, &tails, &mut changed);
+        if !changed {
+            break;
+        }
     }
+    let tails = collect_short_tails(block);
+    prune_unused_labels(block, &tails);
     descend_into_closures(block);
 }
 
@@ -59,7 +67,7 @@ fn walk_for_tails(block: &Block, out: &mut FxHashMap<String, Vec<Statement>>) {
     }
 }
 
-const MAX_TAIL_LEN: usize = 8;
+const MAX_TAIL_LEN: usize = 16;
 
 fn extract_short_tail(stmts: &[Statement], from: usize) -> Option<Vec<Statement>> {
     if from >= stmts.len() {
@@ -70,24 +78,25 @@ fn extract_short_tail(stmts: &[Statement], from: usize) -> Option<Vec<Statement>
     while i < stmts.len() && tail.len() < MAX_TAIL_LEN {
         let stmt = &stmts[i];
         match stmt {
-            Statement::Return(_) | Statement::Break(_) | Statement::Continue(_) => {
+            Statement::Return(_) | Statement::Break(_) | Statement::Continue(_) | Statement::Goto(_) => {
                 tail.push(stmt.clone());
                 return Some(tail);
             }
-            Statement::Call(_) | Statement::MethodCall(_) | Statement::Empty(_) => {
+            Statement::Label(_) => return None,
+            _ => {
                 tail.push(stmt.clone());
             }
-            Statement::Assign(a) if !a.prefix => {
-                tail.push(stmt.clone());
-            }
-            _ => return None,
         }
         i += 1;
     }
-    None
+    if !tail.is_empty() && i == stmts.len() {
+        Some(tail)
+    } else {
+        None
+    }
 }
 
-fn replace_gotos(block: &mut Block, tails: &FxHashMap<String, Vec<Statement>>) {
+fn replace_gotos(block: &mut Block, tails: &FxHashMap<String, Vec<Statement>>, changed: &mut bool) {
     let mut i = 0;
     while i < block.0.len() {
         let replacement = match &block.0[i] {
@@ -98,17 +107,18 @@ fn replace_gotos(block: &mut Block, tails: &FxHashMap<String, Vec<Statement>>) {
             let n = repl.len();
             block.0.splice(i..=i, repl);
             i += n;
+            *changed = true;
             continue;
         }
         match &mut block.0[i] {
             Statement::If(r#if) => {
-                replace_gotos(&mut r#if.then_block.lock(), tails);
-                replace_gotos(&mut r#if.else_block.lock(), tails);
+                replace_gotos(&mut r#if.then_block.lock(), tails, changed);
+                replace_gotos(&mut r#if.else_block.lock(), tails, changed);
             }
-            Statement::While(r#while) => replace_gotos(&mut r#while.block.lock(), tails),
-            Statement::Repeat(repeat) => replace_gotos(&mut repeat.block.lock(), tails),
-            Statement::NumericFor(nf) => replace_gotos(&mut nf.block.lock(), tails),
-            Statement::GenericFor(gf) => replace_gotos(&mut gf.block.lock(), tails),
+            Statement::While(r#while) => replace_gotos(&mut r#while.block.lock(), tails, changed),
+            Statement::Repeat(repeat) => replace_gotos(&mut repeat.block.lock(), tails, changed),
+            Statement::NumericFor(nf) => replace_gotos(&mut nf.block.lock(), tails, changed),
+            Statement::GenericFor(gf) => replace_gotos(&mut gf.block.lock(), tails, changed),
             _ => {}
         }
         i += 1;
