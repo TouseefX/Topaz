@@ -90,6 +90,7 @@ pub fn decompile_bytecode(bytecode: &[u8]) -> String {
 
             let params = std::mem::take(&mut function.parameters);
             let is_variadic = function.is_variadic;
+            let func_line = function.line;
             let block = Arc::new(restructure::lift(function).into());
             LocalDeclarer::default().declare_locals(
                 Arc::clone(&block),
@@ -101,6 +102,7 @@ pub fn decompile_bytecode(bytecode: &[u8]) -> String {
                 ast_function.body = Arc::try_unwrap(block).unwrap().into_inner();
                 ast_function.parameters = params;
                 ast_function.is_variadic = is_variadic;
+                ast_function.line = func_line;
             }
             (ByAddress(ast_function), upvalues_in)
         })
@@ -110,6 +112,7 @@ pub fn decompile_bytecode(bytecode: &[u8]) -> String {
     upvalues.remove(&main);
     let mut body = Arc::try_unwrap(main.0).unwrap().into_inner().body;
     link_upvalues(&mut body, &mut upvalues);
+    ast::context_naming::apply_context_naming(&mut body);
     propagate_names(&mut body);
     inline_short_gotos(&mut body);
     name_locals(&mut body, false);
@@ -217,6 +220,21 @@ fn link_upvalues(
                             ast::Upvalue::Copy(l) | ast::Upvalue::Ref(l) => l,
                         }))
                 {
+                    let old_name = old.0.0.lock().0.clone();
+                    if let Some(ref name) = old_name {
+                        if !ast::name_locals::is_synthetic_name(name) {
+                            let mut new_lock = new.0.0.lock();
+                            if new_lock.0.is_none()
+                                || new_lock
+                                    .0
+                                    .as_ref()
+                                    .map(|s| ast::name_locals::is_synthetic_name(s))
+                                    .unwrap_or(true)
+                            {
+                                new_lock.0 = Some(name.clone());
+                            }
+                        }
+                    }
                     local_map.insert(old.clone(), new.clone());
                 }
                 link_upvalues(&mut function.body, upvalues);

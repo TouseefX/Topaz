@@ -7,7 +7,7 @@
 //!
 //! This does NOT use debug info - it infers names from the code itself.
 
-use crate::{Block, Statement, Assign, LValue, RValue, Call, Index, Literal};
+use crate::{Block, Statement, Assign, LValue, RValue, Call, Index, Literal, Traverse};
 use std::collections::HashMap;
 
 /// Apply context-based naming to variables
@@ -15,6 +15,12 @@ pub fn apply_context_naming(block: &mut Block) {
     let mut name_counts: HashMap<String, usize> = HashMap::new();
     
     for statement in block.iter_mut() {
+        statement.post_traverse_values(&mut |value| -> Option<()> {
+            if let itertools::Either::Right(RValue::Closure(closure)) = value {
+                apply_context_naming(&mut closure.function.lock().body);
+            };
+            None
+        });
         process_statement(statement, &mut name_counts);
     }
 }
@@ -62,11 +68,15 @@ fn try_extract_name_from_assign(assign: &mut Assign, name_counts: &mut HashMap<S
         // Generate a unique name with counter
         let count = name_counts.entry(base_name.clone()).or_insert(0);
         *count += 1;
-        let new_name = format!("c{}_{}", count, base_name);
+        let new_name = if *count == 1 {
+            base_name.clone()
+        } else {
+            format!("{}_{}", base_name, count)
+        };
         
         // Apply the name to the local variable
         let mut lock = target_local.0 .0.lock();
-        if lock.0.is_none() || lock.0.as_ref().map(|s| s.starts_with("v")).unwrap_or(false) {
+        if lock.0.is_none() || lock.0.as_ref().map(|s| crate::name_locals::is_synthetic_name(s)).unwrap_or(true) {
             lock.0 = Some(new_name);
         }
     }

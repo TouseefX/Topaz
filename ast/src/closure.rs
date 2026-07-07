@@ -19,6 +19,7 @@ pub enum Upvalue {
 #[derive(Default, Debug, PartialEq, Clone)]
 pub struct Function {
     pub name: Option<String>,
+    pub line: Option<usize>,
     pub parameters: Vec<RcLocal>,
     pub is_variadic: bool,
     pub body: Block,

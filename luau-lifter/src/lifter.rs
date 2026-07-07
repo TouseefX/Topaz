@@ -84,6 +84,7 @@ impl<'a> Lifter<'a> {
             debug_register_names,
             debug_upvalue_names,
         };
+        context.function.line = Some(f_list[function_id].line_defined);
 
         context.lift_function();
         (context.function, context.upvalues, context.child_functions)
@@ -1331,7 +1332,11 @@ impl<'a> Lifter<'a> {
                         let function = Arc::<Mutex<_>>::default();
                         self.child_functions
                             .insert(ByAddress(function.clone()), func_index);
-                        function.lock().name = func_name;
+                        {
+                            let mut lock = function.lock();
+                            lock.name = func_name;
+                            lock.line = Some(self.function_list[func_index].line_defined);
+                        }
                         statements.push(
                             ast::Assign::new(
                                 vec![dest_local.into()],

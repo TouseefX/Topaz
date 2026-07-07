@@ -15,32 +15,32 @@ struct Namer {
 }
 
 const FOR_LETTERS: &[&str] = &["i", "j", "k", "l", "m", "n"];
-const SYNTHETIC_PREFIXES: &[&str] = &["v", "p", "t", "s", "n", "b", "k", "fn", "mod"];
+const SYNTHETIC_PREFIXES: &[&str] = &["v", "p", "t", "s", "n", "b", "k", "fn", "mod", "c"];
 
 const LUA_KEYWORDS: &[&str] = &[
     "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in",
     "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
 ];
 
-impl Namer {
-    fn is_synthetic_name(name: &str) -> bool {
-        if name.is_empty() || name == "_" {
-            return true;
-        }
-        if name.len() == 1 && (name == "v" || name == "p") {
-            return true;
-        }
-        for &prefix in SYNTHETIC_PREFIXES {
-            if let Some(rest) = name.strip_prefix(prefix) {
-                let rest = rest.strip_prefix("_u").unwrap_or(rest);
-                if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
-                    return true;
-                }
+pub fn is_synthetic_name(name: &str) -> bool {
+    if name.is_empty() || name == "_" {
+        return true;
+    }
+    if name.len() == 1 && (name == "v" || name == "p") {
+        return true;
+    }
+    for &prefix in SYNTHETIC_PREFIXES {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            let rest = rest.strip_prefix("_u").unwrap_or(rest);
+            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                return true;
             }
         }
-        false
     }
+    false
+}
 
+impl Namer {
     fn is_valid_identifier(name: &str) -> bool {
         if name.is_empty() {
             return false;
@@ -196,7 +196,7 @@ impl Namer {
                 return;
             }
             if let Some(ref existing) = lock.0 {
-                if !Self::is_synthetic_name(existing) {
+                if !is_synthetic_name(existing) {
                     return;
                 }
             }
@@ -229,7 +229,7 @@ impl Namer {
         }
         if lock.0.is_some() && self.rename {
             if let Some(ref name) = lock.0 {
-                if !Self::is_synthetic_name(name) {
+                if !is_synthetic_name(name) {
                     return;
                 }
             }

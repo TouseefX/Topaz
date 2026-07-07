@@ -175,6 +175,8 @@ impl<'a: 'b, 'b> Reduce for Binary {
                 BinaryOperation::Or,
             ) => value,
             (left, right, BinaryOperation::Or) if left == right => left,
+            (left, RValue::Literal(Literal::Boolean(false)), BinaryOperation::Or)
+            | (left, RValue::Literal(Literal::Nil), BinaryOperation::Or) => left,
             
             (
                 RValue::Literal(Literal::String(left)),
@@ -258,6 +260,7 @@ impl<'a: 'b, 'b> Reduce for Binary {
                 BinaryOperation::Or => left.reduce(),
                 _ => unreachable!(),
             },
+            (left, RValue::Literal(Literal::Nil), BinaryOperation::Or) => left.reduce(),
             
             (
                 RValue::Literal(Literal::String(left)),

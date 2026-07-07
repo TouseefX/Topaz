@@ -180,9 +180,90 @@ pub fn decompile_bytecode(bytecode: &[u8], encode_key: u8) -> String {
             upvalues.remove(&main);
             let mut body = Arc::try_unwrap(main.0).unwrap().into_inner().body;
             link_upvalues(&mut body, &mut upvalues);
+            ast::context_naming::apply_context_naming(&mut body);
+            propagate_names(&mut body);
             inline_short_gotos(&mut body);
             name_locals(&mut body, true);
             body.to_string()
+        }
+    }
+}
+
+fn propagate_names(body: &mut ast::Block) {
+    propagate_names_block(body);
+}
+
+fn propagate_names_block(block: &mut ast::Block) {
+    for _ in 0..2 {
+        for stat in block.0.iter() {
+            if let ast::Statement::Assign(assign) = stat {
+                if assign.left.len() == 1 && assign.right.len() == 1 {
+                    if let Some(lhs) = assign.left[0].as_local() {
+                        let lhs_name = lhs.0 .0.lock().0.clone();
+                        if let Some(lhs_name) = lhs_name {
+                            if let ast::RValue::Local(rhs) = &assign.right[0] {
+                                let mut rhs_lock = rhs.0 .0.lock();
+                                if rhs_lock.0.is_none() {
+                                    rhs_lock.0 = Some(lhs_name);
+                                }
+                            }
+                        } else {
+                            if let ast::RValue::Local(rhs) = &assign.right[0] {
+                                let rhs_name = rhs.0 .0.lock().0.clone();
+                                if let Some(rhs_name) = rhs_name {
+                                    lhs.0 .0.lock().0 = Some(rhs_name);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    block.0.retain(|stat| {
+        if let ast::Statement::Assign(assign) = stat {
+            if assign.prefix && assign.left.len() == 1 && assign.right.len() == 1 {
+                if let Some(lhs) = assign.left[0].as_local() {
+                    if let ast::RValue::Local(rhs) = &assign.right[0] {
+                        let lhs_name = lhs.0 .0.lock().0.clone();
+                        let rhs_name = rhs.0 .0.lock().0.clone();
+                        if let (Some(ln), Some(rn)) = (&lhs_name, &rhs_name) {
+                            if ln == rn {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        true
+    });
+
+    for stat in &mut block.0 {
+        stat.traverse_rvalues(&mut |rvalue| {
+            if let ast::RValue::Closure(closure) = rvalue {
+                propagate_names_block(&mut closure.function.lock().body);
+            }
+        });
+        match stat {
+            ast::Statement::If(r#if) => {
+                propagate_names_block(&mut r#if.then_block.lock());
+                propagate_names_block(&mut r#if.else_block.lock());
+            }
+            ast::Statement::While(r#while) => {
+                propagate_names_block(&mut r#while.block.lock());
+            }
+            ast::Statement::Repeat(repeat) => {
+                propagate_names_block(&mut repeat.block.lock());
+            }
+            ast::Statement::NumericFor(numeric_for) => {
+                propagate_names_block(&mut numeric_for.block.lock());
+            }
+            ast::Statement::GenericFor(generic_for) => {
+                propagate_names_block(&mut generic_for.block.lock());
+            }
+            _ => {}
         }
     }
 }
@@ -242,6 +323,7 @@ fn decompile_function(
 
     let params = std::mem::take(&mut function.parameters);
     let is_variadic = function.is_variadic;
+    let func_line = function.line;
     let block = Arc::new(restructure::lift(function).into());
     LocalDeclarer::default().declare_locals(
 
@@ -257,6 +339,7 @@ fn decompile_function(
         post_process::apply_all(&mut ast_function.body);
         ast_function.parameters = params;
         ast_function.is_variadic = is_variadic;
+        ast_function.line = func_line;
     }
     (ByAddress(ast_function), upvalues_in)
 }
@@ -280,7 +363,21 @@ fn link_upvalues(
                             ast::Upvalue::Copy(l) | ast::Upvalue::Ref(l) => l,
                         }))
                 {
-
+                    let old_name = old.0.0.lock().0.clone();
+                    if let Some(ref name) = old_name {
+                        if !ast::name_locals::is_synthetic_name(name) {
+                            let mut new_lock = new.0.0.lock();
+                            if new_lock.0.is_none()
+                                || new_lock
+                                    .0
+                                    .as_ref()
+                                    .map(|s| ast::name_locals::is_synthetic_name(s))
+                                    .unwrap_or(true)
+                            {
+                                new_lock.0 = Some(name.clone());
+                            }
+                        }
+                    }
                     local_map.insert(old.clone(), new.clone());
                 }
                 link_upvalues(&mut function.body, upvalues);

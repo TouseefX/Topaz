@@ -13,6 +13,7 @@ use crate::block::{BlockEdge, BranchType};
 pub struct Function {
     pub id: usize,
     pub name: Option<String>,
+    pub line: Option<usize>,
     pub parameters: Vec<RcLocal>,
     pub is_variadic: bool,
     graph: StableDiGraph<ast::Block, BlockEdge>,
@@ -24,6 +25,7 @@ impl Function {
         Self {
             id,
             name: None,
+            line: None,
             parameters: Vec::new(),
             is_variadic: false,
             graph: StableDiGraph::new(),

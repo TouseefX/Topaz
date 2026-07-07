@@ -156,7 +156,7 @@ impl RValue {
             RValue::Literal(Literal::Number(n)) if n.is_finite() && n.is_sign_negative() => {
                 return 7;
             }
-            _ => 9,
+            _ => 15,
         }
     }
 

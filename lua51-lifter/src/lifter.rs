@@ -668,7 +668,8 @@ impl<'a, 'b> Lifter<'a, 'b> {
                         upvalues_passed.push(local);
                     }
 
-                    let ast_function = Arc::<Mutex<_>>::default();
+                    let ast_function = Arc::<Mutex<ast::Function>>::default();
+                    ast_function.lock().line = Some(closure.line_defined as usize);
 
                     let (function, upvalues) = Lifter::lift(closure, self.lifted_functions);
                     self.lifted_functions
@@ -949,6 +950,7 @@ impl<'a, 'b> Lifter<'a, 'b> {
             upvalues: Vec::new(),
             lifted_functions,
         };
+        context.function.line = Some(bytecode.line_defined as usize);
 
         context.create_block_map();
         context.allocate_locals();

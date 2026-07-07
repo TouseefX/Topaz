@@ -353,10 +353,10 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
                 while let Some(uv) = it.next() {
                     match uv {
                         crate::Upvalue::Copy(copy) => {
-                            write!(self.output, "(copy) {}", copy)?;
+                            write!(self.output, "{} (copy)", copy)?;
                         }
                         crate::Upvalue::Ref(lref) => {
-                            write!(self.output, "(ref) {}", lref)?;
+                            write!(self.output, "{} (ref)", lref)?;
                         }
                     }
                     if it.peek().is_some() {
@@ -381,7 +381,12 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 		write!(self.output, ")")?;
 		let function = closure.function.lock();
 		if let Some(name) = &function.name {
-			write!(self.output, " -- name: {}", name)?;
+			write!(self.output, " --[[ {} ]]", name)?;
+		}
+		if let Some(line) = function.line {
+			if line > 0 {
+				write!(self.output, " -- line: {}", line)?;
+			}
 		}
 		drop(function);
 		self.format_closure_body(closure)?;
@@ -393,8 +398,10 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 		self.format_closure_parameters(closure)?;
 		write!(self.output, ")")?;
 		let function = closure.function.lock();
-		if let Some(fname) = &function.name {
-			write!(self.output, " -- name: {}", fname)?;
+		if let Some(line) = function.line {
+			if line > 0 {
+				write!(self.output, " -- line: {}", line)?;
+			}
 		}
 		drop(function);
 		self.format_closure_body(closure)?;
