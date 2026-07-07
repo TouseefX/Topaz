@@ -341,7 +341,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 
     fn format_closure_body(&mut self, closure: &Closure) -> fmt::Result {
         let function = closure.function.lock();
-        if !function.body.is_empty() {
+        if !function.body.is_empty() || !closure.upvalues.is_empty() {
             writeln!(self.output)?;
             self.indentation_level += 1;
             
@@ -367,8 +367,10 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             }
             self.indentation_level -= 1;
 
-            self.format_block(&function.body)?;
-            writeln!(self.output)?;
+            if !function.body.is_empty() {
+                self.format_block(&function.body)?;
+                writeln!(self.output)?;
+            }
             self.indent()
         } else {
             write!(self.output, " ")
@@ -380,16 +382,29 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 		self.format_closure_parameters(closure)?;
 		write!(self.output, ")")?;
 		let function = closure.function.lock();
+		let mut has_comment = false;
 		if let Some(name) = &function.name {
 			write!(self.output, " --[[ {} ]]", name)?;
+			has_comment = true;
 		}
 		if let Some(line) = function.line {
 			if line > 0 {
 				write!(self.output, " -- line: {}", line)?;
+				has_comment = true;
 			}
 		}
+		let is_empty = function.body.is_empty() && closure.upvalues.is_empty();
 		drop(function);
-		self.format_closure_body(closure)?;
+		if is_empty {
+			if has_comment {
+				writeln!(self.output)?;
+				self.indent()?;
+			} else {
+				write!(self.output, " ")?;
+			}
+		} else {
+			self.format_closure_body(closure)?;
+		}
 		write!(self.output, "end")
 	}
 
@@ -398,13 +413,25 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 		self.format_closure_parameters(closure)?;
 		write!(self.output, ")")?;
 		let function = closure.function.lock();
+		let mut has_comment = false;
 		if let Some(line) = function.line {
 			if line > 0 {
 				write!(self.output, " -- line: {}", line)?;
+				has_comment = true;
 			}
 		}
+		let is_empty = function.body.is_empty() && closure.upvalues.is_empty();
 		drop(function);
-		self.format_closure_body(closure)?;
+		if is_empty {
+			if has_comment {
+				writeln!(self.output)?;
+				self.indent()?;
+			} else {
+				write!(self.output, " ")?;
+			}
+		} else {
+			self.format_closure_body(closure)?;
+		}
 		write!(self.output, "end")
 	}
 
