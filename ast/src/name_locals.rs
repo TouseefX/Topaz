@@ -2,8 +2,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use triomphe::Arc;
 
 use crate::{
-    Block, Call, Global, Literal, MethodCall, RValue, RcLocal, Select, Statement, Traverse,
-    Upvalue,
+    type_inference_naming, Block, Call, Global, Literal, MethodCall, RValue, RcLocal, Select,
+    Statement, Traverse, Upvalue,
 };
 
 struct Namer {
@@ -12,6 +12,10 @@ struct Namer {
     upvalues: FxHashSet<RcLocal>,
     numeric_for_depth: usize,
     name_uses: FxHashMap<String, usize>,
+    /// Usage-based type-inference hints (see `type_inference_naming`),
+    /// consulted only as a fallback when a local has no name derivable
+    /// from its own creating expression.
+    type_hints: FxHashMap<RcLocal, &'static str>,
 }
 
 const FOR_LETTERS: &[&str] = &["i", "j", "k", "l", "m", "n"];
@@ -219,6 +223,8 @@ impl Namer {
 
         let name = if let Some(derived) = rvalue.and_then(Self::derive_name) {
             self.unique_name(&derived)
+        } else if let Some(&hint) = self.type_hints.get(local) {
+            self.unique_name(hint)
         } else {
             let suffix = self.counter;
             self.counter += 1;
@@ -395,12 +401,21 @@ impl Namer {
 }
 
 pub fn name_locals(block: &mut Block, rename: bool) {
+    let type_hints = if rename {
+        // Usage-based type inference is only useful for the Luau path,
+        // where `rename` enables the broader semantic-naming pipeline;
+        // the lua51 path deliberately keeps names minimal/synthetic.
+        type_inference_naming::collect_type_hints(block)
+    } else {
+        FxHashMap::default()
+    };
     let mut namer = Namer {
         rename,
         counter: 1,
         upvalues: FxHashSet::default(),
         numeric_for_depth: 0,
         name_uses: FxHashMap::default(),
+        type_hints,
     };
     namer.find_upvalues(block);
     namer.name_locals(block);

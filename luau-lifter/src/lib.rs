@@ -74,6 +74,7 @@ pub fn detect_encode_key(bytecode: &[u8], preferred: u8) -> u8 {
 }
 
 pub fn dump_cfgs(bytecode: &[u8], encode_key: u8) -> Vec<cfg::CfgSnapshot> {
+    ast::reset_local_id_counter();
     let encode_key = detect_encode_key(bytecode, encode_key);
     let chunk = match deserializer::deserialize(bytecode, encode_key) {
         Ok(c) => c,
@@ -105,6 +106,7 @@ pub fn dump_cfgs(bytecode: &[u8], encode_key: u8) -> Vec<cfg::CfgSnapshot> {
 }
 
 pub fn decompile_bytecode(bytecode: &[u8], encode_key: u8) -> String {
+    ast::reset_local_id_counter();
     let encode_key = detect_encode_key(bytecode, encode_key);
     let chunk = match deserializer::deserialize(bytecode, encode_key) {
         Ok(c) => c,

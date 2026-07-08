@@ -19,6 +19,7 @@ use lua51_deserializer::chunk::Chunk;
 mod lifter;
 
 pub fn dump_cfgs(bytecode: &[u8]) -> Vec<cfg::CfgSnapshot> {
+    ast::reset_local_id_counter();
     let chunk = match Chunk::parse(bytecode) {
         Ok((_, c)) => c,
         Err(_) => return Vec::new(),
@@ -34,6 +35,7 @@ pub fn dump_cfgs(bytecode: &[u8]) -> Vec<cfg::CfgSnapshot> {
 }
 
 pub fn decompile_bytecode(bytecode: &[u8]) -> String {
+    ast::reset_local_id_counter();
     let chunk = Chunk::parse(bytecode).unwrap().1;
     let mut lifted = Vec::new();
     let (function, upvalues) = Lifter::lift(&chunk.function, &mut lifted);

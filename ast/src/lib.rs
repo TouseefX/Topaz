@@ -38,6 +38,7 @@ mod set_list;
 mod side_effects;
 mod table;
 mod traverse;
+pub mod type_inference_naming;
 pub mod type_system;
 mod unary;
 mod vararg;

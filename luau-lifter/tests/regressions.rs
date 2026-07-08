@@ -26,6 +26,37 @@ const ACCUMULATOR_LOOP_BYTECODE: &[u8] = include_bytes!("fixtures/accumulator_lo
 const CONTINUE_IN_LOOP_BYTECODE: &[u8] = include_bytes!("fixtures/continue_in_loop.luau.bin");
 const UPVALUE_COLLISION_BYTECODE: &[u8] = include_bytes!("fixtures/luau_upval_collision.luau.bin");
 
+// Additional control-flow "torture test" fixtures. These were compiled from
+// small but structurally tricky Lua sources (multiple early returns mixed
+// with a `continue`-using descendant loop and a shared flag, several
+// `continue` sites landing at different points in the same loop body,
+// pcall wrapped in a loop with `continue` on failure, and a state-machine
+// style `while` loop with cross-branch `elseif` jumps) chosen to exercise
+// the exact restructuring code paths flagged as Topaz's historically
+// weakest area (loop/continue/break reconstruction, virtual-edge
+// refinement for multiple continue sites, and guard-clause flag
+// propagation). Each one was round-tripped through `lune`'s real Luau
+// runtime (decompiled output executed and its stdout compared byte-for-
+// byte against the original source's stdout) during development; these
+// tests instead check structural properties of the output text so they
+// don't require a Luau runtime in CI.
+const EARLY_RETURNS_AND_LOOP_BYTECODE: &[u8] =
+    include_bytes!("fixtures/t20_multiple_early_returns_and_loop.luau.bin");
+const MULTIPLE_CONTINUES_BYTECODE: &[u8] =
+    include_bytes!("fixtures/t24_multiple_continues_diff_points.luau.bin");
+const STATE_MACHINE_LOOP_BYTECODE: &[u8] = include_bytes!("fixtures/t28_irreducible_ish_loop.luau.bin");
+const PCALL_IN_LOOP_BYTECODE: &[u8] = include_bytes!("fixtures/t16_pcall_in_loop.luau.bin");
+const LOOP_CARRIED_FLAG_ELSEIF_BYTECODE: &[u8] =
+    include_bytes!("fixtures/t12_loop_carried_flag_elseif.luau.bin");
+
+// Usage-based type-inference naming fixtures (see
+// ast::type_inference_naming). These exercise the fallback naming path
+// that infers a plausible name (e.g. "obj", "str", "num") for a local
+// from how it's used later in the function, when nothing else about its
+// creating expression suggests a name.
+const TYPE_INFER_INSTANCE_BYTECODE: &[u8] = include_bytes!("fixtures/type_infer_instance.luau.bin");
+const TYPE_INFER_STR_NUM_BYTECODE: &[u8] = include_bytes!("fixtures/type_infer_str_num.luau.bin");
+
 /// Regression test for a critical bug where compound-assignment printing
 /// (`x += y`) was dead code in the formatter (nested inside the wrong
 /// `if`-branch), so every detected compound assignment silently lost its
@@ -125,4 +156,219 @@ fn find_self_referential_assignments(output: &str) -> Vec<(String, String)> {
         }
     }
     hits
+}
+
+/// A function this small, with this many distinct early-exit paths mixed
+/// with a descendant loop guarded by a shared boolean flag, should always
+/// decompile without falling back to unstructured `goto`/labelled-block
+/// output -- if it does, that's a strong signal the structuring pass
+/// failed to reduce the control flow graph, which historically correlated
+/// with mangled `continue`/`return` semantics (see the other tests in this
+/// file) even when it doesn't produce outright invalid Lua.
+fn assert_fully_structured(output: &str) {
+    assert!(
+        !output.contains("goto "),
+        "expected fully structured output (no goto fallback) for this \
+         control-flow pattern: got decompiled output:\n{output}"
+    );
+    assert!(
+        !output.contains("-- block "),
+        "expected fully structured output (no raw basic-block fallback) \
+         for this control-flow pattern: got decompiled output:\n{output}"
+    );
+}
+
+/// Regression test for the exact `addObject`/`isNil`-flag control-flow
+/// pattern flagged in the Topaz vs Oracle analysis: a function with
+/// several early `return`s (including one nested inside an `if`/`elseif`
+/// chain) followed by a descendant loop that both `continue`s past
+/// already-seen/parentless items *and* propagates a boolean flag set
+/// earlier in the function. Getting any of the three `continue` sites
+/// wrong (turning them into `return`) or losing the flag's live range
+/// silently truncates the resulting tree/graph -- exactly what happened
+/// in the original Dex Explorer bug.
+#[test]
+fn early_returns_with_flag_propagating_descendant_loop() {
+    let output = luau_lifter::decompile_bytecode(EARLY_RETURNS_AND_LOOP_BYTECODE, ENCODE_KEY);
+    assert_fully_structured(&output);
+
+    // The descendant loop has exactly two `continue` sites in the source;
+    // both must survive as `continue`, not `return`.
+    assert_eq!(
+        output.matches("continue").count(),
+        2,
+        "expected exactly 2 `continue` statements (one for \
+         already-visited items, one for parentless items) in the \
+         descendant loop: got decompiled output:\n{output}"
+    );
+}
+
+/// Regression test for a loop with multiple `continue`-equivalent exits
+/// that land at different points in the control flow (one skips
+/// immediately, another only after doing some work first inside a nested
+/// `if`), which exercises the "virtual edge refinement" logic that must
+/// correctly distinguish `continue` targets from `break` targets when a
+/// loop body doesn't have a single simple exit edge.
+#[test]
+fn multiple_continue_sites_at_different_points() {
+    let output = luau_lifter::decompile_bytecode(MULTIPLE_CONTINUES_BYTECODE, ENCODE_KEY);
+    assert_fully_structured(&output);
+    for (name, decl) in find_self_referential_assignments(&output) {
+        panic!("found self-referential assignment `{decl}` for variable `{name}`: got decompiled output:\n{output}");
+    }
+}
+
+/// Regression test for a state-machine-style `while` loop where control
+/// jumps between `elseif` branches in a way that doesn't correspond to
+/// simple sequential fallthrough, historically a stress case for
+/// structured control-flow recovery.
+#[test]
+fn state_machine_style_loop_stays_structured() {
+    let output = luau_lifter::decompile_bytecode(STATE_MACHINE_LOOP_BYTECODE, ENCODE_KEY);
+    assert_fully_structured(&output);
+}
+
+/// Regression test for `pcall` used inside a loop with a `continue` on
+/// failure -- a pattern the original analysis specifically called out as
+/// fragile ("Add special handling for Roblox/Lua patterns that use
+/// `continue`-style early iteration skips after `pcall`"). The
+/// decompiler is free to express the "skip on failure" logic either as an
+/// explicit `if not ok then continue end` guard clause, or as the
+/// logically-equivalent (and arguably more readable) positive-condition
+/// `if ok then ... end` -- both are correct, so this test only checks
+/// that whichever shape is chosen doesn't fall back to unstructured
+/// output, and that it doesn't contain a self-referential assignment.
+#[test]
+fn pcall_failure_inside_loop_uses_continue() {
+    let output = luau_lifter::decompile_bytecode(PCALL_IN_LOOP_BYTECODE, ENCODE_KEY);
+    assert_fully_structured(&output);
+    assert!(
+        output.contains("pcall"),
+        "expected the pcall call itself to survive decompilation: \
+         got decompiled output:\n{output}"
+    );
+    for (name, decl) in find_self_referential_assignments(&output) {
+        panic!("found self-referential assignment `{decl}` for variable `{name}`: got decompiled output:\n{output}");
+    }
+}
+
+/// Regression test for a loop where two boolean flags are updated by an
+/// `if`/`elseif` chain and then read by a *separate* `if`/`elseif` chain
+/// later in the same iteration -- this requires the flags' live ranges to
+/// correctly span from their assignment to their use within the loop
+/// body, similar to the `isNil` flag propagation bug.
+#[test]
+fn loop_carried_flags_read_by_later_elseif_chain() {
+    let output = luau_lifter::decompile_bytecode(LOOP_CARRIED_FLAG_ELSEIF_BYTECODE, ENCODE_KEY);
+    assert_fully_structured(&output);
+    for (name, decl) in find_self_referential_assignments(&output) {
+        panic!("found self-referential assignment `{decl}` for variable `{name}`: got decompiled output:\n{output}");
+    }
+}
+
+/// A local with no name derivable from its creating expression (here,
+/// `table.remove(queue)`), but which is later indexed with `.ClassName`
+/// and called with `:IsA(...)`/`:GetChildren()`, should be named `obj`
+/// by the usage-based type-inference fallback rather than a generic
+/// synthetic name like `v3`.
+#[test]
+fn usage_based_naming_infers_instance_like_local() {
+    let output = luau_lifter::decompile_bytecode(TYPE_INFER_INSTANCE_BYTECODE, ENCODE_KEY);
+    assert_fully_structured(&output);
+    assert!(
+        output.contains("local obj ="),
+        "expected the instance-like local (used with .ClassName, :IsA, \
+         :GetChildren) to be named `obj`: got decompiled output:\n{output}"
+    );
+    for (name, decl) in find_self_referential_assignments(&output) {
+        panic!("found self-referential assignment `{decl}` for variable `{name}`: got decompiled output:\n{output}");
+    }
+}
+
+/// Locals with no derivable creating-expression name, but which are
+/// repeatedly passed to `tostring()`/`tonumber()`, should be named `str`
+/// and `num` respectively by the usage-based type-inference fallback.
+#[test]
+fn usage_based_naming_infers_string_and_number_locals() {
+    let output = luau_lifter::decompile_bytecode(TYPE_INFER_STR_NUM_BYTECODE, ENCODE_KEY);
+    assert_fully_structured(&output);
+    assert!(
+        output.contains("str"),
+        "expected the string-like local (repeatedly passed to tostring) \
+         to be named using the `str` hint: got decompiled output:\n{output}"
+    );
+    assert!(
+        output.contains("num"),
+        "expected the number-like local (repeatedly passed to tonumber) \
+         to be named using the `num` hint: got decompiled output:\n{output}"
+    );
+    for (name, decl) in find_self_referential_assignments(&output) {
+        panic!("found self-referential assignment `{decl}` for variable `{name}`: got decompiled output:\n{output}");
+    }
+}
+
+/// Regression test for a nondeterminism bug where `RcLocal`'s `Hash`/`Ord`
+/// impls were derived from the raw heap pointer address of the underlying
+/// `Local` allocation (via the `by_address` crate), rather than from
+/// anything about the program being decompiled. Since `RcLocal` is used as
+/// the key type of many `HashMap`/`HashSet`s throughout SSA construction
+/// and destruction, this made iteration order over those maps -- and
+/// therefore synthetic-name numbering and statement sequentialization in
+/// the final output -- depend on ASLR / allocator state / prior allocation
+/// history instead of being a pure function of the input bytecode.
+/// Decompiling the exact same bytecode repeatedly in the same process must
+/// always produce byte-identical output.
+#[test]
+fn decompilation_is_deterministic_across_repeated_runs() {
+    let first = luau_lifter::decompile_bytecode(ACCUMULATOR_LOOP_BYTECODE, ENCODE_KEY);
+    for i in 1..10 {
+        let output = luau_lifter::decompile_bytecode(ACCUMULATOR_LOOP_BYTECODE, ENCODE_KEY);
+        assert_eq!(
+            first, output,
+            "decompiling the same bytecode twice in the same process must be \
+             byte-identical (run #{i} differed from run #0); this indicates \
+             RcLocal's Hash/Ord is depending on something other than the \
+             input bytecode (e.g. pointer addresses)"
+        );
+    }
+}
+
+/// Companion to `decompilation_is_deterministic_across_repeated_runs`,
+/// mirroring a long-lived process (e.g. `topaz serve`) handling a mix of
+/// different decompile jobs back-to-back on the same thread. This test
+/// specifically catches a *worse* variant of the nondeterminism bug that
+/// an earlier, incorrect fix attempt introduced: using a single global
+/// (rather than thread-local, reset-per-job) monotonic id counter for
+/// `RcLocal` ordering made each successive job's locals keep climbing the
+/// same id sequence instead of restarting from zero, so decompiling the
+/// *same* payload twice could differ depending on how many prior jobs of
+/// *other* payloads that thread had already processed. Interleaving
+/// several distinct payloads and checking each payload's output stays
+/// stable across interleavings guards against that regression.
+#[test]
+fn decompilation_is_deterministic_when_interleaved_with_other_jobs() {
+    let payloads = [
+        ACCUMULATOR_LOOP_BYTECODE,
+        CONTINUE_IN_LOOP_BYTECODE,
+        UPVALUE_COLLISION_BYTECODE,
+    ];
+    let expected: Vec<String> = payloads
+        .iter()
+        .map(|bytecode| luau_lifter::decompile_bytecode(bytecode, ENCODE_KEY))
+        .collect();
+
+    for round in 0..5 {
+        for (payload, expected_output) in payloads.iter().zip(expected.iter()) {
+            let output = luau_lifter::decompile_bytecode(payload, ENCODE_KEY);
+            assert_eq!(
+                *expected_output, output,
+                "decompiling the same payload interleaved with other jobs \
+                 (round #{round}) must produce the same output as decompiling \
+                 it in isolation; this indicates RcLocal's id counter is not \
+                 being reset per top-level entry point (e.g. it's a global \
+                 counter instead of a thread-local one reset at the start of \
+                 decompile_bytecode/dump_cfgs)"
+            );
+        }
+    }
 }

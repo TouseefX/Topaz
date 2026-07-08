@@ -16,20 +16,39 @@ use crate::{Block, RValue, Reduce, Statement, Traverse, Unary, UnaryOperation};
 ///   must be `continue`, never `return`. Emitting `return` there is a
 ///   correctness bug: it silently aborts the *entire enclosing function*
 ///   instead of skipping to the next loop iteration.
-/// - Nested `if`/`else` blocks inherit whatever the enclosing block would do,
-///   since falling off the end of an if-branch just continues on to whatever
-///   follows the `if` in its parent block.
+/// - Nested `if`/`else` blocks only inherit the enclosing block's exit kind
+///   when the `if` statement itself sits in *tail position* of that block
+///   (i.e. it's the last statement, or the second-to-last followed only by
+///   a statement that already matches the exit kind) -- only then does
+///   "falling off the end of a branch" actually reach the enclosing block's
+///   own exit. If the `if` is *not* in tail position (more statements
+///   follow it in the same block), falling off the end of its branches
+///   just falls through to those sibling statements instead -- which is
+///   not something a single synthetic statement can represent, so no exit
+///   kind is threaded through in that case (`ExitKind::None`), which
+///   disables guard-clause synthesis inside those branches entirely.
+///   Getting this wrong is a real correctness bug: it silently rewrites
+///   "keep executing the rest of the enclosing block" into "exit the
+///   enclosing loop/function early", dropping any code that was supposed
+///   to run afterward (e.g. a `while true do ... break end`-derived `if`
+///   block followed by more statements after the loop).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ExitKind {
     Return,
     Continue,
+    /// This position is not in tail position of any enclosing loop/
+    /// function exit, so no single statement can correctly represent
+    /// "falling off the end here" -- guard-clause synthesis must not be
+    /// applied.
+    None,
 }
 
 impl ExitKind {
-    fn make_statement(self) -> Statement {
+    fn make_statement(self) -> Option<Statement> {
         match self {
-            ExitKind::Return => Statement::Return(crate::Return { values: vec![] }),
-            ExitKind::Continue => Statement::Continue(crate::Continue {}),
+            ExitKind::Return => Some(Statement::Return(crate::Return { values: vec![] })),
+            ExitKind::Continue => Some(Statement::Continue(crate::Continue {})),
+            ExitKind::None => None,
         }
     }
 
@@ -37,6 +56,7 @@ impl ExitKind {
         match self {
             ExitKind::Return => is_void_return(stmt),
             ExitKind::Continue => matches!(stmt, Statement::Continue(_)),
+            ExitKind::None => false,
         }
     }
 }
@@ -57,16 +77,29 @@ fn apply_guard_clauses_ctx(block: &mut Block, exit_kind: ExitKind) {
             }
         });
 
+        // `if`/`else` branches only inherit the current exit kind when this
+        // `if` statement is itself in tail position of `block` (see
+        // `ExitKind`'s doc comment for why) -- otherwise, falling off the
+        // end of a branch here just falls through to sibling statements
+        // that follow in `block`, which no single synthetic statement can
+        // represent, so we must not synthesize guard-clause exits there.
+        let is_tail_position = i == block.0.len() - 1
+            || (i == block.0.len() - 2 && exit_kind.matches_existing(&block.0[i + 1]));
+        let branch_exit_kind = if is_tail_position {
+            exit_kind
+        } else {
+            ExitKind::None
+        };
+
         // Recurse into nested blocks first (post-order processing).
-        // `if`/`else` branches inherit the current exit kind (falling off
-        // their end just continues on to whatever follows the `if`).
-        // Loop bodies reset the exit kind to `Continue`, since falling off
-        // the end of a loop body moves to the next iteration, not out of
-        // the enclosing function.
+        // Loop bodies reset the exit kind to `Continue` regardless of tail
+        // position, since falling off the end of a loop body always moves
+        // to the next iteration of *that* loop, never out of the
+        // enclosing function or into sibling statements after the loop.
         match &mut block.0[i] {
             Statement::If(r#if) => {
-                apply_guard_clauses_ctx(&mut r#if.then_block.lock(), exit_kind);
-                apply_guard_clauses_ctx(&mut r#if.else_block.lock(), exit_kind);
+                apply_guard_clauses_ctx(&mut r#if.then_block.lock(), branch_exit_kind);
+                apply_guard_clauses_ctx(&mut r#if.else_block.lock(), branch_exit_kind);
             }
             Statement::While(r#while) => {
                 apply_guard_clauses_ctx(&mut r#while.block.lock(), ExitKind::Continue)
@@ -99,40 +132,47 @@ fn apply_guard_clauses_ctx(block: &mut Block, exit_kind: ExitKind) {
             continue;
         }
 
-        // Case 2: Guard clause inversion at the end of a block
-        let is_at_end = i == block.0.len() - 1
-            || (i == block.0.len() - 2 && exit_kind.matches_existing(&block.0[i + 1]));
-
-        if is_at_end {
-            let mut did_case2 = false;
-            if let Statement::If(r#if) = &mut block.0[i] {
-                let else_empty = r#if.else_block.lock().0.is_empty();
-                let then_len = r#if.then_block.lock().0.len();
-                let is_negated = match &r#if.condition {
-                    RValue::Unary(u) => u.operation == UnaryOperation::Not,
-                    _ => false,
-                };
-                // Never synthesize a guard-clause exit out of a `then`-block
-                // that already ends in its own terminator (return/break/
-                // continue/goto) -- in that case the block doesn't actually
-                // fall through, so inverting it and appending a synthetic
-                // exit would silently duplicate/alter control flow.
-                let then_already_terminates = ends_in_terminator(&r#if.then_block.lock().0);
-                if !then_already_terminates
-                    && else_empty
-                    && (then_len >= 2 || (then_len >= 1 && is_negated))
-                {
-                    let new_cond = Unary::new(r#if.condition.clone(), UnaryOperation::Not).reduce_condition();
-                    let stmts = std::mem::take(&mut r#if.then_block.lock().0);
-                    r#if.then_block.lock().0.push(exit_kind.make_statement());
-                    r#if.condition = new_cond;
-                    block.0.splice(i + 1..i + 1, stmts);
-                    did_case2 = true;
+        // Case 2: Guard clause inversion at the end of a block. Only
+        // applicable when this position is in tail position *and* that
+        // tail position actually has a representable exit statement
+        // (`ExitKind::None` means "falls through to sibling statements",
+        // which can't be synthesized as a single statement, so we must
+        // leave the code as nested ifs rather than risk turning a
+        // fallthrough into an incorrect early exit).
+        if is_tail_position {
+            if let Some(exit_stmt) = exit_kind.make_statement() {
+                let mut did_case2 = false;
+                if let Statement::If(r#if) = &mut block.0[i] {
+                    let else_empty = r#if.else_block.lock().0.is_empty();
+                    let then_len = r#if.then_block.lock().0.len();
+                    let is_negated = match &r#if.condition {
+                        RValue::Unary(u) => u.operation == UnaryOperation::Not,
+                        _ => false,
+                    };
+                    // Never synthesize a guard-clause exit out of a
+                    // `then`-block that already ends in its own terminator
+                    // (return/break/continue/goto) -- in that case the
+                    // block doesn't actually fall through, so inverting it
+                    // and appending a synthetic exit would silently
+                    // duplicate/alter control flow.
+                    let then_already_terminates = ends_in_terminator(&r#if.then_block.lock().0);
+                    if !then_already_terminates
+                        && else_empty
+                        && (then_len >= 2 || (then_len >= 1 && is_negated))
+                    {
+                        let new_cond =
+                            Unary::new(r#if.condition.clone(), UnaryOperation::Not).reduce_condition();
+                        let stmts = std::mem::take(&mut r#if.then_block.lock().0);
+                        r#if.then_block.lock().0.push(exit_stmt);
+                        r#if.condition = new_cond;
+                        block.0.splice(i + 1..i + 1, stmts);
+                        did_case2 = true;
+                    }
                 }
-            }
-            if did_case2 {
-                i += 1;
-                continue;
+                if did_case2 {
+                    i += 1;
+                    continue;
+                }
             }
         }
 
@@ -261,4 +301,106 @@ mod tests {
             "top-level (non-loop) guard clause must not use `continue`: got {printed:?}"
         );
     }
+
+    /// Regression test for a critical control-flow bug where an `if`
+    /// statement that is *not* in tail position of its enclosing block
+    /// (i.e. more statements follow it) still had a guard-clause exit
+    /// synthesized inside its branches, incorrectly turning "fall through
+    /// to the sibling statements that follow" into "exit the enclosing
+    /// loop/function early" -- silently dropping the sibling statements
+    /// for whichever branch took the synthesized-exit path. This is
+    /// exactly the shape produced by a `while true do ... break end` loop
+    /// followed by more code after the loop (e.g. a binary-search
+    /// insertion-position loop followed by `table.insert(...)`): one
+    /// branch of the post-loop `if` must fall through to the
+    /// `table.insert` call, not return out of the function early.
+    #[test]
+    fn if_not_in_tail_position_does_not_synthesize_an_exit() {
+        // Builds:
+        //   if cond() then
+        //       doA()
+        //       doB()
+        //   end
+        //   doAfter()  -- must always run, regardless of which branch
+        //                 of the `if` above was taken
+        let if_stat = crate::If::new(
+            RValue::Call(crate::Call {
+                value: Box::new(RValue::Global(Global(b"cond".to_vec()))),
+                arguments: vec![],
+            }),
+            vec![call_stmt("doA"), call_stmt("doB")].into(),
+            Block::default(),
+        );
+        let mut block: Block = vec![if_stat.into(), call_stmt("doAfter")].into();
+
+        apply_guard_clauses(&mut block);
+
+        let printed = block.to_string();
+        assert!(
+            !printed.contains("return") && !printed.contains("continue"),
+            "an `if` with more statements following it in the same block \
+             must never have a guard-clause exit synthesized inside its \
+             branches, since falling off the end of either branch must \
+             fall through to the sibling statements that follow (not \
+             exit the enclosing loop/function): got {printed:?}"
+        );
+        assert!(
+            printed.contains("doAfter"),
+            "the statement following the `if` must be preserved and must \
+             run regardless of which branch of the `if` was taken: got {printed:?}"
+        );
+    }
+
+    /// Same bug, but nested one level deeper inside a loop, to make sure
+    /// the fix doesn't just special-case the top level: an `if` inside a
+    /// loop body that is not itself in tail position of that loop body
+    /// must not get a `continue` synthesized inside its branches either,
+    /// since that would skip sibling statements later in the same loop
+    /// iteration instead of just falling through to them.
+    #[test]
+    fn if_not_in_tail_position_inside_loop_does_not_synthesize_continue() {
+        // Builds:
+        //   for i = 1, 10 do
+        //       if cond() then
+        //           doA()
+        //           doB()
+        //       end
+        //       doAfter()
+        //   end
+        let if_stat = crate::If::new(
+            RValue::Call(crate::Call {
+                value: Box::new(RValue::Global(Global(b"cond".to_vec()))),
+                arguments: vec![],
+            }),
+            vec![call_stmt("doA"), call_stmt("doB")].into(),
+            Block::default(),
+        );
+        let loop_body: Block = vec![if_stat.into(), call_stmt("doAfter")].into();
+        let mut block: Block = vec![NumericFor::new(
+            Literal::Number(1.0).into(),
+            Literal::Number(10.0).into(),
+            Literal::Number(1.0).into(),
+            RcLocal::default(),
+            loop_body,
+        )
+        .into()]
+        .into();
+
+        apply_guard_clauses(&mut block);
+
+        let printed = block.to_string();
+        assert!(
+            !printed.contains("continue") && !printed.contains("return"),
+            "an `if` with more statements following it in the same loop \
+             iteration must never have a guard-clause exit synthesized \
+             inside its branches: got {printed:?}"
+        );
+        assert!(
+            printed.contains("doAfter"),
+            "the statement following the `if` inside the loop body must \
+             be preserved and must run regardless of which branch of the \
+             `if` was taken: got {printed:?}"
+        );
+    }
 }
+
