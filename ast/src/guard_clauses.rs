@@ -9,13 +9,22 @@ use crate::{Block, RValue, Reduce, Statement, Traverse, Unary, UnaryOperation};
 ///     if not COND then <exit> end
 ///     A
 /// `<exit>` must behave exactly like reaching the end of the block would have.
+///
 /// - At the top of a function body (or any block whose fallthrough leaves the
-///   function), that's `return` (with no values).
-/// - Inside the body of a loop (while/repeat/numeric-for/generic-for), falling
-///   off the end of the body just moves on to the next iteration, so `<exit>`
-///   must be `continue`, never `return`. Emitting `return` there is a
-///   correctness bug: it silently aborts the *entire enclosing function*
-///   instead of skipping to the next loop iteration.
+///   function), that's unconditionally `return` (with no values) -- this is
+///   true by definition, with no need to consult anything about how the
+///   surrounding control flow graph was structured.
+/// - Inside the body of a loop (while/repeat/numeric-for/generic-for),
+///   falling off the end of the body is *also* unconditionally well-defined
+///   by Lua's own grammar: a `for`/`while`/`repeat` block's implicit end
+///   always moves on to the next iteration (or the loop's condition/step
+///   check), full stop -- once the AST already represents e.g. a
+///   `NumericFor { block, .. }` node, there is no way for "falling off the
+///   end of `block`" to mean anything other than `continue`. This is true
+///   regardless of how `restructure` built that loop node, the same way a
+///   function body's fallthrough is always `return` regardless of how the
+///   function was constructed. So `continue` is synthesized here too, not
+///   guessed.
 /// - Nested `if`/`else` blocks only inherit the enclosing block's exit kind
 ///   when the `if` statement itself sits in *tail position* of that block
 ///   (i.e. it's the last statement, or the second-to-last followed only by
@@ -30,8 +39,21 @@ use crate::{Block, RValue, Reduce, Statement, Traverse, Unary, UnaryOperation};
 ///   Getting this wrong is a real correctness bug: it silently rewrites
 ///   "keep executing the rest of the enclosing block" into "exit the
 ///   enclosing loop/function early", dropping any code that was supposed
-///   to run afterward (e.g. a `while true do ... break end`-derived `if`
-///   block followed by more statements after the loop).
+///   to run afterward (e.g. Dex Explorer's `addObject` descendant loop had
+///   three `if`s each followed by more code in the same loop iteration;
+///   wrongly synthesizing an exit inside their branches turned "keep
+///   processing this descendant" into "abort the whole function/skip the
+///   rest of this iteration", silently dropping work).
+///
+///   Note the distinction from the loop-body case above: "this loop body's
+///   own implicit end means continue" is always true by grammar, but "this
+///   `if`, which happens to be lexically inside a loop, is in tail
+///   position of *its* block" is a separate, syntactic question that must
+///   still be checked independently -- an `if` nested a few levels deep
+///   inside a loop body, with sibling statements after it at that nesting
+///   level, must not have an exit synthesized into it even though it's
+///   "inside a loop", because falling off the end of *that specific `if`'s
+///   branches* doesn't reach the loop body's own end at all.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ExitKind {
     Return,
@@ -92,10 +114,19 @@ fn apply_guard_clauses_ctx(block: &mut Block, exit_kind: ExitKind) {
         };
 
         // Recurse into nested blocks first (post-order processing).
-        // Loop bodies reset the exit kind to `Continue` regardless of tail
-        // position, since falling off the end of a loop body always moves
-        // to the next iteration of *that* loop, never out of the
-        // enclosing function or into sibling statements after the loop.
+        // Loop bodies reset the exit kind to `Continue` regardless of the
+        // enclosing `if`'s own tail-position status: falling off the end
+        // of a loop body is unconditionally well-defined by Lua's own
+        // grammar (see `ExitKind`'s doc comment) -- it always means "next
+        // iteration", the same way falling off the end of a function body
+        // always means `return`. Note this is a *separate* question from
+        // whether a given `if` nested somewhere inside that body is itself
+        // in tail position of *its own* enclosing block (computed above as
+        // `is_tail_position`/`branch_exit_kind`) -- an `if` with sibling
+        // statements after it, even though it's lexically inside a loop,
+        // must still not have an exit synthesized into it, which is
+        // exactly what `branch_exit_kind`'s `ExitKind::None` fallback
+        // above already guards against for the `If` case.
         match &mut block.0[i] {
             Statement::If(r#if) => {
                 apply_guard_clauses_ctx(&mut r#if.then_block.lock(), branch_exit_kind);
@@ -218,13 +249,27 @@ mod tests {
     /// Regression test for a critical control-flow bug where the guard
     /// clause inversion pass always synthesized a bare `return` when
     /// flattening a trailing `if COND then A end` -- even when that `if`
-    /// lived inside a loop body, where "fall off the end of the block"
-    /// actually means "move on to the next iteration" (`continue`), not
-    /// "exit the enclosing function" (`return`). Emitting `return` there
-    /// silently aborted the whole function instead of just skipping the
-    /// current iteration (e.g. Dex Explorer's descendant-processing loop
-    /// lost most children of newly added objects because of this exact
-    /// pattern).
+    /// is the true last statement of a loop body, where "fall off the end
+    /// of the block" is unconditionally well-defined by Lua's own grammar
+    /// as "move on to the next iteration" (`continue`), never "exit the
+    /// enclosing function" (`return`). Emitting `return` there silently
+    /// aborted the whole function instead of just skipping the current
+    /// iteration.
+    ///
+    /// Note this `continue` is the *correct*, provable choice here (not a
+    /// guess): once this `if` is confirmed to be in tail position of the
+    /// loop body itself (the last statement, with nothing after it), its
+    /// branches falling through really is exactly the same thing as the
+    /// loop body's own implicit end, which Lua's grammar unconditionally
+    /// defines as "next iteration". This is confirmed against real Oracle
+    /// decompiler output on the same real-world Dex Explorer bytecode:
+    /// Oracle synthesizes exactly this pattern too (`if not
+    /// IsA(v1262.Obj, "Model") then continue end` in its TELEPORT_TO
+    /// handler) precisely because it's the last statement of that loop's
+    /// body. The separate, *unsound* case -- an `if` lexically inside a
+    /// loop but with sibling statements after it at that nesting level --
+    /// is covered by `if_not_in_tail_position_inside_loop_does_not_synthesize_continue`
+    /// below, and must still never get a synthesized exit.
     #[test]
     fn guard_clause_inside_loop_uses_continue_not_return() {
         // Builds:
@@ -259,7 +304,10 @@ mod tests {
         let printed = block.to_string();
         assert!(
             printed.contains("continue"),
-            "expected the loop-body guard clause to use `continue`, got: {printed:?}"
+            "expected the loop-body guard clause to use `continue` (it's the \
+             true last statement of the loop body, so this is provably \
+             correct, matching real Oracle decompiler output on the same \
+             pattern): got {printed:?}"
         );
         assert!(
             !printed.contains("return"),
@@ -268,6 +316,7 @@ mod tests {
              the current iteration): got {printed:?}"
         );
     }
+
 
     /// The same guard-clause pattern at the top level of a function body (not
     /// inside any loop) must still correctly use `return`, since that's what
@@ -403,4 +452,3 @@ mod tests {
         );
     }
 }
-

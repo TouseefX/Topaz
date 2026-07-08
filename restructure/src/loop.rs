@@ -87,7 +87,28 @@ impl GraphStructurer {
                 }
 
                 let else_successors = self.function.successor_blocks(else_node).collect_vec();
-                if !(!then_successors.is_empty() && then_successors[0] == else_node)
+                // `then_successors` can legitimately be empty here: an
+                // earlier restructuring pass (`match_diamond_conditional`'s
+                // `expand_if`, in restructure/src/conditional.rs) already
+                // merges an `if`/`else` whose *both* arms unconditionally
+                // `return` into a single physical CFG block with zero
+                // outgoing edges (neither arm falls through to anything).
+                // That's a perfectly valid loop body -- it just always
+                // terminates the function on any iteration that runs it --
+                // and the `body_ast` construction below already handles it
+                // correctly (it only appends a synthetic `Break` when the
+                // body does *not* already end in a `Return`). So this must
+                // be treated as an explicitly *valid* case, not merely
+                // guarded against: every branch below that reads
+                // `then_successors[0]` first confirms non-emptiness, and an
+                // empty `then_successors` is accepted outright rather than
+                // falling through to `return false` (which would leave the
+                // loop entirely unstructured -- previously this indexed out
+                // of bounds and panicked instead, aborting decompilation of
+                // the whole containing function with a bare
+                // "failed to decompile" and no further information).
+                if !then_successors.is_empty()
+                    && !(then_successors[0] == else_node)
                     && !(else_successors.len() == 1 && then_successors[0] == else_successors[0])
                     && !(then_successors[0] == header && else_node == init_block)
                 {
@@ -102,7 +123,19 @@ impl GraphStructurer {
                 } else {
                     let mut body_ast = self.function.remove_block(then_node).unwrap();
                     body_ast.extend(statements.iter().cloned());
-                    if !matches!(body_ast.last(), Some(ast::Statement::Return(_))) {
+                    // A synthetic `Break` must only be appended when this
+                    // body doesn't already unconditionally terminate on
+                    // every path that reaches its end -- Lua's grammar
+                    // requires `return`/`break`/`continue`/`goto` to be the
+                    // very last statement of a block, so appending a
+                    // `Break` after a statement that already terminates
+                    // (most commonly a bare `Return`, but also an `if`/
+                    // `else` where *both* branches themselves already
+                    // terminate -- exactly the shape an earlier pass
+                    // produces for a loop body ending in an `if cond then
+                    // return a else return b end`) produces invalid Lua
+                    // (a syntax error at the dangling `break`).
+                    if !block_always_terminates(&body_ast) {
                         body_ast.push(ast::Break {}.into());
                     }
                     body_ast
@@ -531,5 +564,36 @@ impl GraphStructurer {
         } else {
             false
         }
+    }
+}
+
+/// Returns whether every control-flow path through `block` ends in a
+/// statement that unconditionally leaves the block (`return`, `break`,
+/// `continue`, or `goto`), i.e. whether appending anything *after* this
+/// block's last statement would be dead code -- and, more importantly for
+/// callers, whether appending anything after it would produce a Lua
+/// syntax error, since `return`/`break`/`continue`/`goto` are only legal
+/// as the very last statement of a block.
+///
+/// This is deliberately more thorough than just checking whether the last
+/// statement is a bare terminator: an `if`/`else` whose *both* branches
+/// themselves always terminate is just as much a "point of no return" for
+/// the rest of the block as a bare `return` would be (this exact shape is
+/// produced by `restructure::conditional`'s diamond-conditional merging
+/// when both arms of a source-level `if cond then return a else return b
+/// end` get folded together), so it must be recognized here too --
+/// otherwise a caller might wrongly conclude the block "falls through"
+/// and append a statement after it, producing invalid Lua.
+fn block_always_terminates(block: &ast::Block) -> bool {
+    match block.0.last() {
+        Some(ast::Statement::Return(_))
+        | Some(ast::Statement::Break(_))
+        | Some(ast::Statement::Continue(_))
+        | Some(ast::Statement::Goto(_)) => true,
+        Some(ast::Statement::If(r#if)) => {
+            block_always_terminates(&r#if.then_block.lock())
+                && block_always_terminates(&r#if.else_block.lock())
+        }
+        _ => false,
     }
 }

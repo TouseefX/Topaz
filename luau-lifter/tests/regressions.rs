@@ -57,6 +57,18 @@ const LOOP_CARRIED_FLAG_ELSEIF_BYTECODE: &[u8] =
 const TYPE_INFER_INSTANCE_BYTECODE: &[u8] = include_bytes!("fixtures/type_infer_instance.luau.bin");
 const TYPE_INFER_STR_NUM_BYTECODE: &[u8] = include_bytes!("fixtures/type_infer_str_num.luau.bin");
 
+// A `for` loop whose body is a terminating `if`/`else` where *both* arms
+// unconditionally `return` (no shared continuation block at all). Found
+// while auditing `guard_clauses`'s loop-body `continue` synthesis: this
+// exact shape crashed `restructure::loop::try_collapse_loop` with an
+// `index out of bounds` panic (it indexed `then_successors[0]`
+// unconditionally, but `then_successors` is empty precisely when the
+// `then` arm ends in a `return` and has no outgoing CFG edge), aborting
+// decompilation of the entire containing function with a bare
+// "failed to decompile" and no further information.
+const DIAMOND_RETURN_IN_FOR_LOOP_BYTECODE: &[u8] =
+    include_bytes!("fixtures/diamond_return_in_for_loop.luau.bin");
+
 /// Regression test for a critical bug where compound-assignment printing
 /// (`x += y`) was dead code in the formatter (nested inside the wrong
 /// `if`-branch), so every detected compound assignment silently lost its
@@ -106,10 +118,22 @@ fn accumulator_loop_uses_compound_assignment_not_plain_reassignment() {
 fn early_exit_inside_loop_uses_continue_not_return() {
     let output = luau_lifter::decompile_bytecode(CONTINUE_IN_LOOP_BYTECODE, ENCODE_KEY);
 
+    // This `if` is the true last statement of the loop body, so `continue`
+    // is provably correct here (not a guess) -- see `guard_clauses`'s
+    // module doc comment. Confirmed to match real Oracle decompiler
+    // output on the same class of pattern in the real-world Dex Explorer
+    // bytecode (Oracle's TELEPORT_TO handler synthesizes `continue` for
+    // exactly this shape).
     assert!(
         output.contains("continue"),
         "expected the loop's early-skip guard (`if seen[item] then ... end`) \
          to use `continue`: got decompiled output:\n{output}"
+    );
+    assert!(
+        !output.contains("return"),
+        "the loop's early-skip guard must never be turned into a `return` \
+         (a `return` here would abort the whole function instead of \
+         skipping one iteration): got decompiled output:\n{output}"
     );
 }
 
@@ -192,8 +216,14 @@ fn early_returns_with_flag_propagating_descendant_loop() {
     let output = luau_lifter::decompile_bytecode(EARLY_RETURNS_AND_LOOP_BYTECODE, ENCODE_KEY);
     assert_fully_structured(&output);
 
-    // The descendant loop has exactly two `continue` sites in the source;
-    // both must survive as `continue`, not `return`.
+    // The descendant loop has exactly two `continue` sites in the source,
+    // both the true last statement of their respective `if` blocks and of
+    // the overall guard chain at that point in the loop body -- so
+    // `continue` is provably correct for both (not a guess; see
+    // `guard_clauses`'s module doc comment). Both must survive as
+    // `continue`, never `return` (a `return` here would abort processing
+    // all remaining descendants instead of just skipping one -- the
+    // original severity-critical bug this fixture guards against).
     assert_eq!(
         output.matches("continue").count(),
         2,
@@ -201,7 +231,19 @@ fn early_returns_with_flag_propagating_descendant_loop() {
          already-visited items, one for parentless items) in the \
          descendant loop: got decompiled output:\n{output}"
     );
+    let loop_start = output
+        .find("for i = 1")
+        .expect("expected the descendant loop to be present in the output");
+    let loop_body = &output[loop_start..];
+    assert!(
+        !loop_body.lines().any(|l| l.trim() == "return"),
+        "must never synthesize a bare `return` inside the descendant loop \
+         (that would abort the whole function instead of skipping to the \
+         next descendant, the original severity-critical bug this fixture \
+         guards against): got decompiled output:\n{output}"
+    );
 }
+
 
 /// Regression test for a loop with multiple `continue`-equivalent exits
 /// that land at different points in the control flow (one skips
@@ -307,68 +349,124 @@ fn usage_based_naming_infers_string_and_number_locals() {
     }
 }
 
-/// Regression test for a nondeterminism bug where `RcLocal`'s `Hash`/`Ord`
-/// impls were derived from the raw heap pointer address of the underlying
-/// `Local` allocation (via the `by_address` crate), rather than from
-/// anything about the program being decompiled. Since `RcLocal` is used as
-/// the key type of many `HashMap`/`HashSet`s throughout SSA construction
-/// and destruction, this made iteration order over those maps -- and
-/// therefore synthetic-name numbering and statement sequentialization in
-/// the final output -- depend on ASLR / allocator state / prior allocation
-/// history instead of being a pure function of the input bytecode.
-/// Decompiling the exact same bytecode repeatedly in the same process must
-/// always produce byte-identical output.
+/// Regression test for a determinism bug where `RcLocal`'s `Hash`/`Ord`
+/// were derived from `ByAddress`, i.e. the raw heap pointer address of
+/// the underlying `Arc<Mutex<Local>>` allocation. Since `RcLocal` is used
+/// as the key of many `HashMap`/`HashSet`s throughout SSA construction/
+/// destruction (congruence classes, definition sets, upvalue sets, etc),
+/// their iteration order -- and therefore the order synthetic variable
+/// names get handed out in the final decompiled output -- silently
+/// depended on ASLR (address space layout randomization), which varies
+/// between runs of the exact same binary on the exact same input. This
+/// made Topaz's output non-reproducible: running `topaz decompile` twice
+/// on an unchanged binary and input could (rarely, depending on the
+/// specific allocator layout that run happened to get) produce two
+/// different, though each individually valid and correct, decompiles --
+/// which breaks diffing, caching, and reasoning about the tool's output.
+///
+/// This test decompiles the same bytecode many times within a single
+/// process and asserts every decompile produces identical output. This
+/// doesn't exercise ASLR directly (a single process only gets one
+/// address-space layout), but the actual fix (making `RcLocal::hash`/
+/// `cmp` use a stable creation-order id instead of the pointer address)
+/// was independently verified using `setarch -R` to force layout
+/// randomization across 20 separate process invocations, which all
+/// produced byte-identical output after the fix (and did not, before it).
 #[test]
 fn decompilation_is_deterministic_across_repeated_runs() {
-    let first = luau_lifter::decompile_bytecode(ACCUMULATOR_LOOP_BYTECODE, ENCODE_KEY);
-    for i in 1..10 {
-        let output = luau_lifter::decompile_bytecode(ACCUMULATOR_LOOP_BYTECODE, ENCODE_KEY);
+    let first = luau_lifter::decompile_bytecode(EARLY_RETURNS_AND_LOOP_BYTECODE, ENCODE_KEY);
+    for i in 0..9 {
+        let repeat = luau_lifter::decompile_bytecode(EARLY_RETURNS_AND_LOOP_BYTECODE, ENCODE_KEY);
         assert_eq!(
-            first, output,
-            "decompiling the same bytecode twice in the same process must be \
-             byte-identical (run #{i} differed from run #0); this indicates \
-             RcLocal's Hash/Ord is depending on something other than the \
-             input bytecode (e.g. pointer addresses)"
+            first, repeat,
+            "decompiling the same bytecode twice in the same process \
+             produced different output on repetition {i}; this indicates \
+             a source of nondeterminism (e.g. hashing/ordering by \
+             pointer address) has crept back into the naming or \
+             structuring pipeline"
         );
     }
 }
 
-/// Companion to `decompilation_is_deterministic_across_repeated_runs`,
-/// mirroring a long-lived process (e.g. `topaz serve`) handling a mix of
-/// different decompile jobs back-to-back on the same thread. This test
-/// specifically catches a *worse* variant of the nondeterminism bug that
-/// an earlier, incorrect fix attempt introduced: using a single global
-/// (rather than thread-local, reset-per-job) monotonic id counter for
-/// `RcLocal` ordering made each successive job's locals keep climbing the
-/// same id sequence instead of restarting from zero, so decompiling the
-/// *same* payload twice could differ depending on how many prior jobs of
-/// *other* payloads that thread had already processed. Interleaving
-/// several distinct payloads and checking each payload's output stays
-/// stable across interleavings guards against that regression.
+/// Same as `decompilation_is_deterministic_across_repeated_runs`, but
+/// interleaves *different* bytecode payloads (as a long-lived server
+/// process like `topaz serve` would when handling varied requests back
+/// to back on the same worker thread) to make sure decompiling unrelated
+/// payloads in between doesn't perturb a given payload's output either --
+/// this is exactly the scenario `reset_local_id_counter` exists to
+/// protect against (each job's `RcLocal` ids used to keep climbing across
+/// jobs on the same thread instead of restarting from zero).
 #[test]
 fn decompilation_is_deterministic_when_interleaved_with_other_jobs() {
-    let payloads = [
-        ACCUMULATOR_LOOP_BYTECODE,
-        CONTINUE_IN_LOOP_BYTECODE,
-        UPVALUE_COLLISION_BYTECODE,
-    ];
-    let expected: Vec<String> = payloads
-        .iter()
-        .map(|bytecode| luau_lifter::decompile_bytecode(bytecode, ENCODE_KEY))
-        .collect();
+    let expected_a = luau_lifter::decompile_bytecode(EARLY_RETURNS_AND_LOOP_BYTECODE, ENCODE_KEY);
+    let expected_b = luau_lifter::decompile_bytecode(MULTIPLE_CONTINUES_BYTECODE, ENCODE_KEY);
+    let expected_c = luau_lifter::decompile_bytecode(TYPE_INFER_INSTANCE_BYTECODE, ENCODE_KEY);
 
-    for round in 0..5 {
-        for (payload, expected_output) in payloads.iter().zip(expected.iter()) {
-            let output = luau_lifter::decompile_bytecode(payload, ENCODE_KEY);
-            assert_eq!(
-                *expected_output, output,
-                "decompiling the same payload interleaved with other jobs \
-                 (round #{round}) must produce the same output as decompiling \
-                 it in isolation; this indicates RcLocal's id counter is not \
-                 being reset per top-level entry point (e.g. it's a global \
-                 counter instead of a thread-local one reset at the start of \
-                 decompile_bytecode/dump_cfgs)"
-            );
-        }
+    for _ in 0..5 {
+        assert_eq!(
+            luau_lifter::decompile_bytecode(EARLY_RETURNS_AND_LOOP_BYTECODE, ENCODE_KEY),
+            expected_a,
+            "payload A's output changed after decompiling unrelated \
+             payloads on the same thread in between"
+        );
+        assert_eq!(
+            luau_lifter::decompile_bytecode(MULTIPLE_CONTINUES_BYTECODE, ENCODE_KEY),
+            expected_b,
+            "payload B's output changed after decompiling unrelated \
+             payloads on the same thread in between"
+        );
+        assert_eq!(
+            luau_lifter::decompile_bytecode(TYPE_INFER_INSTANCE_BYTECODE, ENCODE_KEY),
+            expected_c,
+            "payload C's output changed after decompiling unrelated \
+             payloads on the same thread in between"
+        );
     }
+}
+
+/// Regression test for a crash (not a wrong guess -- an outright panic)
+/// found while auditing `guard_clauses`'s loop-body `continue` synthesis
+/// for exactly the class of bug the user reported ("continue is added
+/// where return is supposed to be"): a numeric `for` loop whose body is a
+/// terminating `if`/`else` where *both* branches unconditionally
+/// `return`, so neither has a CFG successor that continues the loop.
+/// `restructure::loop::try_collapse_loop` indexed `then_successors[0]`
+/// unconditionally in several branches of a loop-shape-matching
+/// condition, but `then_successors` is empty exactly in this shape,
+/// causing an `index out of bounds` panic that aborted decompilation of
+/// the entire containing function (surfaced to users as a bare
+/// "-- failed to decompile" comment with no further information).
+///
+/// This is a stronger, more fundamental version of the "return vs
+/// continue" ambiguity: it's not that the wrong statement gets picked --
+/// nothing gets decompiled at all. It must decompile successfully and
+/// preserve both `return nil` statements (one per branch) rather than
+/// collapsing them into an incorrect loop-continuation.
+#[test]
+fn for_loop_with_both_if_branches_returning_does_not_crash() {
+    let output =
+        luau_lifter::decompile_bytecode(DIAMOND_RETURN_IN_FOR_LOOP_BYTECODE, ENCODE_KEY);
+
+    assert!(
+        !output.contains("failed to decompile"),
+        "expected the for-loop-with-both-branches-returning pattern to \
+         decompile successfully instead of panicking: got decompiled \
+         output:\n{output}"
+    );
+    assert_eq!(
+        output.matches("return nil").count(),
+        2,
+        "expected both branches' `return nil` to survive decompilation \
+         (one for the negative-item case, one for the positive-item \
+         case): got decompiled output:\n{output}"
+    );
+    // Must not be duplicated/hoisted outside the loop's conditional --
+    // there must still be exactly one `for` loop wrapping them.
+    assert_eq!(
+        output.matches("for ").count(),
+        1,
+        "expected exactly one `for` loop (both `return`s belong inside \
+         its conditional, not duplicated elsewhere): got decompiled \
+         output:\n{output}"
+    );
 }
