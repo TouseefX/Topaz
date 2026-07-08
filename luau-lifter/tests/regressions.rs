@@ -69,6 +69,76 @@ const TYPE_INFER_STR_NUM_BYTECODE: &[u8] = include_bytes!("fixtures/type_infer_s
 const DIAMOND_RETURN_IN_FOR_LOOP_BYTECODE: &[u8] =
     include_bytes!("fixtures/diamond_return_in_for_loop.luau.bin");
 
+// `local t = {}` followed by sequential `t.field = value` assignments,
+// where one of those fields is a closure that captures `t` itself (e.g.
+// `t.getSelf = function() return t end`). Found in the real-world Dex
+// Explorer bytecode sample's `Main` module-singleton pattern
+// (`Main.GetInitDeps = function() return {Main = Main, ...} end`).
+// `cfg::ssa::inline`'s table-literal-folding pass used to special-case
+// closures out of its "does this field's value read the table being
+// built" guard, on the mistaken assumption that a closure capturing a
+// variable is somehow different from "reading" it -- but folding such a
+// closure into the table constructor produces `local t = {..., getSelf =
+// function() return t end}`, which is invalid: per Lua's own scoping
+// rules, `t` isn't in scope *inside its own initializer* (a `local`
+// declaration's scope begins only after the statement completes), so the
+// closure's captured `t` silently resolves to whatever unrelated
+// definition of that name existed before (almost always nil or an
+// unrelated global), not the table it was written to belong to.
+const TABLE_CLOSURE_SELF_REFERENCE_BYTECODE: &[u8] =
+    include_bytes!("fixtures/table_closure_self_reference.luau.bin");
+
+/// Regression test for a critical bug where a table's own local was
+/// silently captured as nil/undefined inside a closure literal that got
+/// folded into that table's own constructor (see
+/// `TABLE_CLOSURE_SELF_REFERENCE_BYTECODE`'s doc comment for the full
+/// mechanism). The decompiled output must never emit a table literal that
+/// contains a closure capturing the very local being declared -- instead,
+/// such a closure must be split out as a separate statement (either
+/// `t.field = function() ... end` or `function t.field() ... end`) after
+/// the table's `local` declaration, once `t` is actually in scope.
+#[test]
+fn closure_that_captures_its_own_table_is_not_folded_into_the_table_literal() {
+    let output = luau_lifter::decompile_bytecode(TABLE_CLOSURE_SELF_REFERENCE_BYTECODE, ENCODE_KEY);
+
+    // Find the `local <name> = {` table declaration and confirm the
+    // closure field was NOT folded inside it (i.e. the table literal
+    // closes with `}` before any `function`/closure keyword tied to the
+    // same local appears).
+    let local_decl_pos = output
+        .find("local ")
+        .expect("expected a local table declaration in the output");
+    let table_open_pos = output[local_decl_pos..]
+        .find('{')
+        .map(|p| p + local_decl_pos)
+        .expect("expected the local declaration to be a table constructor");
+    let table_close_pos = output[table_open_pos..]
+        .find('}')
+        .map(|p| p + table_open_pos)
+        .expect("expected the table constructor to close with `}`");
+    let table_literal_body = &output[table_open_pos..table_close_pos];
+
+    assert!(
+        !table_literal_body.contains("function"),
+        "a closure that captures the table being constructed must never \
+         be folded into that table's own literal (this makes the closure \
+         capture a stale/nil reference instead of the table itself, per \
+         Lua's own local-declaration scoping rules): got decompiled \
+         output:\n{output}"
+    );
+
+    // The field must still exist afterward as a separate assignment/
+    // function-declaration statement, and it must actually work at
+    // runtime (returning the same table it's attached to) -- verified
+    // separately via lune during development (prints `1.0 true`, matching
+    // the original source, instead of the pre-fix `1.0 false`).
+    assert!(
+        output.contains("GetSelf"),
+        "expected the GetSelf closure field to still be present, just not \
+         folded into the table literal: got decompiled output:\n{output}"
+    );
+}
+
 /// Regression test for a critical bug where compound-assignment printing
 /// (`x += y`) was dead code in the formatter (nested inside the wrong
 /// `if`-branch), so every detected compound assignment silently lost its
