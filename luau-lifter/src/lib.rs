@@ -187,7 +187,12 @@ pub fn decompile_bytecode(bytecode: &[u8], encode_key: u8) -> String {
             inline_short_gotos(&mut body);
             ast::guard_clauses::apply_guard_clauses(&mut body);
             name_locals(&mut body, true);
-            body.to_string()
+
+            format!(
+                "-- Decomplied with Topaz\n-- Created by: Andrew & TouseefX\n-- Bytecode: {}\n\n{}",
+                encode_key,
+                body.to_string()
+            )
         }
     }
 }
