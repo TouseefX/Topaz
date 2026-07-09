@@ -59,6 +59,9 @@ const OPCODES_WITH_AUX: &[OpCode] = &[
     OpCode::LOP_GETUDATAKS,
     OpCode::LOP_SETUDATAKS,
     OpCode::LOP_NAMECALLUDATA,
+    OpCode::LOP_NEWCLASSMEMBER,
+    OpCode::LOP_CALLFB,
+    OpCode::LOP_CMPPROTO,
 ];
 
 

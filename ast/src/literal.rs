@@ -14,7 +14,7 @@ pub enum Literal {
     Number(f64),
     Integer(i64),
     String(Vec<u8>),
-    Vector(f32, f32, f32),
+    Vector(f32, f32, f32, f32),
 }
 
 impl Reduce for Literal {
@@ -82,7 +82,13 @@ impl fmt::Display for Literal {
                     Formatter::<fmt::Formatter>::escape_string(value)
                 )
             }
-            Literal::Vector(x, y, z) => write!(f, "Vector3.new({}, {}, {})", x, y, z),
+            Literal::Vector(x, y, z, w) => {
+                if *w == 0.0 {
+                    write!(f, "Vector3.new({}, {}, {})", x, y, z)
+                } else {
+                    write!(f, "Vector3.new({}, {}, {}, {})", x, y, z, w)
+                }
+            }
         }
     }
 }

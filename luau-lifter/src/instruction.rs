@@ -26,67 +26,86 @@ pub enum Instruction {
 
 impl Instruction {
     pub fn parse(insn: u32, encode_key: u8) -> Result<Instruction, nom::error::ErrorKind> {
-        let op_code = (insn & 0xFF) as u8;
-        let op_code = op_code.wrapping_mul(encode_key);
-        match op_code {
-            0
-            | 1
-            | 2
-            | 3
-            | 6..=11
-            | 13..=18
-            | 20..=22
-            | 33..=53
-            | 55
-            | 60
-            | 63
-            | 65
-            | 66
-            | 68
-            | 70
-            | 71..=75
-            | 81
-            | 82
-            | 83..=85
-            | 251 => {
-                let (a, b, c) = Self::parse_abc(insn);
+        let op_code_raw = (insn & 0xFF) as u8;
+        let op_code_raw = op_code_raw.wrapping_mul(encode_key);
+        
+        let op_code = match OpCode::try_from(op_code_raw) {
+            Ok(op) => op,
+            Err(_) => return Err(nom::error::ErrorKind::Tag),
+        };
 
-                Ok(Self::BC {
-                    op_code: OpCode::try_from(op_code).unwrap(),
+        match op_code {
+            OpCode::LOP_JUMPX | OpCode::LOP_COVERAGE => {
+                let e = Self::parse_e(insn);
+                Ok(Self::E { op_code, e })
+            }
+            OpCode::LOP_LOADN
+            | OpCode::LOP_LOADK
+            | OpCode::LOP_GETIMPORT
+            | OpCode::LOP_NEWCLOSURE
+            | OpCode::LOP_JUMP
+            | OpCode::LOP_JUMPBACK
+            | OpCode::LOP_JUMPIF
+            | OpCode::LOP_JUMPIFNOT
+            | OpCode::LOP_JUMPIFEQ
+            | OpCode::LOP_JUMPIFLE
+            | OpCode::LOP_JUMPIFLT
+            | OpCode::LOP_JUMPIFNOTEQ
+            | OpCode::LOP_JUMPIFNOTLE
+            | OpCode::LOP_JUMPIFNOTLT
+            | OpCode::LOP_DUPTABLE
+            | OpCode::LOP_FORNPREP
+            | OpCode::LOP_FORNLOOP
+            | OpCode::LOP_FORGLOOP
+            | OpCode::LOP_FORGPREP_INEXT
+            | OpCode::LOP_FORGPREP_NEXT
+            | OpCode::LOP_NATIVECALL
+            | OpCode::LOP_DUPCLOSURE
+            | OpCode::LOP_FORGPREP
+            | OpCode::LOP_JUMPXEQKNIL
+            | OpCode::LOP_JUMPXEQKB
+            | OpCode::LOP_JUMPXEQKN
+            | OpCode::LOP_JUMPXEQKS
+            | OpCode::LOP_CMPPROTO => {
+                let (a, d) = Self::parse_ad(insn);
+                Ok(Self::AD {
+                    op_code,
+                    a,
+                    d,
+                    aux: 0,
+                })
+            }
+            OpCode::LOP_BITAND
+            | OpCode::LOP_BITOR
+            | OpCode::LOP_BITXOR
+            | OpCode::LOP_BITNOT
+            | OpCode::LOP_BITLSHIFT
+            | OpCode::LOP_BITRSHIFT
+            | OpCode::LOP_BITARSHIFT
+            | OpCode::LOP_BITANDK
+            | OpCode::LOP_BITORK
+            | OpCode::LOP_BITXORK
+            | OpCode::LOP_SUBRK
+            | OpCode::LOP_DIVRK => {
+                 let (a, b, c) = Self::parse_abc(insn);
+                 Ok(Self::BC {
+                    op_code,
                     a,
                     b,
                     c,
                     aux: 0,
                 })
             }
-            4 | 5 | 12 | 19 | 23..=32 | 54 | 56..=59 | 61 | 62 | 64 | 76..=80 => {
-                let (a, d) = Self::parse_ad(insn);
-
-                Ok(Self::AD {
-                    op_code: OpCode::try_from(op_code).unwrap(),
+            _ => {
+                let (a, b, c) = Self::parse_abc(insn);
+                Ok(Self::BC {
+                    op_code,
                     a,
-                    d,
+                    b,
+                    c,
                     aux: 0,
                 })
             }
-            67 | 69 => {
-                let e = Self::parse_e(insn);
-
-                Ok(Self::E {
-                    op_code: OpCode::try_from(op_code).unwrap(),
-                    e,
-                })
-            }
-            97 => Ok(Self::BC {
-                op_code: OpCode::try_from(0).unwrap(),
-                a: 0,
-                b: 0,
-                c: 0,
-                aux: 0,
-            }),
-            
-            
-            _ => Err(nom::error::ErrorKind::Tag),
         }
     }
 

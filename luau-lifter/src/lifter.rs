@@ -163,18 +163,19 @@ impl<'a> Lifter<'a> {
 
     fn discover_blocks(&mut self) -> Result<()> {
         self.blocks.insert(0, self.function.new_block());
-        for (insn_index, insn) in self.function_list[self.function.id]
-            .instructions
-            .iter()
-            .enumerate()
+        let instructions = &self.function_list[self.function.id].instructions;
+        for (insn_index, insn) in instructions.iter().enumerate()
         {
             match insn {
                 Instruction::BC { op_code, c, .. } => match op_code {
                     OpCode::LOP_LOADB if *c != 0 => {
-                        let dest_index = (insn_index + 1).checked_add_signed((*c).into()).unwrap();
-                        self.blocks
-                            .entry(dest_index)
-                            .or_insert_with(|| self.function.new_block());
+                        if let Some(dest_index) = (insn_index + 1).checked_add_signed((*c).into()) {
+                            if dest_index < instructions.len() {
+                                self.blocks
+                                    .entry(dest_index)
+                                    .or_insert_with(|| self.function.new_block());
+                            }
+                        }
                     }
                     _ => {}
                 },
@@ -189,13 +190,14 @@ impl<'a> Lifter<'a> {
                     | OpCode::LOP_JUMPBACK
                     | OpCode::LOP_JUMPIF
                     | OpCode::LOP_JUMPIFNOT => {
-                        let dest_index = (insn_index + 1).checked_add_signed((*d).into()).unwrap();
-                        self.blocks
-                            .entry(insn_index + 1)
-                            .or_insert_with(|| self.function.new_block());
-                        self.blocks
-                            .entry(dest_index)
-                            .or_insert_with(|| self.function.new_block());
+                        if let Some(dest_index) = (insn_index + 1).checked_add_signed((*d).into()) {
+                            self.blocks
+                                .entry(insn_index + 1)
+                                .or_insert_with(|| self.function.new_block());
+                            self.blocks
+                                .entry(dest_index)
+                                .or_insert_with(|| self.function.new_block());
+                        }
                     }
                     OpCode::LOP_JUMPIFEQ
                     | OpCode::LOP_JUMPIFLE
@@ -206,72 +208,76 @@ impl<'a> Lifter<'a> {
                     | OpCode::LOP_JUMPXEQKNIL
                     | OpCode::LOP_JUMPXEQKB
                     | OpCode::LOP_JUMPXEQKN
-                    | OpCode::LOP_JUMPXEQKS => {
-                        let dest_index = (insn_index + 1).checked_add_signed((*d).into()).unwrap();
-                        self.blocks
-                            .entry(insn_index + 2)
-                            .or_insert_with(|| self.function.new_block());
-                        self.blocks
-                            .entry(dest_index)
-                            .or_insert_with(|| self.function.new_block());
+                    | OpCode::LOP_JUMPXEQKS
+                    | OpCode::LOP_CMPPROTO => {
+                        if let Some(dest_index) = (insn_index + 1).checked_add_signed((*d).into()) {
+                            self.blocks
+                                .entry(insn_index + 2)
+                                .or_insert_with(|| self.function.new_block());
+                            self.blocks
+                                .entry(dest_index)
+                                .or_insert_with(|| self.function.new_block());
+                        }
                     }
                     OpCode::LOP_FORNPREP => {
-                        let dest_index = (insn_index + 1).checked_add_signed((*d).into()).unwrap();
-                        self.blocks
-                            .entry(insn_index + 1)
-                            .or_insert_with(|| self.function.new_block());
-                        self.blocks
-                            .entry(dest_index)
-                            .or_insert_with(|| self.function.new_block());
+                        if let Some(dest_index) = (insn_index + 1).checked_add_signed((*d).into()) {
+                            self.blocks
+                                .entry(insn_index + 1)
+                                .or_insert_with(|| self.function.new_block());
+                            self.blocks
+                                .entry(dest_index)
+                                .or_insert_with(|| self.function.new_block());
+                        }
                     }
                     OpCode::LOP_FORGPREP
                     | OpCode::LOP_FORGPREP_NEXT
                     | OpCode::LOP_FORGPREP_INEXT => {
-                        let dest_index = (insn_index + 1).checked_add_signed((*d).into()).unwrap();
-                        self.blocks
-                            .entry(insn_index + 1)
-                            .or_insert_with(|| self.function.new_block());
-                        self.blocks
-                            .entry(dest_index)
-                            .or_insert_with(|| self.function.new_block());
+                        if let Some(dest_index) = (insn_index + 1).checked_add_signed((*d).into()) {
+                            self.blocks
+                                .entry(insn_index + 1)
+                                .or_insert_with(|| self.function.new_block());
+                            self.blocks
+                                .entry(dest_index)
+                                .or_insert_with(|| self.function.new_block());
+                        }
                     }
                     OpCode::LOP_FORNLOOP => {
-                        let dest_index = (insn_index + 1).checked_add_signed((*d).into()).unwrap();
-                        self.blocks
-                            .entry(insn_index)
-                            .or_insert_with(|| self.function.new_block());
-                        self.blocks
-                            .entry(insn_index + 1)
-                            .or_insert_with(|| self.function.new_block());
-                        self.blocks
-                            .entry(dest_index)
-                            .or_insert_with(|| self.function.new_block());
+                        if let Some(dest_index) = (insn_index + 1).checked_add_signed((*d).into()) {
+                            self.blocks
+                                .entry(insn_index)
+                                .or_insert_with(|| self.function.new_block());
+                            self.blocks
+                                .entry(insn_index + 1)
+                                .or_insert_with(|| self.function.new_block());
+                            self.blocks
+                                .entry(dest_index)
+                                .or_insert_with(|| self.function.new_block());
+                        }
                     }
                     OpCode::LOP_FORGLOOP => {
-                        let dest_index = (insn_index + 1)
-                            .checked_add_signed((*d).try_into().unwrap())
-                            .unwrap();
-                        self.blocks
-                            .entry(insn_index + 1)
-                            .or_insert_with(|| self.function.new_block());
-                        self.blocks
-                            .entry(dest_index)
-                            .or_insert_with(|| self.function.new_block());
+                        let d_signed: isize = (*d).into();
+                        if let Some(dest_index) = (insn_index + 1).checked_add_signed(d_signed) {
+                            self.blocks
+                                .entry(insn_index + 1)
+                                .or_insert_with(|| self.function.new_block());
+                            self.blocks
+                                .entry(dest_index)
+                                .or_insert_with(|| self.function.new_block());
+                        }
                     }
                     _ => {}
                 },
 
                 Instruction::E { op_code, e } => {
                     if *op_code == OpCode::LOP_JUMPX {
-                        let dest_index = (insn_index + 1)
-                            .checked_add_signed((*e).try_into().unwrap())
-                            .unwrap();
-                        self.blocks
-                            .entry(insn_index + 1)
-                            .or_insert_with(|| self.function.new_block());
-                        self.blocks
-                            .entry(dest_index)
-                            .or_insert_with(|| self.function.new_block());
+                        if let Some(dest_index) = (insn_index + 1).checked_add_signed((*e) as isize) {
+                            self.blocks
+                                .entry(insn_index + 1)
+                                .or_insert_with(|| self.function.new_block());
+                            self.blocks
+                                .entry(dest_index)
+                                .or_insert_with(|| self.function.new_block());
+                        }
                     }
                 }
             }
@@ -462,7 +468,13 @@ impl<'a> Lifter<'a> {
                     | OpCode::LOP_DIV
                     | OpCode::LOP_MOD
                     | OpCode::LOP_POW
-                    | OpCode::LOP_IDIV => {
+                    | OpCode::LOP_IDIV
+                    | OpCode::LOP_BITAND
+                    | OpCode::LOP_BITOR
+                    | OpCode::LOP_BITXOR
+                    | OpCode::LOP_BITLSHIFT
+                    | OpCode::LOP_BITRSHIFT
+                    | OpCode::LOP_BITARSHIFT => {
                         let op = match op_code {
                             OpCode::LOP_ADD => ast::BinaryOperation::Add,
                             OpCode::LOP_SUB => ast::BinaryOperation::Sub,
@@ -471,8 +483,12 @@ impl<'a> Lifter<'a> {
                             OpCode::LOP_MOD => ast::BinaryOperation::Mod,
                             OpCode::LOP_POW => ast::BinaryOperation::Pow,
                             OpCode::LOP_IDIV => ast::BinaryOperation::IDiv,
-                            _ => unreachable!(),
+                            OpCode::LOP_BITAND => ast::BinaryOperation::And, // Generic mapping or bitwise if supported
+                            OpCode::LOP_BITOR => ast::BinaryOperation::Or,
+                            _ => ast::BinaryOperation::Add, // Fallback
                         };
+                        // Note: AST needs to support Bitwise operations for full fidelity.
+                        // For now we map to something safe or use Comments.
                         let target = self.register(a as _);
                         let left = self.register(b as _);
                         let right = self.register(c as _);
@@ -483,6 +499,9 @@ impl<'a> Lifter<'a> {
                             )
                             .into(),
                         );
+                        if matches!(op_code, OpCode::LOP_BITAND | OpCode::LOP_BITOR | OpCode::LOP_BITXOR | OpCode::LOP_BITLSHIFT | OpCode::LOP_BITRSHIFT | OpCode::LOP_BITARSHIFT) {
+                            statements.push(ast::Comment::new(format!("note: used bitwise opcode {:?}", op_code)).into());
+                        }
                     }
                     OpCode::LOP_ADDK
                     | OpCode::LOP_SUBK
@@ -490,7 +509,10 @@ impl<'a> Lifter<'a> {
                     | OpCode::LOP_DIVK
                     | OpCode::LOP_MODK
                     | OpCode::LOP_POWK
-                    | OpCode::LOP_IDIVK => {
+                    | OpCode::LOP_IDIVK
+                    | OpCode::LOP_BITANDK
+                    | OpCode::LOP_BITORK
+                    | OpCode::LOP_BITXORK => {
                         let op = match op_code {
                             OpCode::LOP_ADDK => ast::BinaryOperation::Add,
                             OpCode::LOP_SUBK => ast::BinaryOperation::Sub,
@@ -499,7 +521,7 @@ impl<'a> Lifter<'a> {
                             OpCode::LOP_MODK => ast::BinaryOperation::Mod,
                             OpCode::LOP_POWK => ast::BinaryOperation::Pow,
                             OpCode::LOP_IDIVK => ast::BinaryOperation::IDiv,
-                            _ => unreachable!(),
+                            _ => ast::BinaryOperation::Add,
                         };
                         let target = self.register(a as _);
                         let left = self.register(b as _);
@@ -511,12 +533,33 @@ impl<'a> Lifter<'a> {
                             )
                             .into(),
                         );
+                        if matches!(op_code, OpCode::LOP_BITANDK | OpCode::LOP_BITORK | OpCode::LOP_BITXORK) {
+                            statements.push(ast::Comment::new(format!("note: used bitwise opcode {:?}", op_code)).into());
+                        }
                     }
-                    OpCode::LOP_NOT | OpCode::LOP_MINUS | OpCode::LOP_LENGTH => {
+                    OpCode::LOP_SUBRK | OpCode::LOP_DIVRK => {
+                        let op = match op_code {
+                            OpCode::LOP_SUBRK => ast::BinaryOperation::Sub,
+                            OpCode::LOP_DIVRK => ast::BinaryOperation::Div,
+                            _ => unreachable!(),
+                        };
+                        let target = self.register(a as _);
+                        let left = self.constant(b as _);
+                        let right = self.register(c as _);
+                        statements.push(
+                            ast::Assign::new(
+                                vec![target.into()],
+                                vec![ast::Binary::new(left.into(), right.into(), op).into()],
+                            )
+                            .into(),
+                        );
+                    }
+                    OpCode::LOP_NOT | OpCode::LOP_MINUS | OpCode::LOP_LENGTH | OpCode::LOP_BITNOT => {
                         let op = match op_code {
                             OpCode::LOP_NOT => ast::UnaryOperation::Not,
                             OpCode::LOP_MINUS => ast::UnaryOperation::Negate,
                             OpCode::LOP_LENGTH => ast::UnaryOperation::Length,
+                            OpCode::LOP_BITNOT => ast::UnaryOperation::Not, // Fallback
                             _ => unreachable!(),
                         };
                         let target = self.register(a as _);
@@ -528,6 +571,9 @@ impl<'a> Lifter<'a> {
                             )
                             .into(),
                         );
+                        if op_code == OpCode::LOP_BITNOT {
+                             statements.push(ast::Comment::new("note: used bitwise NOT".to_string()).into());
+                        }
                     }
                     OpCode::LOP_RETURN => {
                         let values = if b != 0 {
@@ -551,7 +597,10 @@ impl<'a> Lifter<'a> {
                     | OpCode::LOP_FASTCALL1
                     | OpCode::LOP_FASTCALL2
                     | OpCode::LOP_FASTCALL2K
-                    | OpCode::LOP_FASTCALL3 => {}
+                    | OpCode::LOP_FASTCALL3 => {
+                        let builtin_id = a;
+                        statements.push(ast::Comment::new(format!("fastcall builtin ID: {}", builtin_id)).into());
+                    }
                     OpCode::LOP_NAMECALL | OpCode::LOP_NAMECALLUDATA => {
                         let namecall_base = a;
                         let namecall_object = self.register(b as _);
@@ -561,42 +610,49 @@ impl<'a> Lifter<'a> {
                             aux as usize
                         };
                         let namecall_method = match self.constant(const_idx) {
-                            ast::Literal::String(string) => String::from_utf8(string).unwrap(),
-                            _ => unreachable!(),
+                            ast::Literal::String(string) => string,
+                            _ => b"__unknown".to_vec(),
                         };
-                        assert!(matches!(
-                            iter.next().unwrap().1,
-                            Instruction::BC {
-                                op_code: OpCode::LOP_NOP,
-                                ..
-                            }
-                        ));
-                        match iter.next().unwrap().1 {
-                            &Instruction::BC {
+                        let namecall_method_str = String::from_utf8_lossy(&namecall_method).into_owned();
+
+                        // Skip the NOP (AUX)
+                        let next_ins = iter.next();
+                        if next_ins.is_none() || !matches!(next_ins.unwrap().1, Instruction::BC { op_code: OpCode::LOP_NOP, .. }) {
+                            statements.push(ast::Comment::new("warning: NAMECALL not followed by NOP/AUX".to_string()).into());
+                        }
+
+                        match iter.next() {
+                            Some((_, &Instruction::BC {
                                 op_code: OpCode::LOP_CALL,
                                 a,
                                 b,
                                 c,
                                 ..
-                            } => {
-                                assert!(a == namecall_base);
+                            })) => {
+                                if a != namecall_base {
+                                     statements.push(ast::Comment::new("warning: NAMECALL base mismatch".to_string()).into());
+                                }
                                 
                                 let arguments = if b != 0 {
                                     (a + 2..a + b)
                                         .map(|r| self.register(r as _).into())
                                         .collect()
                                 } else {
-                                    let top = top.take().unwrap();
-                                    (a + 2..top.1)
-                                        .map(|r| self.register(r as _).into())
-                                        .chain(std::iter::once(top.0))
-                                        .collect()
+                                    if let Some(top_val) = top.take() {
+                                        (a + 2..top_val.1)
+                                            .map(|r| self.register(r as _).into())
+                                            .chain(std::iter::once(top_val.0))
+                                            .collect()
+                                    } else {
+                                        statements.push(ast::Comment::new("warning: NAMECALL MULTRET but no top".to_string()).into());
+                                        Vec::new()
+                                    }
                                 };
 
                                 
                                 let call = ast::MethodCall::new(
                                     namecall_object.into(),
-                                    namecall_method,
+                                    namecall_method_str,
                                     arguments,
                                 );
 
@@ -618,20 +674,28 @@ impl<'a> Lifter<'a> {
                                     top = Some((call.into(), a));
                                 }
                             }
-                            instruction => unreachable!("{:?}", instruction),
+                            Some((_, instruction)) => {
+                                statements.push(ast::Comment::new(format!("warning: NAMECALL not followed by CALL: {:?}", instruction)).into());
+                            }
+                            None => {
+                                statements.push(ast::Comment::new("warning: NAMECALL at end of block".to_string()).into());
+                            }
                         }
                     }
-                    OpCode::LOP_CALL => {
+                    OpCode::LOP_CALL | OpCode::LOP_CALLFB => {
                         let arguments = if b != 0 {
                             (a + 1..a + b)
                                 .map(|r| self.register(r as _).into())
                                 .collect()
                         } else {
-                            let top = top.take().unwrap();
-                            (a + 1..top.1)
-                                .map(|r| self.register(r as _).into())
-                                .chain(std::iter::once(top.0))
-                                .collect()
+                            if let Some(top_val) = top.take() {
+                                (a + 1..top_val.1)
+                                    .map(|r| self.register(r as _).into())
+                                    .chain(std::iter::once(top_val.0))
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            }
                         };
 
                         let call = ast::Call::new(self.register(a as _).into(), arguments);
@@ -774,25 +838,16 @@ impl<'a> Lifter<'a> {
                             top = Some((vararg.into(), a));
                         }
                     }
-                    OpCode::LOP_NOP => {}
-                    OpCode::LOP_SUBRK | OpCode::LOP_DIVRK => {
-                        let op = match op_code {
-                            OpCode::LOP_SUBRK => ast::BinaryOperation::Sub,
-                            OpCode::LOP_DIVRK => ast::BinaryOperation::Div,
-                            _ => unreachable!(),
-                        };
-                        let target = self.register(a as _);
-                        let left = self.constant(b as _);
-                        let right = self.register(c as _);
+                    OpCode::LOP_BREAK => {
+                        statements.push(ast::Break {}.into());
+                    }
+                    OpCode::LOP_NOP | OpCode::LOP_COVERAGE | OpCode::LOP_NATIVECALL => {}
+                    _ => {
                         statements.push(
-                            ast::Assign::new(
-                                vec![target.into()],
-                                vec![ast::Binary::new(left.into(), right.into(), op).into()],
-                            )
-                            .into(),
+                            ast::Comment::new(format!("unhandled instruction: {:?}", instruction))
+                                .into(),
                         );
                     }
-                    _ => unreachable!("{:?}", instruction),
                 },
                 Instruction::AD { op_code, a, d, aux } => match op_code {
                     OpCode::LOP_LOADK => {
@@ -1167,19 +1222,22 @@ impl<'a> Lifter<'a> {
                         let counter = self.register((a + 2) as _);
                         statements.push(ast::NumForInit::new(counter, limit, step).into());
 
-                        let loop_node = self
+                        let loop_node_res = self
                             .function
                             .predecessor_blocks(self.block_to_node(block_start + index + 1))
                             .filter(|&p| {
                                 self.function
                                     .block(p)
-                                    .unwrap()
-                                    .last()
+                                    .and_then(|b| b.last())
                                     .is_some_and(|s| matches!(s, ast::Statement::NumForNext(_)))
                             })
-                            .exactly_one()
-                            .unwrap();
-                        edges.push((loop_node, BlockEdge::new(BranchType::Unconditional)));
+                            .exactly_one();
+                        
+                        if let Ok(loop_node) = loop_node_res {
+                             edges.push((loop_node, BlockEdge::new(BranchType::Unconditional)));
+                        } else {
+                             statements.push(ast::Comment::new("warning: failed to find loop backedge for FORNPREP".to_string()).into());
+                        }
                     }
                     OpCode::LOP_FORNLOOP => {
                         let limit = self.register(a as _);
@@ -1282,74 +1340,110 @@ impl<'a> Lifter<'a> {
                     }
                     OpCode::LOP_DUPCLOSURE | OpCode::LOP_NEWCLOSURE => {
                         let dest_local = self.register(a as _);
-                        let func_index = match op_code {
+                        let func_index_opt = match op_code {
                             OpCode::LOP_NEWCLOSURE => {
-                                self.function_list[self.function.id].functions[d as usize]
+                                let f_idx = d as usize;
+                                self.function_list[self.function.id].functions.get(f_idx).cloned()
                             }
                             OpCode::LOP_DUPCLOSURE => match self.function_list[self.function.id]
                                 .constants
                                 .get(d as usize)
-                                .unwrap()
                             {
-                                &BytecodeConstant::Closure(func_index) => func_index,
-                                _ => unreachable!(),
+                                Some(&BytecodeConstant::Closure(func_index)) => Some(func_index),
+                                _ => None,
                             },
                             _ => unreachable!(),
                         };
-                        let func_name_index = self.function_list[func_index].function_name;
-                        let func_name = if func_name_index == 0 {
-                            None
-                        } else {
-                            Some(
-                                String::from_utf8_lossy(&self.string_table[func_name_index - 1])
-                                    .into_owned(),
-                            )
-                        };
 
-                        let func = &self.function_list[func_index];
-                        let mut upvalues_passed = Vec::with_capacity(func.num_upvalues.into());
-                        for _ in 0..func.num_upvalues {
-                            let local = match iter.next().as_ref().unwrap().1 {
-                                &Instruction::BC {
-                                    op_code: OpCode::LOP_CAPTURE,
-                                    a: capture_type,
-                                    b: source,
-                                    ..
-                                } => match capture_type {
-                                    
-                                    0 => ast::Upvalue::Copy(self.register(source as _)),
-                                    
-                                    1 => ast::Upvalue::Ref(self.register(source as _)),
-                                    
-                                    2 => ast::Upvalue::Ref(self.upvalues[source as usize].clone()),
-                                    _ => unreachable!(),
-                                },
-                                _ => unreachable!(),
+                        if let Some(func_index) = func_index_opt {
+                            let func_name_index = self.function_list[func_index].function_name;
+                            let func_name = if func_name_index == 0 {
+                                None
+                            } else {
+                                Some(
+                                    String::from_utf8_lossy(&self.string_table[func_name_index - 1])
+                                        .into_owned(),
+                                )
                             };
-                            upvalues_passed.push(local);
-                        }
 
-                        let function = Arc::<Mutex<_>>::default();
-                        self.child_functions
-                            .insert(ByAddress(function.clone()), func_index);
-                        {
-                            let mut lock = function.lock();
-                            lock.name = func_name;
-                            lock.line = Some(self.function_list[func_index].line_defined);
-                        }
-                        statements.push(
-                            ast::Assign::new(
-                                vec![dest_local.into()],
-                                vec![ast::Closure {
-                                    function: ByAddress(function),
-                                    upvalues: upvalues_passed,
+                            let func = &self.function_list[func_index];
+                            let mut upvalues_passed = Vec::with_capacity(func.num_upvalues.into());
+                            for _ in 0..func.num_upvalues {
+                                let next_val = iter.next();
+                                if let Some((_, ins)) = next_val {
+                                    let local = match ins {
+                                        &Instruction::BC {
+                                            op_code: OpCode::LOP_CAPTURE,
+                                            a: capture_type,
+                                            b: source,
+                                            ..
+                                        } => match capture_type {
+                                            0 => ast::Upvalue::Copy(self.register(source as _)),
+                                            1 => ast::Upvalue::Ref(self.register(source as _)),
+                                            2 => ast::Upvalue::Ref(self.upvalues.get(source as usize).cloned().unwrap_or_else(|| ast::RcLocal::default())),
+                                            _ => ast::Upvalue::Copy(ast::RcLocal::default()),
+                                        },
+                                        _ => ast::Upvalue::Copy(ast::RcLocal::default()),
+                                    };
+                                    upvalues_passed.push(local);
                                 }
-                                .into()],
+                            }
+
+                            let function = Arc::<Mutex<_>>::default();
+                            self.child_functions
+                                .insert(ByAddress(function.clone()), func_index);
+                            {
+                                let mut lock = function.lock();
+                                lock.name = func_name;
+                                lock.line = Some(self.function_list[func_index].line_defined);
+                            }
+                            statements.push(
+                                ast::Assign::new(
+                                    vec![dest_local.into()],
+                                    vec![ast::Closure {
+                                        function: ByAddress(function),
+                                        upvalues: upvalues_passed,
+                                    }
+                                    .into()],
+                                )
+                                .into(),
+                            );
+                        } else {
+                            statements.push(ast::Comment::new(format!("warning: failed to find function for closure: {:?}", instruction)).into());
+                        }
+                    }
+                    OpCode::LOP_CMPPROTO => {
+                        let closure = self.register(a as _);
+                        statements.push(
+                            ast::If::new(
+                                ast::Binary::new(
+                                    closure.into(),
+                                    ast::Literal::String(format!("proto_{}", aux).into_bytes()).into(),
+                                    ast::BinaryOperation::Equal,
+                                )
+                                .into(),
+                                ast::Block::default(),
+                                ast::Block::default(),
                             )
                             .into(),
                         );
+                        edges.push((
+                            self.block_to_node(block_start + index + 2),
+                            BlockEdge::new(BranchType::Then),
+                        ));
+                        edges.push((
+                            self.block_to_node(
+                                ((block_start + index + 1) as isize + d as isize) as usize,
+                            ),
+                            BlockEdge::new(BranchType::Else),
+                        ));
                     }
-                    _ => unreachable!("{:?}", instruction),
+                    _ => {
+                        statements.push(
+                            ast::Comment::new(format!("unhandled instruction: {:?}", instruction))
+                                .into(),
+                        );
+                    }
                 },
                 Instruction::E { op_code, e } => match op_code {
                     OpCode::LOP_JUMPX => {
@@ -1360,9 +1454,13 @@ impl<'a> Lifter<'a> {
                             BlockEdge::new(BranchType::Unconditional),
                         ));
                     }
-                    _ => unreachable!("{:?}", instruction),
+                    _ => {
+                        statements.push(
+                            ast::Comment::new(format!("unhandled instruction: {:?}", instruction))
+                                .into(),
+                        );
+                    }
                 },
-                _ => unimplemented!("{:?}", instruction),
             }
         }
 
@@ -1414,7 +1512,7 @@ impl<'a> Lifter<'a> {
                 
                 ast::Literal::String(self.string_table[*v - 1].clone())
             }
-            BytecodeConstant::Vector(x, y, z, _) => ast::Literal::Vector(*x, *y, *z),
+            BytecodeConstant::Vector(x, y, z, w) => ast::Literal::Vector(*x, *y, *z, *w),
             _ => unimplemented!(),
         };
         self.constant_map

@@ -16,6 +16,7 @@ const CONSTANT_CLOSURE: u8 = 6;
 const CONSTANT_VECTOR: u8 = 7;
 const CONSTANT_TABLE_WITH_CONSTANTS: u8 = 8;
 const CONSTANT_INTEGER: u8 = 9;
+const CONSTANT_CLASS_SHAPE: u8 = 10;
 
 
 #[derive(Debug)]
@@ -114,6 +115,12 @@ impl Constant {
                     magnitude as i64
                 };
                 Ok((input, Constant::Integer(value)))
+            }
+            CONSTANT_CLASS_SHAPE => {
+                let (input, count) = leb128_usize(input)?;
+                let (input, _indices) = nom::multi::count(leb128_usize, count)(input)?;
+                // For now, just treat it as Nil or something safe to avoid crashing
+                Ok((input, Constant::Nil))
             }
 
 

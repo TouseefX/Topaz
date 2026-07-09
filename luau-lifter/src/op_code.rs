@@ -4,218 +4,107 @@ use num_enum::TryFromPrimitive;
 #[derive(Debug, TryFromPrimitive, Eq, PartialEq, Copy, Clone)]
 #[allow(non_camel_case_types)]
 pub enum OpCode {
+    LOP_NOP = 0x00,
+    LOP_BREAK = 0x01,
+    LOP_LOADNIL = 0x02,
+    LOP_LOADB = 0x03,
+    LOP_LOADN = 0x04,
+    LOP_LOADK = 0x05,
+    LOP_MOVE = 0x06,
+    LOP_GETGLOBAL = 0x07,
+    LOP_SETGLOBAL = 0x08,
+    LOP_GETUPVAL = 0x09,
+    LOP_SETUPVAL = 0x0A,
+    LOP_CLOSEUPVALS = 0x0B,
+    LOP_GETIMPORT = 0x0C,
+    LOP_GETTABLE = 0x0D,
+    LOP_SETTABLE = 0x0E,
+    LOP_GETTABLEKS = 0x0F,
+    LOP_SETTABLEKS = 0x10,
+    LOP_GETTABLEN = 0x11,
+    LOP_SETTABLEN = 0x12,
+    LOP_NEWCLOSURE = 0x13,
+    LOP_NAMECALL = 0x14,
+    LOP_CALL = 0x15,
+    LOP_RETURN = 0x16,
+    LOP_JUMP = 0x17,
+    LOP_JUMPBACK = 0x18,
+    LOP_JUMPIF = 0x19,
+    LOP_JUMPIFNOT = 0x1A,
+    LOP_JUMPIFEQ = 0x1B,
+    LOP_JUMPIFLE = 0x1C,
+    LOP_JUMPIFLT = 0x1D,
+    LOP_JUMPIFNOTEQ = 0x1E,
+    LOP_JUMPIFNOTLE = 0x1F,
+    LOP_JUMPIFNOTLT = 0x20,
+    LOP_ADD = 0x21,
+    LOP_SUB = 0x22,
+    LOP_MUL = 0x23,
+    LOP_DIV = 0x24,
+    LOP_MOD = 0x25,
+    LOP_POW = 0x26,
+    LOP_ADDK = 0x27,
+    LOP_SUBK = 0x28,
+    LOP_MULK = 0x29,
+    LOP_DIVK = 0x2A,
+    LOP_MODK = 0x2B,
+    LOP_POWK = 0x2C,
+    LOP_AND = 0x2D,
+    LOP_OR = 0x2E,
+    LOP_ANDK = 0x2F,
+    LOP_ORK = 0x30,
+    LOP_CONCAT = 0x31,
+    LOP_NOT = 0x32,
+    LOP_MINUS = 0x33,
+    LOP_LENGTH = 0x34,
+    LOP_NEWTABLE = 0x35,
+    LOP_DUPTABLE = 0x36,
+    LOP_SETLIST = 0x37,
+    LOP_FORNPREP = 0x38,
+    LOP_FORNLOOP = 0x39,
+    LOP_FORGLOOP = 0x3A,
+    LOP_FORGPREP_INEXT = 0x3B,
+    LOP_FASTCALL3 = 0x3C,
+    LOP_FORGPREP_NEXT = 0x3D,
+    LOP_NATIVECALL = 0x3E,
+    LOP_GETVARARGS = 0x3F,
+    LOP_DUPCLOSURE = 0x40,
+    LOP_PREPVARARGS = 0x41,
+    LOP_LOADKX = 0x42,
+    LOP_JUMPX = 0x43,
+    LOP_FASTCALL = 0x44,
+    LOP_COVERAGE = 0x45,
+    LOP_CAPTURE = 0x46,
+    LOP_SUBRK = 0x47,
+    LOP_DIVRK = 0x48,
+    LOP_FASTCALL1 = 0x49,
+    LOP_FASTCALL2 = 0x4A,
+    LOP_FASTCALL2K = 0x4B,
+    LOP_FORGPREP = 0x4C,
+    LOP_JUMPXEQKNIL = 0x4D,
+    LOP_JUMPXEQKB = 0x4E,
+    LOP_JUMPXEQKN = 0x4F,
+    LOP_JUMPXEQKS = 0x50,
+    LOP_IDIV = 0x51,
+    LOP_IDIVK = 0x52,
+    LOP_GETUDATAKS = 0x53,
+    LOP_SETUDATAKS = 0x54,
+    LOP_NAMECALLUDATA = 0x55,
+    LOP_NEWCLASSMEMBER = 0x56,
+    LOP_CALLFB = 0x57,
+    LOP_CMPPROTO = 0x58,
     
-    LOP_NOP,
+    // Bitwise opcodes (recent/experimental)
+    LOP_BITAND = 0x59,
+    LOP_BITOR = 0x5A,
+    LOP_BITXOR = 0x5B,
+    LOP_BITNOT = 0x5C,
+    LOP_BITLSHIFT = 0x5D,
+    LOP_BITRSHIFT = 0x5E,
+    LOP_BITARSHIFT = 0x5F,
+    LOP_BITANDK = 0x60,
+    LOP_BITORK = 0x61,
+    LOP_BITXORK = 0x62,
 
-    
-    LOP_BREAK,
-
-    
-    LOP_LOADNIL,
-
-    
-    LOP_LOADB,
-
-    
-    LOP_LOADN,
-
-    
-    LOP_LOADK,
-
-    
-    LOP_MOVE,
-
-    
-    LOP_GETGLOBAL,
-
-    
-    LOP_SETGLOBAL,
-
-    
-    LOP_GETUPVAL,
-
-    
-    LOP_SETUPVAL,
-
-    
-    LOP_CLOSEUPVALS,
-
-    
-    LOP_GETIMPORT,
-
-    
-    LOP_GETTABLE,
-
-    
-    LOP_SETTABLE,
-
-    
-    LOP_GETTABLEKS,
-
-    
-    LOP_SETTABLEKS,
-
-    
-    LOP_GETTABLEN,
-
-    
-    LOP_SETTABLEN,
-
-    
-    LOP_NEWCLOSURE,
-
-    
-    LOP_NAMECALL,
-
-    
-    LOP_CALL,
-
-    
-    LOP_RETURN,
-
-    
-    LOP_JUMP,
-
-    
-    LOP_JUMPBACK,
-
-    
-    LOP_JUMPIF,
-
-    
-    LOP_JUMPIFNOT,
-
-    
-    LOP_JUMPIFEQ,
-    LOP_JUMPIFLE,
-    LOP_JUMPIFLT,
-    LOP_JUMPIFNOTEQ,
-    LOP_JUMPIFNOTLE,
-    LOP_JUMPIFNOTLT,
-
-    
-    LOP_ADD,
-    LOP_SUB,
-    LOP_MUL,
-    LOP_DIV,
-    LOP_MOD,
-    LOP_POW,
-
-    
-    LOP_ADDK,
-    LOP_SUBK,
-    LOP_MULK,
-    LOP_DIVK,
-    LOP_MODK,
-    LOP_POWK,
-
-    
-    LOP_AND,
-    LOP_OR,
-
-    
-    LOP_ANDK,
-    LOP_ORK,
-
-    
-    LOP_CONCAT,
-
-    
-    LOP_NOT,
-    LOP_MINUS,
-    LOP_LENGTH,
-
-    
-    LOP_NEWTABLE,
-
-    
-    LOP_DUPTABLE,
-
-    
-    LOP_SETLIST,
-
-    
-    LOP_FORNPREP,
-
-    
-    LOP_FORNLOOP,
-
-    
-    LOP_FORGLOOP,
-
-    
-    LOP_FORGPREP_INEXT,
-
-    
-    LOP_FASTCALL3,
-
-    
-    LOP_FORGPREP_NEXT,
-
-    
-    LOP_NATIVECALL,
-
-    
-    LOP_GETVARARGS,
-
-    
-    LOP_DUPCLOSURE,
-
-    
-    LOP_PREPVARARGS,
-
-    
-    LOP_LOADKX,
-
-    
-    LOP_JUMPX,
-
-    
-    LOP_FASTCALL,
-
-    
-    LOP_COVERAGE,
-
-    
-    LOP_CAPTURE,
-
-    
-    LOP_SUBRK,
-    LOP_DIVRK,
-
-    
-    LOP_FASTCALL1,
-
-    
-    LOP_FASTCALL2,
-
-    
-    LOP_FASTCALL2K,
-
-    
-    LOP_FORGPREP,
-
-    
-    LOP_JUMPXEQKNIL,
-    LOP_JUMPXEQKB,
-
-    
-    LOP_JUMPXEQKN,
-    LOP_JUMPXEQKS,
-
-    
-    LOP_IDIV,
-
-    
-    LOP_IDIVK,
-
-    // Atom-based userdata field access acceleration (bytecode v9+).
-    // Equivalent to GETTABLEKS / SETTABLEKS / NAMECALL but tailored to userdata field accesses.
-    // AUX: low 16 bits = constant table index, high 16 bits = cached slot.
-    LOP_GETUDATAKS,
-    LOP_SETUDATAKS,
-    LOP_NAMECALLUDATA,
-
-    // Enum entry for number of opcodes, not a valid opcode by itself!
     LOP__COUNT,
 }

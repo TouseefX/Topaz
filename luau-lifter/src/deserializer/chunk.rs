@@ -19,7 +19,7 @@ impl Chunk {
         } else {
             (input, 0)
         };
-        if types_version > 3 {
+        if types_version > 10 {
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Tag,
