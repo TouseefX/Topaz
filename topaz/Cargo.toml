@@ -1,6 +1,6 @@
 [package]
 name = "topaz"
-version = "1.2.8"
+version = "1.2.9"
 edition.workspace = true
 authors.workspace = true
 default-run = "topaz"
