@@ -842,6 +842,12 @@ impl<'a> Lifter<'a> {
                         statements.push(ast::Break {}.into());
                     }
                     OpCode::LOP_NOP | OpCode::LOP_COVERAGE | OpCode::LOP_NATIVECALL => {}
+                    OpCode::LOP_LOADKX => {
+                        let target = self.register(a as _);
+                        let constant = self.constant(aux as _);
+                        let statement = ast::Assign::new(vec![target.into()], vec![constant.into()]);
+                        statements.push(statement.into());
+                    }
                     _ => {
                         statements.push(
                             ast::Comment::new(format!("unhandled instruction: {:?}", instruction))
