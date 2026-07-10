@@ -1,133 +1,49 @@
-use super::list::parse_list;
-use nom::{
-    number::complete::{le_f32, le_f64, le_i32, le_u32, le_u8},
-    IResult,
-};
-use nom_leb128::leb128_usize;
+//! Type definitions for Luau constant table entries.
+//!
+//! These mirror the upstream `LBC_CONSTANT_*` enum values. The actual
+//! parsing of constants happens in `function.rs` (because the
+//! constant table is interleaved with other function-level sections
+//! and we parse it manually for better control over the exact byte
+//! layout).
+//!
+//! See the Luau source for the authoritative definition:
+//! <https://github.com/luau-lang/luau/blob/master/Common/include/Luau/Bytecode.h>
 
-
-const CONSTANT_NIL: u8 = 0;
-const CONSTANT_BOOLEAN: u8 = 1;
-const CONSTANT_NUMBER: u8 = 2;
-const CONSTANT_STRING: u8 = 3;
-const CONSTANT_IMPORT: u8 = 4;
-const CONSTANT_TABLE: u8 = 5;
-const CONSTANT_CLOSURE: u8 = 6;
-const CONSTANT_VECTOR: u8 = 7;
-const CONSTANT_TABLE_WITH_CONSTANTS: u8 = 8;
-const CONSTANT_INTEGER: u8 = 9;
-const CONSTANT_CLASS_SHAPE: u8 = 10;
-
-
-#[derive(Debug)]
+/// A key/value pair in a `LBC_CONSTANT_TABLE_WITH_CONSTANTS` entry.
+#[derive(Debug, Clone, Copy)]
 pub struct TableConstantEntry {
+    /// Index into the constant table for the key.
     pub key: usize,
+    /// Value of the entry (as a 32-bit signed integer; usually an
+    /// index into the constant table too).
     pub value_index: i32,
 }
 
-#[derive(Debug)]
+/// A single constant from a function's constant table.
+#[derive(Debug, Clone)]
 pub enum Constant {
+    /// Tag 0.
     Nil,
+    /// Tag 1, followed by a `u8` (0 = false, anything else = true).
     Boolean(bool),
+    /// Tag 2, followed by a little-endian `f64`.
     Number(f64),
+    /// Tag 3, followed by a LEB128 varint that is a 1-based index into
+    /// the chunk-level string table. 0 means "no string".
     String(usize),
+    /// Tag 4, followed by a 4-byte import descriptor.
+    /// `import_index` is opaque; the upstream VM interprets it as
+    /// `(count << 8) | id` where `count` is the number of dots in
+    /// the import path.
     Import(usize),
-
+    /// Tag 5: a table shape with just keys.
     Table(Vec<usize>),
+    /// Tag 6: a closure (an index into the function table).
     Closure(usize),
+    /// Tag 7: a 4-component float vector.
     Vector(f32, f32, f32, f32),
-
-
+    /// Tag 8: a table shape with keys and packed constant values.
     TableWithConstants(Vec<TableConstantEntry>),
-
+    /// Tag 9: a 64-bit signed integer.
     Integer(i64),
-}
-
-fn leb128_u64(input: &[u8]) -> IResult<&[u8], u64> {
-    let mut result: u64 = 0;
-    let mut shift: u32 = 0;
-    let mut i = 0;
-    loop {
-        let byte = input[i];
-        i += 1;
-        result |= ((byte & 0x7f) as u64) << shift;
-        if byte & 0x80 == 0 {
-            break;
-        }
-        shift += 7;
-    }
-    Ok((&input[i..], result))
-}
-
-impl Constant {
-    pub(crate) fn parse(input: &[u8]) -> IResult<&[u8], Self> {
-        let (input, tag) = le_u8(input)?;
-        match tag {
-            CONSTANT_NIL => Ok((input, Constant::Nil)),
-            CONSTANT_BOOLEAN => {
-                let (input, value) = le_u8(input)?;
-                Ok((input, Constant::Boolean(value != 0u8)))
-            }
-            CONSTANT_NUMBER => {
-                let (input, value) = le_f64(input)?;
-                Ok((input, Constant::Number(value)))
-            }
-            CONSTANT_STRING => {
-                let (input, string_index) = leb128_usize(input)?;
-                Ok((input, Constant::String(string_index)))
-            }
-            CONSTANT_IMPORT => {
-                let (input, import_index) = le_u32(input)?;
-                Ok((input, Constant::Import(import_index as usize)))
-            }
-            CONSTANT_TABLE => {
-                let (input, keys) = parse_list(input, leb128_usize)?;
-                Ok((input, Constant::Table(keys)))
-            }
-            CONSTANT_CLOSURE => {
-                let (input, f_id) = leb128_usize(input)?;
-                Ok((input, Constant::Closure(f_id)))
-            }
-            CONSTANT_VECTOR => {
-                let (input, x) = le_f32(input)?;
-                let (input, y) = le_f32(input)?;
-                let (input, z) = le_f32(input)?;
-                let (input, w) = le_f32(input)?;
-                Ok((input, Constant::Vector(x, y, z, w)))
-            }
-            CONSTANT_TABLE_WITH_CONSTANTS => {
-                let (mut input, count) = leb128_usize(input)?;
-                let mut entries = Vec::with_capacity(count);
-                for _ in 0..count {
-                    let (rest, key) = leb128_usize(input)?;
-                    let (rest, value_index) = le_i32(rest)?;
-                    input = rest;
-                    entries.push(TableConstantEntry { key, value_index });
-                }
-                Ok((input, Constant::TableWithConstants(entries)))
-            }
-            CONSTANT_INTEGER => {
-                let (input, sign_flag) = le_u8(input)?;
-                let (input, magnitude) = leb128_u64(input)?;
-                let value = if sign_flag != 0 {
-                    (!magnitude).wrapping_add(1) as i64
-                } else {
-                    magnitude as i64
-                };
-                Ok((input, Constant::Integer(value)))
-            }
-            CONSTANT_CLASS_SHAPE => {
-                let (input, count) = leb128_usize(input)?;
-                let (input, _indices) = nom::multi::count(leb128_usize, count)(input)?;
-                // For now, just treat it as Nil or something safe to avoid crashing
-                Ok((input, Constant::Nil))
-            }
-
-
-            _ => Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Tag,
-            ))),
-        }
-    }
 }

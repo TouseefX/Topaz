@@ -1,6 +1,5 @@
-use nom::{bytes::complete::take, number::complete::le_u8, IResult};
-
 use super::chunk::Chunk;
+use super::function::ParseError;
 
 #[derive(Debug)]
 pub enum Bytecode {
@@ -9,24 +8,31 @@ pub enum Bytecode {
 }
 
 impl Bytecode {
-    pub fn parse(input: &[u8], encode_key: u8) -> IResult<&[u8], Bytecode> {
-        let (input, status_code) = le_u8(input)?;
-        match status_code {
+    /// Parse a Luau bytecode blob.
+    ///
+    /// Format: `[u8 status][...]`. If status is 0, the rest is an
+    /// error string. If status is in `4..=15`, it's a valid chunk
+    /// encoded with the corresponding bytecode version.
+    pub fn parse(data: &[u8], encode_key: u8) -> Result<Self, ParseError> {
+        if data.is_empty() {
+            return Err(ParseError {
+                message: "empty bytecode".into(),
+                position: 0,
+            });
+        }
+        let status = data[0];
+        match status {
             0 => {
-                let (input, error_msg) = take(input.len())(input)?;
-                Ok((
-                    input,
-                    Bytecode::Error(String::from_utf8_lossy(error_msg).to_string()),
+                // Error blob: the rest is the message.
+                Ok(Bytecode::Error(
+                    String::from_utf8_lossy(&data[1..]).into_owned(),
                 ))
             }
-            4..=15 => {
-                let (input, chunk) = Chunk::parse(input, encode_key, status_code)?;
-                Ok((input, Bytecode::Chunk(chunk)))
-            }
-            _ => Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Tag,
-            ))),
+            3..=11 => Chunk::parse(data, encode_key).map(Bytecode::Chunk),
+            other => Err(ParseError {
+                message: format!("unsupported bytecode version {}", other),
+                position: 0,
+            }),
         }
     }
 }

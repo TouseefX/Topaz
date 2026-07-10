@@ -6,3 +6,6 @@ flamegraph.svg
 result.lua
 .DS_Store
 *.luau
+# But explicitly allow the stress-test source files used by the
+# compile-and-decompile stress test (tests/opcode_stress_compile.rs).
+!luau-lifter/tests/stress_sources/*.luau

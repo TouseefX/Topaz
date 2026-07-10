@@ -1,46 +1,146 @@
-use super::{function::Function, list::parse_list, parse_string};
-use nom::character::complete::char;
-use nom::multi::many_till;
-use nom::number::complete::le_u8;
-use nom::IResult;
-use nom_leb128::leb128_usize;
+use std::convert::TryInto;
+
+use super::function::{Function, ParseError};
+use super::leb128::read_leb128_u32;
 
 #[derive(Debug)]
 pub struct Chunk {
     pub string_table: Vec<Vec<u8>>,
     pub functions: Vec<Function>,
-    pub main: usize,
+    /// Index into `functions` of the main function prototype.
+    pub main: u32,
 }
 
 impl Chunk {
-    pub(crate) fn parse(input: &[u8], encode_key: u8, version: u8) -> IResult<&[u8], Self> {
-        let (input, types_version) = if version >= 4 {
-            le_u8(input)?
-        } else {
-            (input, 0)
-        };
-        if types_version > 10 {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Tag,
-            )));
-        }
-        let (input, string_table) = parse_list(input, parse_string)?;
-        let input = if types_version == 3 {
-            many_till(leb128_usize, char('\0'))(input)?.0
-        } else {
-            input
-        };
-        let (input, functions) = parse_list(input, |i| Function::parse(i, encode_key))?;
-        let (input, main) = leb128_usize(input)?;
+    /// Parse a complete Luau bytecode blob into a `Chunk`.
+    ///
+    /// Format (from upstream `BytecodeBuilder::finalize`):
+    /// ```text
+    ///   u8 version             // LBC_VERSION (3..=11)
+    ///   u8 types_version       // LBC_TYPE_VERSION (1..=3) if version >= 4
+    ///   varint(string_count) + string_count × (varint length + bytes)
+    ///   userdata type mapping:
+    ///     (u8 idx + varint nameRef) * terminated by u8(0)
+    ///   varint(function_count) + function_count × Function
+    ///   varint(main_function_index)
+    /// ```
+    pub fn parse(data: &[u8], encode_key: u8) -> Result<Self, ParseError> {
+        let start = 0usize;
+        let mut offset = 0usize;
 
-        Ok((
-            input,
-            Self {
-                string_table,
-                functions,
-                main,
-            },
-        ))
+        macro_rules! need {
+            ($n:expr) => {{
+                if data.len() - offset < $n {
+                    return Err(ParseError {
+                        message: format!(
+                            "unexpected EOF: needed {} bytes at offset {}",
+                            $n,
+                            offset
+                        ),
+                        position: start,
+                    });
+                }
+            }};
+        }
+
+        // -- 1-byte version --
+        need!(1);
+        let version = data[offset];
+        offset += 1;
+
+        // -- 1-byte types version (only if version >= 4) --
+        let types_version = if version >= 4 {
+            need!(1);
+            let v = data[offset];
+            offset += 1;
+            v
+        } else {
+            0
+        };
+        // LBC_TYPE_VERSION_MAX in upstream luau is 3.
+        if types_version > 3 {
+            return Err(ParseError {
+                message: format!("unsupported types_version {}", types_version),
+                position: offset,
+            });
+        }
+
+        // -- String table --
+        let (string_count, advance) = read_leb128_u32(data, offset).map_err(|e| {
+            ParseError {
+                message: format!("string count: {e}"),
+                position: start,
+            }
+        })?;
+        offset += advance;
+        let mut string_table = Vec::with_capacity(string_count as usize);
+        for _ in 0..string_count {
+            let (length, advance) = read_leb128_u32(data, offset).map_err(|e| {
+                ParseError {
+                    message: format!("string length: {e}"),
+                    position: start,
+                }
+            })?;
+            offset += advance;
+            need!(length as usize);
+            string_table.push(data[offset..offset + length as usize].to_vec());
+            offset += length as usize;
+        }
+
+        // -- Userdata type mapping (only if types_version >= 3) --
+        if types_version >= 3 {
+            loop {
+                need!(1);
+                let idx = data[offset];
+                offset += 1;
+                if idx == 0 {
+                    break;
+                }
+                // Skip the varint nameRef.
+                let (_, advance) = read_leb128_u32(data, offset).map_err(|e| {
+                    ParseError {
+                        message: format!("userdata nameRef: {e}"),
+                        position: start,
+                    }
+                })?;
+                offset += advance;
+            }
+        }
+
+        // -- Function table --
+        let (function_count, advance) = read_leb128_u32(data, offset).map_err(|e| {
+            ParseError {
+                message: format!("function count: {e}"),
+                position: start,
+            }
+        })?;
+        offset += advance;
+        let mut functions = Vec::with_capacity(function_count as usize);
+        for _ in 0..function_count {
+            let f = Function::parse(data, &mut offset, encode_key, &string_table)?;
+            functions.push(f);
+        }
+
+        // -- Main function index --
+        let (main, advance) = read_leb128_u32(data, offset).map_err(|e| {
+            ParseError {
+                message: format!("main idx: {e}"),
+                position: start,
+            }
+        })?;
+        offset += advance;
+
+        Ok(Chunk {
+            string_table,
+            functions,
+            main,
+        })
     }
+}
+
+// `ParseError` is used by callers; the `TryInto` import is kept to
+// silence unused-import warnings if we later need it.
+#[allow(dead_code)]
+fn _unused() {
+    let _: Option<[u8; 4]> = [0u8; 4].try_into().ok();
 }

@@ -45,9 +45,9 @@ struct EncodeKey {
 }
 
 async fn decompile_luau(query: Query<EncodeKey>, body: Bytes) -> String {
-    decompile_no_io(body, query.encode_key, false)
+    decompile_no_io(body, query.encode_key, false, false)
 }
 
 async fn decompile_lua51(body: Bytes) -> String {
-    decompile_no_io(body, default_encode_key(), true)
+    decompile_no_io(body, default_encode_key(), true, false)
 }

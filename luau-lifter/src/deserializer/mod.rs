@@ -1,22 +1,13 @@
-use nom::{bytes::complete::take, IResult};
-use nom_leb128::leb128_usize;
-
 pub mod bytecode;
 pub mod chunk;
 pub mod constant;
 pub mod function;
-mod list;
+pub mod leb128;
 
-fn parse_string(input: &[u8]) -> IResult<&[u8], Vec<u8>> {
-    let (input, length) = leb128_usize(input)?;
-    let (input, bytes) = take(length)(input)?;
-    Ok((input, bytes.to_owned()))
-}
-
+/// Parse a Luau bytecode blob. Returns a `Bytecode::Chunk(Chunk)` on
+/// success, or a `Bytecode::Error(String)` if the bytecode itself is
+/// an error blob (status byte 0). Any structural parsing failure is
+/// returned as `Err(String)`.
 pub fn deserialize(bytecode: &[u8], encode_key: u8) -> Result<bytecode::Bytecode, String> {
-    match bytecode::Bytecode::parse(bytecode, encode_key) {
-        Ok((_, deserialized_bytecode)) => Ok(deserialized_bytecode),
-        Err(err) => Err(err.to_string()),
-    }
+    bytecode::Bytecode::parse(bytecode, encode_key).map_err(|e| e.to_string())
 }
-

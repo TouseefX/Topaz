@@ -22,5 +22,57 @@ jobs:
       - name: Build
         run: cargo build --workspace --exclude topaz-gui --exclude luau-worker
 
-      - name: Run tests
+      - name: Run tests (without lune)
+        # Default run: doesn't require lune, so skips the
+        # compile-and-decompile stress test gracefully.
+        run: cargo test --workspace --exclude topaz-gui --exclude luau-worker --verbose
+
+      # The compile-and-decompile stress test (in
+      # `luau-lifter/tests/opcode_stress_compile.rs`) compiles each
+      # `.luau` source in `luau-lifter/tests/stress_sources/` with
+      # `lune`, then decompiles the bytecode with the Topaz lifter,
+      # then re-compiles the decompiled output to check that it's
+      # syntactically valid Luau. This is a much stronger test than
+      # the fixture-based one because it exercises opcodes that
+      # never appear in the hand-rolled `.luau.bin` fixtures.
+      #
+      # We run it as a separate job so that the default `cargo test`
+      # stays fast (lune install adds ~30s) and so a missing/broken
+      # lune install doesn't block the rest of the test suite.
+
+  stress-test:
+    name: Compile-and-decompile stress test (requires lune)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry & build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install lune
+        # Lune is a standalone Luau runtime that ships with a real
+        # `luau_compile` function. We use it to compile stress-test
+        # source files into bytecode for the decompiler to consume.
+        # The binary is small (~13 MB) and has no runtime dependencies
+        # beyond glibc, so a direct download is the simplest install.
+        run: |
+          set -e
+          LUNE_VERSION="v0.10.5"
+          curl -sL "https://github.com/lune-org/lune/releases/download/${LUNE_VERSION}/lune-${LUNE_VERSION#v}-linux-x86_64.zip" -o /tmp/lune.zip
+          unzip -o /tmp/lune.zip -d /usr/local/bin/
+          rm /tmp/lune.zip
+          /usr/local/bin/lune --version
+
+      - name: Build
+        run: cargo build --workspace --exclude topaz-gui --exclude luau-worker
+
+      - name: Run full test suite with lune
+        # Set TOPAZ_STRESS_REQUIRE_LUNE=1 so the stress test fails
+        # (rather than silently skips) if lune can't be found.
+        env:
+          TOPAZ_STRESS_REQUIRE_LUNE: "1"
         run: cargo test --workspace --exclude topaz-gui --exclude luau-worker --verbose
