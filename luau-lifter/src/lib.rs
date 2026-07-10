@@ -59,18 +59,18 @@ pub fn decompile_bytecode_via_ruau(bytecode: &[u8], encode_key: u8) -> String {
 
 /// Default Luau decompilation path.
 ///
-/// Prefer the ruau-backed deserializer for plain Luau bytecode (key 1),
-/// then fall back to Topaz's built-in deserializer for shuffled/custom-key
-/// bytecode or whenever the ruau parser rejects the input.
+/// Always tries the ruau-backed deserializer first (supports bytecode
+/// versions 5.1–11 and bypasses typeinfo issues in newer luau-compile
+/// outputs). Falls back to Topaz's native deserializer only when ruau
+/// cannot parse the input (e.g. encrypted/shuffled bytecode with a
+/// non-default key).
 pub fn decompile_bytecode_default(bytecode: &[u8], encode_key: u8) -> String {
-    let detected_key = detect_encode_key(bytecode, encode_key);
-    if detected_key == 1 {
-        if let Ok(adapted) = try_adapt_chunk_via_ruau(bytecode) {
-            ast::reset_local_id_counter();
-            return decompile_adapted(adapted, detected_key);
-        }
+    if let Ok(adapted) = try_adapt_chunk_via_ruau(bytecode) {
+        ast::reset_local_id_counter();
+        return decompile_adapted(adapted, encode_key);
     }
 
+    let detected_key = detect_encode_key(bytecode, encode_key);
     decompile_bytecode(bytecode, detected_key)
 }
 
@@ -572,14 +572,14 @@ pub fn dump_cfgs_via_ruau(bytecode: &[u8]) -> Vec<cfg::CfgSnapshot> {
 }
 
 pub fn dump_cfgs_default(bytecode: &[u8], encode_key: u8) -> Vec<cfg::CfgSnapshot> {
-    let detected_key = detect_encode_key(bytecode, encode_key);
-    if detected_key == 1 {
-        let cfgs = dump_cfgs_via_ruau(bytecode);
-        if !cfgs.is_empty() {
-            return cfgs;
-        }
+    // Always try ruau first — it supports more versions and is more robust
+    // for modern Luau bytecode. Only fall back to native if ruau rejects it.
+    let cfgs = dump_cfgs_via_ruau(bytecode);
+    if !cfgs.is_empty() {
+        return cfgs;
     }
 
+    let detected_key = detect_encode_key(bytecode, encode_key);
     dump_cfgs(bytecode, detected_key)
 }
 
