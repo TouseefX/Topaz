@@ -53,6 +53,18 @@ fn detect_format(bytes: &[u8]) -> Option<BytecodeFormat> {
     }
 }
 
+fn dump_luau_cfgs_for_gui(bytecode: &[u8], encode_key: u8) -> Vec<CfgSnapshot> {
+    let detected_key = luau_lifter::detect_encode_key(bytecode, encode_key);
+    if detected_key == 1 {
+        let cfgs = luau_lifter::dump_cfgs_via_ruau(bytecode);
+        if !cfgs.is_empty() {
+            return cfgs;
+        }
+    }
+
+    luau_lifter::dump_cfgs(bytecode, detected_key)
+}
+
 fn port_hint(port: u16) -> &'static str {
     match port {
         0 => "0 = OS picks any free port.",
@@ -254,12 +266,14 @@ impl TopazApp {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let source = match format {
                         BytecodeFormat::Lua51 => lua51_lifter::decompile_bytecode(&bytecode),
-                        BytecodeFormat::Luau => luau_lifter::decompile_bytecode(&bytecode, encode_key),
+                        BytecodeFormat::Luau => {
+                            luau_lifter::decompile_bytecode_default(&bytecode, encode_key)
+                        }
                     };
 
                     let cfgs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match format {
                         BytecodeFormat::Lua51 => lua51_lifter::dump_cfgs(&bytecode),
-                        BytecodeFormat::Luau => luau_lifter::dump_cfgs(&bytecode, encode_key),
+                        BytecodeFormat::Luau => dump_luau_cfgs_for_gui(&bytecode, encode_key),
                     }))
                     .unwrap_or_default();
                     (source, cfgs)

@@ -27,10 +27,10 @@ pub enum Commands {
         #[arg(short, long, default_value_t = false)]
         lua51: bool,
 
-        /// Use the ruau-bytecode crate as the deserializer backend
-        /// instead of Topaz's built-in deserializer. This handles
-        /// the luau-compile 0.728 typeinfo format correctly for
-        /// bytecodes that the built-in deserializer can't parse.
+        /// Force the ruau-bytecode crate as the deserializer backend.
+        /// By default Topaz now prefers ruau for plain Luau bytecode
+        /// and falls back to the built-in deserializer for shuffled /
+        /// custom-key inputs that still need the legacy path.
         #[arg(long, default_value_t = false)]
         ruau: bool,
     },

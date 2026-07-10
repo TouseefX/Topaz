@@ -16,7 +16,7 @@ where
     } else if ruau {
         luau_lifter::decompile_bytecode_via_ruau(&bytecode, encode_key)
     } else {
-        luau_lifter::decompile_bytecode(&bytecode, encode_key)
+        luau_lifter::decompile_bytecode_default(&bytecode, encode_key)
     }
 }
 

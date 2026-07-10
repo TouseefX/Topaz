@@ -50,43 +50,28 @@ use deserializer::bytecode::Bytecode;
 /// `Function` representation and fed to the rest of the
 /// decompilation pipeline.
 pub fn decompile_bytecode_via_ruau(bytecode: &[u8], encode_key: u8) -> String {
-    use ruau_bytecode::{decode_chunk, BytecodeChunk};
-
     ast::reset_local_id_counter();
-    let chunk = match decode_chunk(bytecode) {
-        Ok(c) => c,
-        Err(_) => {
-            // The public decode API only accepts bytecode version 7.
-            // Fall back to the upstream-fixture decoder which accepts
-            // versions up to 11 (the current upstream baseline).
-            match ruau_bytecode::decode_upstream_fixture_chunk(bytecode) {
-                Ok(c) => c,
-                Err(e) => return format!("failed to deserialize bytecode: {e}"),
-            }
-        }
-    };
-    let (strings, protos, main_proto) = match chunk {
-        BytecodeChunk::Valid {
-            strings,
-            protos,
-            main_proto,
-            ..
-        } => (strings, protos, main_proto),
-        BytecodeChunk::Error { message } => {
-            return format!(
-                "failed to deserialize bytecode: {}",
-                String::from_utf8_lossy(&message)
-            )
-        }
-    };
+    match try_adapt_chunk_via_ruau(bytecode) {
+        Ok(adapted) => decompile_adapted(adapted, encode_key),
+        Err(e) => format!("failed to deserialize bytecode: {e}"),
+    }
+}
 
-    // Adapt ruau-bytecode Protos to Topaz's internal Function
-    // representation. This is a one-time conversion: ruau-bytecode
-    // has already handled the typeinfo section internally.
-    let adapted = ruau_to_topaz::adapt(strings, protos, main_proto);
+/// Default Luau decompilation path.
+///
+/// Prefer the ruau-backed deserializer for plain Luau bytecode (key 1),
+/// then fall back to Topaz's built-in deserializer for shuffled/custom-key
+/// bytecode or whenever the ruau parser rejects the input.
+pub fn decompile_bytecode_default(bytecode: &[u8], encode_key: u8) -> String {
+    let detected_key = detect_encode_key(bytecode, encode_key);
+    if detected_key == 1 {
+        if let Ok(adapted) = try_adapt_chunk_via_ruau(bytecode) {
+            ast::reset_local_id_counter();
+            return decompile_adapted(adapted, detected_key);
+        }
+    }
 
-    // Now run the normal decompilation pipeline on the adapted data.
-    decompile_adapted(adapted, encode_key)
+    decompile_bytecode(bytecode, detected_key)
 }
 
 /// Result of adapting ruau-bytecode output to Topaz's internal
@@ -98,16 +83,51 @@ struct AdaptedChunk {
     main: u32,
 }
 
+fn try_adapt_chunk_via_ruau(bytecode: &[u8]) -> Result<AdaptedChunk, String> {
+    use ruau_bytecode::{BytecodeChunk, decode_chunk};
+
+    let chunk = match decode_chunk(bytecode) {
+        Ok(c) => c,
+        Err(_) => {
+            // The public decode API only accepts bytecode version 7.
+            // Fall back to the upstream-fixture decoder which accepts
+            // versions up to 11 (the current upstream baseline).
+            ruau_bytecode::decode_upstream_fixture_chunk(bytecode)
+                .map_err(|e| e.to_string())?
+        }
+    };
+
+    let (strings, protos, main_proto) = match chunk {
+        BytecodeChunk::Valid {
+            strings,
+            protos,
+            main_proto,
+            ..
+        } => (strings, protos, main_proto),
+        BytecodeChunk::Error { message } => {
+            return Err(String::from_utf8_lossy(&message).into_owned());
+        }
+    };
+
+    // Adapt ruau-bytecode Protos to Topaz's internal Function
+    // representation. This is a one-time conversion: ruau-bytecode
+    // has already handled the typeinfo section internally.
+    Ok(ruau_to_topaz::adapt(strings, protos, main_proto))
+}
+
+fn adapted_chunk_into_chunk(adapted: AdaptedChunk) -> deserializer::chunk::Chunk {
+    deserializer::chunk::Chunk {
+        string_table: adapted.string_table,
+        functions: adapted.functions,
+        main: adapted.main,
+    }
+}
+
 fn decompile_adapted(adapted: AdaptedChunk, _encode_key: u8) -> String {
     // Build a thin shim that lets the existing decompilation
     // pipeline consume the adapted data. For now we construct a
     // Bytecode::Chunk directly.
-    let chunk = deserializer::chunk::Chunk {
-        string_table: adapted.string_table,
-        functions: adapted.functions,
-        main: adapted.main,
-    };
-    decompile_from_chunk(chunk, _encode_key)
+    decompile_from_chunk(adapted_chunk_into_chunk(adapted), _encode_key)
 }
 
 fn decompile_from_chunk(chunk: deserializer::chunk::Chunk, encode_key: u8) -> String {
@@ -521,18 +541,7 @@ pub fn detect_encode_key(bytecode: &[u8], preferred: u8) -> u8 {
     preferred
 }
 
-pub fn dump_cfgs(bytecode: &[u8], encode_key: u8) -> Vec<cfg::CfgSnapshot> {
-    ast::reset_local_id_counter();
-    let encode_key = detect_encode_key(bytecode, encode_key);
-    let chunk = match deserializer::deserialize(bytecode, encode_key) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let chunk = match chunk {
-        Bytecode::Chunk(c) => c,
-        Bytecode::Error(_) => return Vec::new(),
-    };
-
+fn dump_cfgs_from_chunk(chunk: deserializer::chunk::Chunk) -> Vec<cfg::CfgSnapshot> {
     let mut out = Vec::new();
     let mut visited = rustc_hash::FxHashSet::default();
     let mut stack = vec![chunk.main];
@@ -551,6 +560,42 @@ pub fn dump_cfgs(bytecode: &[u8], encode_key: u8) -> Vec<cfg::CfgSnapshot> {
         stack.extend(child_functions.into_iter().map(|(_, f)| f as u32));
     }
     out
+}
+
+pub fn dump_cfgs_via_ruau(bytecode: &[u8]) -> Vec<cfg::CfgSnapshot> {
+    ast::reset_local_id_counter();
+    let adapted = match try_adapt_chunk_via_ruau(bytecode) {
+        Ok(adapted) => adapted,
+        Err(_) => return Vec::new(),
+    };
+    dump_cfgs_from_chunk(adapted_chunk_into_chunk(adapted))
+}
+
+pub fn dump_cfgs_default(bytecode: &[u8], encode_key: u8) -> Vec<cfg::CfgSnapshot> {
+    let detected_key = detect_encode_key(bytecode, encode_key);
+    if detected_key == 1 {
+        let cfgs = dump_cfgs_via_ruau(bytecode);
+        if !cfgs.is_empty() {
+            return cfgs;
+        }
+    }
+
+    dump_cfgs(bytecode, detected_key)
+}
+
+pub fn dump_cfgs(bytecode: &[u8], encode_key: u8) -> Vec<cfg::CfgSnapshot> {
+    ast::reset_local_id_counter();
+    let encode_key = detect_encode_key(bytecode, encode_key);
+    let chunk = match deserializer::deserialize(bytecode, encode_key) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let chunk = match chunk {
+        Bytecode::Chunk(c) => c,
+        Bytecode::Error(_) => return Vec::new(),
+    };
+
+    dump_cfgs_from_chunk(chunk)
 }
 
 pub fn decompile_bytecode(bytecode: &[u8], encode_key: u8) -> String {

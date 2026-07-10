@@ -196,7 +196,7 @@ async fn decompile_luau(
     let key = q.encode_key.unwrap_or(cfg.encode_key);
     let bytes_in = body.len() as u64;
     let bytes = maybe_decode_base64(body.to_vec());
-    let out = luau_lifter::decompile_bytecode(&bytes, key);
+    let out = luau_lifter::decompile_bytecode_default(&bytes, key);
     cfg.stats.record_request(bytes_in, out.len() as u64, false);
     out
 }

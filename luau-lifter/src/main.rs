@@ -6,5 +6,5 @@ fn main() {
         .map(|s| if s == "-e" { 203 } else { panic!() })
         .unwrap_or(1);
     let bytecode = std::fs::read(file_name).expect("failed to read file");
-    println!("{}", luau_lifter::decompile_bytecode(&bytecode, key));
+    println!("{}", luau_lifter::decompile_bytecode_default(&bytecode, key));
 }
