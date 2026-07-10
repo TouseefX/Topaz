@@ -263,7 +263,7 @@ jobs:
 
       - name: Build APK
         run: |
-          cargo apk build -p topaz-gui
+          cargo apk build -p topaz-gui -- lib
           find target -name "*.apk" -type f | head -n 20
 
       - name: Rename and collect APK
