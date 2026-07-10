@@ -931,7 +931,7 @@ impl<'a> Lifter<'a> {
 
                         match iter.next() {
                             Some((_, &Instruction::BC {
-                                op_code: OpCode::LOP_CALL,
+                                op_code: OpCode::LOP_CALL | OpCode::LOP_CALLFB,
                                 a,
                                 b,
                                 c,
