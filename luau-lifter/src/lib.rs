@@ -219,7 +219,7 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, encode_key: u8)
     name_locals(&mut body, true);
 
     format!(
-        "-- Decomplied with Topaz\n-- Created by: Andrew & TouseefX\n-- Bytecode: {}\n\n{}",
+        "-- Decomplied with Topaz\n-- Created by: Andrew & TouseefX\n-- Key: {}\n\n{}",
         encode_key,
         body.to_string()
     )
@@ -572,14 +572,14 @@ pub fn dump_cfgs_via_ruau(bytecode: &[u8]) -> Vec<cfg::CfgSnapshot> {
 }
 
 pub fn dump_cfgs_default(bytecode: &[u8], encode_key: u8) -> Vec<cfg::CfgSnapshot> {
-    // Always try ruau first — it supports more versions and is more robust
-    // for modern Luau bytecode. Only fall back to native if ruau rejects it.
-    let cfgs = dump_cfgs_via_ruau(bytecode);
-    if !cfgs.is_empty() {
-        return cfgs;
+    let detected_key = detect_encode_key(bytecode, encode_key);
+    if detected_key == 1 {
+        let cfgs = dump_cfgs_via_ruau(bytecode);
+        if !cfgs.is_empty() {
+            return cfgs;
+        }
     }
 
-    let detected_key = detect_encode_key(bytecode, encode_key);
     dump_cfgs(bytecode, detected_key)
 }
 
@@ -682,7 +682,7 @@ pub fn decompile_bytecode(bytecode: &[u8], encode_key: u8) -> String {
             name_locals(&mut body, true);
 
             format!(
-                "-- Decomplied with Topaz\n-- Created by: Andrew & TouseefX\n-- Bytecode: {}\n\n{}",
+                "-- Decomplied with Topaz\n-- Created by: Andrew & TouseefX\n-- Key: {}\n\n{}",
                 encode_key,
                 body.to_string()
             )

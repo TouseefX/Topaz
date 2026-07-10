@@ -9,10 +9,21 @@ use crate::{Assign, Block, Index, LValue, Literal, RValue, Statement, Table};
 pub fn cleanup_table_constructors(block: &mut Block) {
     let mut i = 0;
     while i < block.0.len() {
-        let should_split = if let Statement::Assign(assign) = &block.0[i] {
+        let should_split = if let Statement::Assign(assign) = &mut block.0[i] {
             // Check if this is a table constructor assignment
             if assign.left.len() == 1 && assign.right.len() == 1 {
-                if let RValue::Table(table) = &assign.right[0] {
+                if let RValue::Table(table) = &mut assign.right[0] {
+                    // Nested tables (e.g. `Explorer = { ... }` as a *value* inside
+                    // another table constructor) aren't bound to their own lvalue, so
+                    // they can't be split into a separate `t.key = value` statement the
+                    // way a top-level duplicate can. Since these are pure data literals
+                    // with no side effects, just keep the last occurrence of each
+                    // duplicate key and drop the earlier (shadowed) one in place.
+                    for (_, value) in table.0.iter_mut() {
+                        if let RValue::Table(inner) = value {
+                            dedupe_nested_table_values(inner);
+                        }
+                    }
                     has_duplicate_keys(table)
                 } else {
                     false
@@ -51,6 +62,50 @@ pub fn cleanup_table_constructors(block: &mut Block) {
 
         i += 1;
     }
+}
+
+/// Recursively deduplicate keys in tables nested inside another table's value
+/// position, in place. Unlike `split_table_with_duplicates` (used for
+/// top-level table-constructor assignments, which preserves execution order
+/// by emitting separate statements for duplicates), a nested table has no
+/// lvalue of its own to assign into. Since these come from pure data
+/// literals (typically a DUPTABLE nil placeholder later shadowed by a real
+/// value) with no side effects, it's always safe to just keep the last
+/// occurrence of each duplicate key and drop the earlier one(s).
+fn dedupe_nested_table_values(table: &mut Table) {
+    // Recurse first so deeply nested tables are cleaned too.
+    for (_, value) in table.0.iter_mut() {
+        if let RValue::Table(inner) = value {
+            dedupe_nested_table_values(inner);
+        }
+    }
+
+    let mut seen_keys = std::collections::HashSet::new();
+    let mut keep = vec![true; table.0.len()];
+    for i in (0..table.0.len()).rev() {
+        if let Some(key) = &table.0[i].0 {
+            let key_str = match key {
+                RValue::Literal(Literal::String(s)) => {
+                    Some(format!("str:{}", String::from_utf8_lossy(s)))
+                }
+                RValue::Literal(Literal::Number(n)) => Some(format!("num:{}", n)),
+                RValue::Literal(Literal::Boolean(b)) => Some(format!("bool:{}", b)),
+                _ => None,
+            };
+            if let Some(key_str) = key_str {
+                if !seen_keys.insert(key_str) {
+                    keep[i] = false;
+                }
+            }
+        }
+    }
+
+    let mut idx = 0;
+    table.0.retain(|_| {
+        let k = keep[idx];
+        idx += 1;
+        k
+    });
 }
 
 /// Check if a table has duplicate keys
