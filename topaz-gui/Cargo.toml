@@ -4,13 +4,49 @@ version = "0.1.0"
 edition.workspace = true
 authors.workspace = true
 
+[lib]
+name = "topaz_gui"
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
-eframe = "0.31"
 cfg = { path = "../cfg" }
 lua51-lifter = { path = "../lua51-lifter" }
 luau-lifter = { path = "../luau-lifter" }
-rfd = "0.15"
 axum = "0.8"
 base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.42", features = ["rt", "net", "sync", "macros"] }
+
+# eframe core (glow backend for max compat). Default-features disabled so we can avoid accesskit on Android.
+eframe = { version = "0.31", default-features = false, features = ["glow", "wayland", "default_fonts", "x11", "web_screen_reader"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = "0.15"
+# accesskit only on desktop (conflicts with android-native-activity)
+eframe = { version = "0.31", features = ["accesskit"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.13"
+winit = { version = "0.30", features = ["android-native-activity"] }
+eframe = { version = "0.31", features = ["android-native-activity"] }
+log = "0.4"
+
+[package.metadata.android]
+package = "com.touseefx.topaz"
+apk_name = "Topaz"
+build_targets = ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android", "i686-linux-android"]
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.READ_EXTERNAL_STORAGE"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.WRITE_EXTERNAL_STORAGE"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.READ_MEDIA_IMAGES"
+
+[package.metadata.android.application]
+label = "Topaz"

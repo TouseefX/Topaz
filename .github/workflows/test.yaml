@@ -54,4 +54,63 @@ jobs:
           TOPAZ_STRESS_REQUIRE_LUAU: "1"
           RUST_BACKTRACE: "1"
         run: cargo test -p luau-lifter --test multi_compiler_test
-        
+
+  # ─────────────────────────────────────────────────────────
+  # Android compatibility checks (pure Rust should compile)
+  # ─────────────────────────────────────────────────────────
+  android-check-cli:
+    name: Check Android CLI targets compile
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly with Android targets
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android, i686-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+
+      - name: Cargo check CLI for Android
+        run: |
+          cargo check -p topaz --target aarch64-linux-android
+          cargo check -p topaz --target armv7-linux-androideabi
+          cargo check -p topaz --target x86_64-linux-android
+
+  android-check-gui:
+    name: Check Android GUI compiles (eframe + NativeActivity)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly with Android targets
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+
+      - name: Cargo check GUI for Android
+        run: |
+          cargo check -p topaz-gui --target aarch64-linux-android
+          cargo check -p topaz-gui --target x86_64-linux-android
+
+      - name: Validate Android metadata exists
+        run: |
+          test -f topaz-gui/Cargo.toml
+          grep -q "package.metadata.android" topaz-gui/Cargo.toml && echo "Android metadata present"
+          ls -lh topaz-gui/src/lib.rs

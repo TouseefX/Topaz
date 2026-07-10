@@ -624,6 +624,7 @@ fn bezier_cubic(p0: Pos2, p1: Pos2, p2: Pos2, p3: Pos2, t: f32) -> Pos2 {
     )
 }
 
+#[cfg(not(target_os = "android"))]
 fn export_dot(snapshot: &CfgSnapshot) {
     use std::fmt::Write;
     let mut out = String::new();
@@ -667,6 +668,62 @@ fn export_dot(snapshot: &CfgSnapshot) {
     {
         let _ = std::fs::write(path, out);
     }
+}
+
+#[cfg(target_os = "android")]
+fn export_dot(snapshot: &CfgSnapshot) {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let _ = writeln!(out, "digraph cfg {{");
+    let _ = writeln!(out, "  graph [rankdir=TB, bgcolor=\"#1a1a1a\", fontcolor=\"#dddddd\"];");
+    let _ = writeln!(out, "  node  [shape=box, style=\"rounded,filled\", fillcolor=\"#2b2b2b\", color=\"#888\", fontcolor=\"#ddd\", fontname=\"Menlo\", fontsize=10];");
+    let _ = writeln!(out, "  edge  [color=\"#999\", fontcolor=\"#999\"];");
+    for n in &snapshot.nodes {
+        let escaped = escape_dot(&n.label);
+        let attrs = if n.is_entry {
+            ", fillcolor=\"#2d4030\", color=\"#6cc870\""
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "  N{} [label=\"#{}\\l{}\"{}];",
+            n.id, n.id, escaped, attrs
+        );
+    }
+    for e in &snapshot.edges {
+        let (label, color) = match e.kind {
+            EdgeKind::Unconditional => ("", "#999999"),
+            EdgeKind::Then => ("T", "#50c870"),
+            EdgeKind::Else => ("F", "#dc6464"),
+        };
+        let _ = writeln!(
+            out,
+            "  N{} -> N{} [label=\"{}\", color=\"{}\"];",
+            e.from, e.to, label, color
+        );
+    }
+    let _ = writeln!(out, "}}");
+
+    // On Android, save to fixed location in Download folder
+    let candidates = [
+        format!("/sdcard/Download/{}.dot", sanitize_filename(&snapshot.name)),
+        format!(
+            "/storage/emulated/0/Download/{}.dot",
+            sanitize_filename(&snapshot.name)
+        ),
+        format!("/data/data/com.touseefx.topaz/files/{}.dot", sanitize_filename(&snapshot.name)),
+    ];
+    for path in candidates {
+        if std::fs::write(&path, &out).is_ok() {
+            log::info!("DOT exported to {path}");
+            return;
+        }
+    }
+    // fallback to temp
+    let mut p = std::env::temp_dir();
+    p.push(format!("{}.dot", sanitize_filename(&snapshot.name)));
+    let _ = std::fs::write(p, out);
 }
 
 fn escape_dot(s: &str) -> String {
