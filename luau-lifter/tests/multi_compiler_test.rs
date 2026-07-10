@@ -201,7 +201,7 @@ fn compile_via_lute(_source: &Path) -> Result<Vec<u8>, String> {
 }
 
 fn decompile(bytecode: &[u8]) -> String {
-    luau_lifter::decompile_bytecode(bytecode, ENCODE_KEY)
+    luau_lifter::decompile_bytecode_default(bytecode, ENCODE_KEY)
 }
 
 fn collect_compilers() -> Vec<Compiler> {

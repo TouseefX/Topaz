@@ -7,7 +7,7 @@
 //!    `@lune/luau`, so it covers a different subset of the ~70 opcodes
 //!    in the Luau bytecode instruction set. Running the full decompiler
 //!    on all of them and asserting that *none* of them panic
-//!    (`decompile_bytecode` returns successfully) is a strong smoke
+//!    (`decompile_bytecode_default` returns successfully) is a strong smoke
 //!    test that the lifter, SSA, structuring, and AST post-processing
 //!    passes all handle the opcode combinations we care about.
 //!
@@ -19,7 +19,7 @@
 //!    contain any such comment for the *handled* opcodes.
 //!
 //! 3. **Total decompiler failures** — the panic hook in
-//!    `decompile_bytecode` turns panics into `failed to decompile`
+//!    `decompile_bytecode_default` turns panics into `failed to decompile`
 //!    comments. If a function that previously decompiled successfully
 //!    starts emitting that comment, this test catches it.
 //!
@@ -78,7 +78,7 @@ fn every_fixture_decompiles_cleanly() {
             .and_then(|n| n.to_str())
             .unwrap_or("<unknown>")
             .to_string();
-        let output = luau_lifter::decompile_bytecode(&bytecode, ENCODE_KEY);
+        let output = luau_lifter::decompile_bytecode_default(&bytecode, ENCODE_KEY);
 
         // (a) The decompiler must not have abandoned the whole function.
         if output.contains("failed to decompile") {
@@ -124,9 +124,9 @@ fn decompile_does_not_panic_on_handled_fixtures() {
         .collect();
     fixtures.sort();
 
-    // Just calling `decompile_bytecode` and checking the result is
+    // Just calling `decompile_bytecode_default` and checking the result is
     // non-empty is enough to catch a panic. (If the lifter panics,
-    // `decompile_bytecode` catches it and returns a string starting
+    // `decompile_bytecode_default` catches it and returns a string starting
     // with "-- Decomplied with Topaz" but containing the "failed to
     // decompile" comment instead of real source — caught by the test
     // above. Here we additionally check that the *outer* scaffolding
@@ -134,7 +134,7 @@ fn decompile_does_not_panic_on_handled_fixtures() {
     // where the panic hook itself is broken.)
     for path in fixtures {
         let bytecode = fs::read(&path).expect("read fixture");
-        let output = luau_lifter::decompile_bytecode(&bytecode, ENCODE_KEY);
+        let output = luau_lifter::decompile_bytecode_default(&bytecode, ENCODE_KEY);
         assert!(
             output.starts_with("-- Decomplied with Topaz"),
             "fixture {} produced output without the standard header: {:?}",

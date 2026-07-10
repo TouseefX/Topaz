@@ -11,14 +11,14 @@
 //! `.luau.bin` bytecode for reference/regeneration.
 //!
 //! The default encode key used by `topaz decompile` (and by
-//! `luau_lifter::decompile_bytecode`) is expected to be `0`/no XOR
+//! `luau_lifter::decompile_bytecode_default`) is expected to be `0`/no XOR
 //! obfuscation for these fixtures, since they were compiled directly
 //! without any additional string-encoding step.
 
 /// `topaz decompile`'s default encode key (used to XOR-deobfuscate string
 /// constants in the bytecode). These fixtures were compiled without any
 /// additional string obfuscation, but the default key must still be
-/// supplied since `luau_lifter::decompile_bytecode` uses it to decode the
+/// supplied since `luau_lifter::decompile_bytecode_default` uses it to decode the
 /// bytecode's string table unconditionally.
 const ENCODE_KEY: u8 = 203;
 
@@ -99,7 +99,7 @@ const TABLE_CLOSURE_SELF_REFERENCE_BYTECODE: &[u8] =
 /// the table's `local` declaration, once `t` is actually in scope.
 #[test]
 fn closure_that_captures_its_own_table_is_not_folded_into_the_table_literal() {
-    let output = luau_lifter::decompile_bytecode(TABLE_CLOSURE_SELF_REFERENCE_BYTECODE, ENCODE_KEY);
+    let output = luau_lifter::decompile_bytecode_default(TABLE_CLOSURE_SELF_REFERENCE_BYTECODE, ENCODE_KEY);
 
     // Find the `local <name> = {` table declaration and confirm the
     // closure field was NOT folded inside it (i.e. the table literal
@@ -147,7 +147,7 @@ fn closure_that_captures_its_own_table_is_not_folded_into_the_table_literal() {
 /// counter/accumulator loop pattern in decompiled output.
 #[test]
 fn accumulator_loop_uses_compound_assignment_not_plain_reassignment() {
-    let output = luau_lifter::decompile_bytecode(ACCUMULATOR_LOOP_BYTECODE, ENCODE_KEY);
+    let output = luau_lifter::decompile_bytecode_default(ACCUMULATOR_LOOP_BYTECODE, ENCODE_KEY);
 
     assert!(
         output.contains("+="),
@@ -186,7 +186,7 @@ fn accumulator_loop_uses_compound_assignment_not_plain_reassignment() {
 /// enclosing function instead of just skipping the current iteration.
 #[test]
 fn early_exit_inside_loop_uses_continue_not_return() {
-    let output = luau_lifter::decompile_bytecode(CONTINUE_IN_LOOP_BYTECODE, ENCODE_KEY);
+    let output = luau_lifter::decompile_bytecode_default(CONTINUE_IN_LOOP_BYTECODE, ENCODE_KEY);
 
     // This `if` is the true last statement of the loop body, so `continue`
     // is provably correct here (not a guess) -- see `guard_clauses`'s
@@ -213,7 +213,7 @@ fn early_exit_inside_loop_uses_continue_not_return() {
 /// producing the nonsensical, crash-inducing self-assignment `Id = Id`.
 #[test]
 fn upvalue_is_not_renamed_to_match_unrelated_sibling() {
-    let output = luau_lifter::decompile_bytecode(UPVALUE_COLLISION_BYTECODE, ENCODE_KEY);
+    let output = luau_lifter::decompile_bytecode_default(UPVALUE_COLLISION_BYTECODE, ENCODE_KEY);
 
     for (name, decl) in find_self_referential_assignments(&output) {
         panic!(
@@ -283,7 +283,7 @@ fn assert_fully_structured(output: &str) {
 /// in the original Dex Explorer bug.
 #[test]
 fn early_returns_with_flag_propagating_descendant_loop() {
-    let output = luau_lifter::decompile_bytecode(EARLY_RETURNS_AND_LOOP_BYTECODE, ENCODE_KEY);
+    let output = luau_lifter::decompile_bytecode_default(EARLY_RETURNS_AND_LOOP_BYTECODE, ENCODE_KEY);
     assert_fully_structured(&output);
 
     // The descendant loop has exactly two `continue` sites in the source,
@@ -323,7 +323,7 @@ fn early_returns_with_flag_propagating_descendant_loop() {
 /// loop body doesn't have a single simple exit edge.
 #[test]
 fn multiple_continue_sites_at_different_points() {
-    let output = luau_lifter::decompile_bytecode(MULTIPLE_CONTINUES_BYTECODE, ENCODE_KEY);
+    let output = luau_lifter::decompile_bytecode_default(MULTIPLE_CONTINUES_BYTECODE, ENCODE_KEY);
     assert_fully_structured(&output);
     for (name, decl) in find_self_referential_assignments(&output) {
         panic!("found self-referential assignment `{decl}` for variable `{name}`: got decompiled output:\n{output}");
@@ -336,7 +336,7 @@ fn multiple_continue_sites_at_different_points() {
 /// structured control-flow recovery.
 #[test]
 fn state_machine_style_loop_stays_structured() {
-    let output = luau_lifter::decompile_bytecode(STATE_MACHINE_LOOP_BYTECODE, ENCODE_KEY);
+    let output = luau_lifter::decompile_bytecode_default(STATE_MACHINE_LOOP_BYTECODE, ENCODE_KEY);
     assert_fully_structured(&output);
 }
 
@@ -352,7 +352,7 @@ fn state_machine_style_loop_stays_structured() {
 /// output, and that it doesn't contain a self-referential assignment.
 #[test]
 fn pcall_failure_inside_loop_uses_continue() {
-    let output = luau_lifter::decompile_bytecode(PCALL_IN_LOOP_BYTECODE, ENCODE_KEY);
+    let output = luau_lifter::decompile_bytecode_default(PCALL_IN_LOOP_BYTECODE, ENCODE_KEY);
     assert_fully_structured(&output);
     assert!(
         output.contains("pcall"),
@@ -371,7 +371,7 @@ fn pcall_failure_inside_loop_uses_continue() {
 /// body, similar to the `isNil` flag propagation bug.
 #[test]
 fn loop_carried_flags_read_by_later_elseif_chain() {
-    let output = luau_lifter::decompile_bytecode(LOOP_CARRIED_FLAG_ELSEIF_BYTECODE, ENCODE_KEY);
+    let output = luau_lifter::decompile_bytecode_default(LOOP_CARRIED_FLAG_ELSEIF_BYTECODE, ENCODE_KEY);
     assert_fully_structured(&output);
     for (name, decl) in find_self_referential_assignments(&output) {
         panic!("found self-referential assignment `{decl}` for variable `{name}`: got decompiled output:\n{output}");
@@ -385,7 +385,7 @@ fn loop_carried_flags_read_by_later_elseif_chain() {
 /// synthetic name like `v3`.
 #[test]
 fn usage_based_naming_infers_instance_like_local() {
-    let output = luau_lifter::decompile_bytecode(TYPE_INFER_INSTANCE_BYTECODE, ENCODE_KEY);
+    let output = luau_lifter::decompile_bytecode_default(TYPE_INFER_INSTANCE_BYTECODE, ENCODE_KEY);
     assert_fully_structured(&output);
     assert!(
         output.contains("local obj ="),
@@ -402,7 +402,7 @@ fn usage_based_naming_infers_instance_like_local() {
 /// and `num` respectively by the usage-based type-inference fallback.
 #[test]
 fn usage_based_naming_infers_string_and_number_locals() {
-    let output = luau_lifter::decompile_bytecode(TYPE_INFER_STR_NUM_BYTECODE, ENCODE_KEY);
+    let output = luau_lifter::decompile_bytecode_default(TYPE_INFER_STR_NUM_BYTECODE, ENCODE_KEY);
     assert_fully_structured(&output);
     assert!(
         output.contains("str"),
@@ -444,9 +444,9 @@ fn usage_based_naming_infers_string_and_number_locals() {
 /// produced byte-identical output after the fix (and did not, before it).
 #[test]
 fn decompilation_is_deterministic_across_repeated_runs() {
-    let first = luau_lifter::decompile_bytecode(EARLY_RETURNS_AND_LOOP_BYTECODE, ENCODE_KEY);
+    let first = luau_lifter::decompile_bytecode_default(EARLY_RETURNS_AND_LOOP_BYTECODE, ENCODE_KEY);
     for i in 0..9 {
-        let repeat = luau_lifter::decompile_bytecode(EARLY_RETURNS_AND_LOOP_BYTECODE, ENCODE_KEY);
+        let repeat = luau_lifter::decompile_bytecode_default(EARLY_RETURNS_AND_LOOP_BYTECODE, ENCODE_KEY);
         assert_eq!(
             first, repeat,
             "decompiling the same bytecode twice in the same process \
@@ -468,25 +468,25 @@ fn decompilation_is_deterministic_across_repeated_runs() {
 /// jobs on the same thread instead of restarting from zero).
 #[test]
 fn decompilation_is_deterministic_when_interleaved_with_other_jobs() {
-    let expected_a = luau_lifter::decompile_bytecode(EARLY_RETURNS_AND_LOOP_BYTECODE, ENCODE_KEY);
-    let expected_b = luau_lifter::decompile_bytecode(MULTIPLE_CONTINUES_BYTECODE, ENCODE_KEY);
-    let expected_c = luau_lifter::decompile_bytecode(TYPE_INFER_INSTANCE_BYTECODE, ENCODE_KEY);
+    let expected_a = luau_lifter::decompile_bytecode_default(EARLY_RETURNS_AND_LOOP_BYTECODE, ENCODE_KEY);
+    let expected_b = luau_lifter::decompile_bytecode_default(MULTIPLE_CONTINUES_BYTECODE, ENCODE_KEY);
+    let expected_c = luau_lifter::decompile_bytecode_default(TYPE_INFER_INSTANCE_BYTECODE, ENCODE_KEY);
 
     for _ in 0..5 {
         assert_eq!(
-            luau_lifter::decompile_bytecode(EARLY_RETURNS_AND_LOOP_BYTECODE, ENCODE_KEY),
+            luau_lifter::decompile_bytecode_default(EARLY_RETURNS_AND_LOOP_BYTECODE, ENCODE_KEY),
             expected_a,
             "payload A's output changed after decompiling unrelated \
              payloads on the same thread in between"
         );
         assert_eq!(
-            luau_lifter::decompile_bytecode(MULTIPLE_CONTINUES_BYTECODE, ENCODE_KEY),
+            luau_lifter::decompile_bytecode_default(MULTIPLE_CONTINUES_BYTECODE, ENCODE_KEY),
             expected_b,
             "payload B's output changed after decompiling unrelated \
              payloads on the same thread in between"
         );
         assert_eq!(
-            luau_lifter::decompile_bytecode(TYPE_INFER_INSTANCE_BYTECODE, ENCODE_KEY),
+            luau_lifter::decompile_bytecode_default(TYPE_INFER_INSTANCE_BYTECODE, ENCODE_KEY),
             expected_c,
             "payload C's output changed after decompiling unrelated \
              payloads on the same thread in between"
@@ -515,7 +515,7 @@ fn decompilation_is_deterministic_when_interleaved_with_other_jobs() {
 #[test]
 fn for_loop_with_both_if_branches_returning_does_not_crash() {
     let output =
-        luau_lifter::decompile_bytecode(DIAMOND_RETURN_IN_FOR_LOOP_BYTECODE, ENCODE_KEY);
+        luau_lifter::decompile_bytecode_default(DIAMOND_RETURN_IN_FOR_LOOP_BYTECODE, ENCODE_KEY);
 
     assert!(
         !output.contains("failed to decompile"),

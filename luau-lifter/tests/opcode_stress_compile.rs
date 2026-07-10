@@ -241,7 +241,7 @@ fn compile_and_decompile_every_stress_source() {
             continue;
         }
 
-        let output = luau_lifter::decompile_bytecode(&bytecode, ENCODE_KEY);
+        let output = luau_lifter::decompile_bytecode_default(&bytecode, ENCODE_KEY);
         if output.contains("failed to decompile") {
             failures.push((name, "decompiler reported 'failed to decompile'".into()));
             continue;
@@ -301,7 +301,7 @@ fn decompiled_output_recompiles_cleanly() {
             }
         };
 
-        let decompiled = luau_lifter::decompile_bytecode(&bytecode, ENCODE_KEY);
+        let decompiled = luau_lifter::decompile_bytecode_default(&bytecode, ENCODE_KEY);
 
         if let Err(e) = check_recompiles_cleanly(&lune, &decompiled) {
             failures.push((name.clone(), e));

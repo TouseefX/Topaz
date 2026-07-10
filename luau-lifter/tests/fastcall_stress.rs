@@ -219,7 +219,7 @@ fn every_fastcall_builtin_decompiles_to_real_call() {
         };
 
         // Decompile
-        let output = luau_lifter::decompile_bytecode(&bytecode, 203);
+        let output = luau_lifter::decompile_bytecode_default(&bytecode, 203);
 
         // 1. Must not say "failed to decompile"
         if output.contains("failed to decompile") {
