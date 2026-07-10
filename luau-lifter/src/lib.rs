@@ -572,14 +572,11 @@ pub fn dump_cfgs_via_ruau(bytecode: &[u8]) -> Vec<cfg::CfgSnapshot> {
 }
 
 pub fn dump_cfgs_default(bytecode: &[u8], encode_key: u8) -> Vec<cfg::CfgSnapshot> {
-    let detected_key = detect_encode_key(bytecode, encode_key);
-    if detected_key == 1 {
-        let cfgs = dump_cfgs_via_ruau(bytecode);
-        if !cfgs.is_empty() {
-            return cfgs;
-        }
-    }
-
+    let cfgs = dump_cfgs_via_ruau(bytecode);
+    if !cfgs.is_empty() {
+        return cfgs;
+    
+	let detected_key = detect_encode_key(bytecode, encode_key);
     dump_cfgs(bytecode, detected_key)
 }
 
