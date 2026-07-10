@@ -6,7 +6,7 @@ on:
 jobs:
   get-data:
     name: Read Cargo TOML
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
     steps:
@@ -25,7 +25,7 @@ jobs:
 
   draft-release:
     name: Create a draft release
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: get-data
     permissions:
       contents: write
@@ -206,7 +206,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────
   build-android-gui:
     name: Build Android GUI APK
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: draft-release
     permissions:
       contents: write
