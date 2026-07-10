@@ -54,15 +54,7 @@ fn detect_format(bytes: &[u8]) -> Option<BytecodeFormat> {
 }
 
 fn dump_luau_cfgs_for_gui(bytecode: &[u8], encode_key: u8) -> Vec<CfgSnapshot> {
-    let detected_key = luau_lifter::detect_encode_key(bytecode, encode_key);
-    if detected_key == 1 {
-        let cfgs = luau_lifter::dump_cfgs_via_ruau(bytecode);
-        if !cfgs.is_empty() {
-            return cfgs;
-        }
-    }
-
-    luau_lifter::dump_cfgs(bytecode, detected_key)
+    luau_lifter::dump_cfgs_default(bytecode, encode_key)
 }
 
 fn port_hint(port: u16) -> &'static str {
