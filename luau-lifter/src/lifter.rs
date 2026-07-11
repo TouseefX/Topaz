@@ -1225,7 +1225,7 @@ impl<'a> Lifter<'a> {
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
-                            self.jump_target(block_start, index, d).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                             BlockEdge::new(BranchType::Else),
                         ));
                         statements.push(statement.into());
@@ -1238,7 +1238,7 @@ impl<'a> Lifter<'a> {
                             ast::Block::default(),
                         );
                         edges.push((
-                            self.jump_target(block_start, index, d).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
@@ -1264,7 +1264,7 @@ impl<'a> Lifter<'a> {
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
-                            self.jump_target(block_start, index, d).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                             BlockEdge::new(BranchType::Else),
                         ));
                     }
@@ -1289,7 +1289,7 @@ impl<'a> Lifter<'a> {
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
-                            self.jump_target(block_start, index, d).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                             BlockEdge::new(BranchType::Else),
                         ));
                     }
@@ -1314,7 +1314,7 @@ impl<'a> Lifter<'a> {
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
-                            self.jump_target(block_start, index, d).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                             BlockEdge::new(BranchType::Else),
                         ));
                     }
@@ -1331,7 +1331,7 @@ impl<'a> Lifter<'a> {
                             .into(),
                         );
                         edges.push((
-                            self.jump_target(block_start, index, d).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
@@ -1356,7 +1356,7 @@ impl<'a> Lifter<'a> {
                             .into(),
                         );
                         edges.push((
-                            self.jump_target(block_start, index, d).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
@@ -1381,7 +1381,7 @@ impl<'a> Lifter<'a> {
                             .into(),
                         );
                         edges.push((
-                            self.jump_target(block_start, index, d).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
@@ -1391,7 +1391,7 @@ impl<'a> Lifter<'a> {
                     }
                     OpCode::LOP_JUMPBACK | OpCode::LOP_JUMP => {
                         edges.push((
-                            self.jump_target(block_start, index, d).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                             BlockEdge::new(BranchType::Unconditional),
                         ));
                     }
@@ -1412,7 +1412,7 @@ impl<'a> Lifter<'a> {
                         );
                         if aux & (1 << 31) != 0 {
                             edges.push((
-                                self.jump_target(block_start, index, d).expect("jump target should be a known block (corrupt bytecode?)"),
+                                self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                                 BlockEdge::new(BranchType::Else),
                             ));
                             edges.push((
@@ -1421,7 +1421,7 @@ impl<'a> Lifter<'a> {
                             ));
                         } else {
                             edges.push((
-                                self.jump_target(block_start, index, d).expect("jump target should be a known block (corrupt bytecode?)"),
+                                self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                                 BlockEdge::new(BranchType::Then),
                             ));
                             edges.push((
@@ -1452,7 +1452,7 @@ impl<'a> Lifter<'a> {
                         );
                         if aux & (1 << 31) != 0 {
                             edges.push((
-                                self.jump_target(block_start, index, d).expect("jump target should be a known block (corrupt bytecode?)"),
+                                self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                                 BlockEdge::new(BranchType::Else),
                             ));
                             edges.push((
@@ -1461,7 +1461,7 @@ impl<'a> Lifter<'a> {
                             ));
                         } else {
                             edges.push((
-                                self.jump_target(block_start, index, d).expect("jump target should be a known block (corrupt bytecode?)"),
+                                self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                                 BlockEdge::new(BranchType::Then),
                             ));
                             edges.push((
@@ -1488,7 +1488,7 @@ impl<'a> Lifter<'a> {
                         );
                         if aux & (1 << 31) != 0 {
                             edges.push((
-                                self.jump_target(block_start, index, d).expect("jump target should be a known block (corrupt bytecode?)"),
+                                self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                                 BlockEdge::new(BranchType::Else),
                             ));
                             edges.push((
@@ -1497,7 +1497,7 @@ impl<'a> Lifter<'a> {
                             ));
                         } else {
                             edges.push((
-                                self.jump_target(block_start, index, d).expect("jump target should be a known block (corrupt bytecode?)"),
+                                self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                                 BlockEdge::new(BranchType::Then),
                             ));
                             edges.push((
@@ -1559,7 +1559,7 @@ impl<'a> Lifter<'a> {
                         statements
                             .push(ast::NumForNext::new(counter, limit.into(), step.into()).into());
                         edges.push((
-                            self.jump_target(block_start, index, d).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
@@ -1575,7 +1575,7 @@ impl<'a> Lifter<'a> {
                         let counter = self.register((a + 2) as _);
                         statements.push(ast::GenericForInit::new(generator, state, counter).into());
                         let loop_node = self
-                            .jump_target(block_start, index, d)
+                            .jump_target(block_start, index, d as isize)
                             .expect("FORGPREP target should be a known block (corrupt bytecode?)");
                         // Sanity check: the FORGPREP branch always lands on a
                         // FORGLOOP. If the bytecode says otherwise, the
@@ -1618,7 +1618,7 @@ impl<'a> Lifter<'a> {
                             .into(),
                         );
                         edges.push((
-                            self.jump_target(block_start, index, d).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
@@ -1789,7 +1789,7 @@ impl<'a> Lifter<'a> {
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
-                            self.jump_target(block_start, index, d).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                             BlockEdge::new(BranchType::Else),
                         ));
                     }
@@ -1803,7 +1803,7 @@ impl<'a> Lifter<'a> {
                 Instruction::E { op_code, e } => match op_code {
                     OpCode::LOP_JUMPX => {
                         edges.push((
-                            self.jump_target(block_start, index, e as i16).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, e as isize).expect("jump target should be a known block (corrupt bytecode?)"),
                             BlockEdge::new(BranchType::Unconditional),
                         ));
                     }
@@ -1893,9 +1893,9 @@ impl<'a> Lifter<'a> {
         *self.blocks.get(&insn_index).unwrap()
     }
 
-    fn jump_target(&self, block_start: usize, index: usize, d: i16) -> Option<NodeIndex> {
+    fn jump_target(&self, block_start: usize, index: usize, d: isize) -> Option<NodeIndex> {
         let next_pc = block_start + index + 1;
-        let target = next_pc.checked_add_signed(d as isize)?;
+        let target = next_pc.checked_add_signed(d)?;
         self.blocks.get(&target).copied()
     }
 
