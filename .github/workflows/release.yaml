@@ -246,10 +246,10 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
           ls "$ANDROID_NDK_HOME/source.properties" 2>/dev/null && echo "✅ source.properties found" || echo "❌ source.properties MISSING"
 
-      - name: Install Rust nightly + Android targets
+      - name: Install Rust nightly + Android target
         uses: dtolnay/rust-toolchain@nightly
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          targets: armv7-linux-androideabi
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -263,8 +263,7 @@ jobs:
 
       - name: Build APK
         run: |
-          x build --release --platform android \
-              --arch arm64 --arch arm --arch x86 --arch x86_64
+          x build --platform android --arch arm
           find target -name "*.apk" -type f | head -n 20
 
       - name: Rename and collect APK

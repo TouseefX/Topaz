@@ -34,7 +34,7 @@ log = "0.4"
 [package.metadata.android]
 package = "com.touseefx.topaz"
 apk_name = "Topaz"
-build_targets = ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android", "i686-linux-android"]
+build_targets = ["armv7-linux-androideabi"]
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"
