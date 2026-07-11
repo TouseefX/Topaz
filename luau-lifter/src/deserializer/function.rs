@@ -214,93 +214,28 @@ impl Function {
             *offset += 1;
 
             // -- Type info section --
-            // Per upstream `BytecodeBuilder::writeFunction`, the format
-            // is:
+            // Upstream lvmload.cpp (typesversion 2/3):
+            //   varint(typesize)
+            //   if typesize != 0: skip exactly `typesize` bytes
             //
-            //   varint(typesize)               -- total size of inner block
-            //                                    (== 0 ⇒ no typeinfo)
-            //   <typesize bytes of inner>      -- opaque blob
+            // The previous Topaz heuristic rejected any proto whose
+            // constant count exceeded 100 (`sk <= 100`), then scanned
+            // skip offsets 0..=32 for a "plausible" codesize/sizek pair.
+            // Real Roblox ModuleScripts (config tables, skin packs, …)
+            // routinely have hundreds of constants, so the correct
+            // typesize path was rejected and a false-positive skip
+            // desynced the stream — showing up as
+            // `unknown constant tag 129/160` or
+            // `unexpected EOF: needed N bytes, have M`.
             //
-            // The VM in `lvmload.cpp` just `memcpy`s the whole inner
-            // blob into the proto, so the upstream reader doesn't care
-            // about its contents.
-            //
-            // In practice, the writer in luau-compile 0.728 (the build
-            // we test against) produces an inner block whose internal
-            // structure doesn't always match the documented format
-            // (which would be 3 varints + data). The `typesize` varint
-            // may be 0, or it may be a small number that doesn't
-            // account for the full inner block. We try the modern
-            // "skip typesize bytes" interpretation first; if it
-            // doesn't produce a plausible rest of the function, we
-            // fall back to a brute-force search of skip amounts (0 to
-            // 32 bytes) and pick the one where the resulting
-            // codesize + sizek are both plausible.
+            // Match the VM: always consume exactly `typesize` bytes.
             let (types_size, advance) = read_leb128_u32(data, *offset)
                 .map_err(|e| ParseError { message: format!("types_size: {e}"), position: start })?;
             *offset += advance;
             if types_size > 0 {
-                let after_varint = *offset;
-                let modern_end = after_varint + types_size as usize;
-                // Check if the modern interpretation produces a
-                // plausible rest of the function.
-                let modern_ok = if modern_end > data.len() {
-                    false
-                } else if let Ok((cs, csadv)) = read_leb128_u32(data, modern_end) {
-                    if (1..=10000).contains(&cs) {
-                        let insns_end = modern_end + csadv + (cs as usize) * 4;
-                        insns_end <= data.len()
-                            && read_leb128_u32(data, insns_end)
-                                .map(|(sk, _)| sk <= 100)
-                                .unwrap_or(false)
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-                if modern_ok {
-                    *offset = modern_end;
-                } else {
-                    // Fall back to brute-force search. Try all
-                    // plausible skip amounts and pick the first one
-                    // that produces a valid rest of the function
-                    // (codesize in 1..=10000, followed by codesize*4
-                    // bytes of instructions, followed by a sizek
-                    // varint <= 100).
-                    let mut best_skip: Option<usize> = None;
-                    for skip_delta in 0..=32 {
-                        let candidate_end = after_varint + skip_delta;
-                        if candidate_end > data.len() {
-                            break;
-                        }
-                        if let Ok((cs, csadv)) = read_leb128_u32(data, candidate_end) {
-                            if (1..=10000).contains(&cs) {
-                                let insns_end = candidate_end + csadv + (cs as usize) * 4;
-                                if insns_end <= data.len() {
-                                    if let Ok((sk, _)) = read_leb128_u32(data, insns_end) {
-                                        if sk <= 100 {
-                                            best_skip = Some(candidate_end);
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let chosen = best_skip.unwrap_or(modern_end);
-                    if chosen > data.len() {
-                        return Err(ParseError {
-                            message: format!(
-                                "typeinfo section would overflow: end={} > data.len()={}",
-                                chosen,
-                                data.len()
-                            ),
-                            position: start,
-                        });
-                    }
-                    *offset = chosen;
-                }
+                let types_size = types_size as usize;
+                need!(types_size);
+                *offset += types_size;
             }
         }
 
@@ -375,7 +310,8 @@ impl Function {
                     *offset += 4;
                     constants.push(Constant::Import(v));
                 }
-                LBC_CONSTANT_TABLE | LBC_CONSTANT_TABLE_WITH_CONSTANTS => {
+                LBC_CONSTANT_TABLE => {
+                    // Layout: varint(nkeys) + nkeys × varint(key_const_idx)
                     let (length, advance) = read_leb128_u32(data, *offset).map_err(|e| {
                         ParseError {
                             message: format!("table length: {e}"),
@@ -383,7 +319,6 @@ impl Function {
                         }
                     })?;
                     *offset += advance;
-                    let with_constants = tag == LBC_CONSTANT_TABLE_WITH_CONSTANTS;
                     let mut keys = Vec::with_capacity(length as usize);
                     for _ in 0..length {
                         let (k, adv) = read_leb128_u32(data, *offset).map_err(|e| {
@@ -395,24 +330,47 @@ impl Function {
                         *offset += adv;
                         keys.push(k as usize);
                     }
-                    if with_constants {
-                        // Topaz's existing `Constant::TableWithConstants`
-                        // is the right type here.
-                        let mut entries = Vec::with_capacity(length as usize);
-                        for key in &keys {
-                            need!(4);
-                            let bytes: [u8; 4] = data[*offset..*offset + 4].try_into().unwrap();
-                            let v = i32::from_le_bytes(bytes);
-                            *offset += 4;
-                            entries.push(super::constant::TableConstantEntry {
-                                key: *key,
-                                value_index: v,
-                            });
+                    constants.push(Constant::Table(keys));
+                }
+                LBC_CONSTANT_TABLE_WITH_CONSTANTS => {
+                    // Layout from lvmload.cpp / BytecodeBuilder (v7+):
+                    //   varint(nkeys)
+                    //   nkeys × ( varint(key_const_idx) + i32 value_const_idx )
+                    //
+                    // Keys and values are INTERLEAVED. The previous code
+                    // read all keys first, then all values — that only
+                    // worked for empty tables and desynced every real
+                    // DUPTABLE-with-constants entry (common in config
+                    // ModuleScripts), producing garbage constant tags
+                    // like 129/160 further down the stream.
+                    let (length, advance) = read_leb128_u32(data, *offset).map_err(|e| {
+                        ParseError {
+                            message: format!("table_with_constants length: {e}"),
+                            position: start,
                         }
-                        constants.push(Constant::TableWithConstants(entries));
-                    } else {
-                        constants.push(Constant::Table(keys));
+                    })?;
+                    *offset += advance;
+                    let mut entries =
+                        Vec::with_capacity(length as usize);
+                    for _ in 0..length {
+                        let (key, adv) = read_leb128_u32(data, *offset).map_err(|e| {
+                            ParseError {
+                                message: format!("table_with_constants key: {e}"),
+                                position: start,
+                            }
+                        })?;
+                        *offset += adv;
+                        need!(4);
+                        let bytes: [u8; 4] =
+                            data[*offset..*offset + 4].try_into().unwrap();
+                        let value_index = i32::from_le_bytes(bytes);
+                        *offset += 4;
+                        entries.push(super::constant::TableConstantEntry {
+                            key: key as usize,
+                            value_index,
+                        });
                     }
+                    constants.push(Constant::TableWithConstants(entries));
                 }
                 LBC_CONSTANT_CLOSURE => {
                     let (v, adv) = read_leb128_u32(data, *offset).map_err(|e| {

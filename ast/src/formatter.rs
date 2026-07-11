@@ -521,11 +521,16 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             return false;
         }
 
+        // Only hard reserved words that cannot appear as bare identifiers in
+        // expression position. Luau's soft/contextual keywords (`type`,
+        // `export`, `typeof`) are valid call targets / table keys —
+        // treating them as reserved produced nonsense like
+        // `__FENV["type"](x)` instead of `type(x)`.
         const RESERVED_KEYWORDS: &[&str] = &[
             "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
             "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
-            // Luau additions
-            "continue", "export", "type", "typeof",
+            // Luau statement keyword
+            "continue",
         ];
 
         let name_str = std::str::from_utf8(name).unwrap_or("");
@@ -890,5 +895,15 @@ mod is_valid_name_tests {
         assert!(!F::is_valid_name(b"continue"));
         assert!(!F::is_valid_name(b"1abc"));
         assert!(!F::is_valid_name(b"P-Rank"));
+    }
+
+    #[test]
+    fn soft_keywords_remain_valid_identifiers() {
+        // `type` / `typeof` / `export` are contextual in Luau and must
+        // still print as bare names so `type(x)` doesn't become
+        // `__FENV["type"](x)`.
+        assert!(F::is_valid_name(b"type"));
+        assert!(F::is_valid_name(b"typeof"));
+        assert!(F::is_valid_name(b"export"));
     }
 }

@@ -530,11 +530,15 @@ struct Args {
 
 
 pub fn detect_encode_key(bytecode: &[u8], preferred: u8) -> u8 {
-    if deserializer::deserialize(bytecode, preferred).is_ok() {
-        return preferred;
-    }
-    for &candidate in &[1u8, 203] {
-        if candidate != preferred && deserializer::deserialize(bytecode, candidate).is_ok() {
+    // Roblox currently ships encode key 203; plain luau-compile uses 1.
+    // Prefer a key that fully deserializes the blob — a wrong key can still
+    // "succeed" at the opcode stage if every decoded byte happens to land
+    // in range, then fail later with garbage constant tags. We therefore
+    // try known keys first and only fall back to the preferred value.
+    let mut candidates = vec![preferred, 203u8, 1u8];
+    candidates.dedup();
+    for candidate in candidates {
+        if deserializer::deserialize(bytecode, candidate).is_ok() {
             return candidate;
         }
     }

@@ -241,3 +241,93 @@ fn class_shape_plus_feedback_no_tag_11() {
     };
     assert_eq!(chunk.functions[0].constants.len(), 3);
 }
+
+#[test]
+fn table_with_constants_is_interleaved() {
+    // Wire layout: tag 8, varint(2), then for each entry:
+    //   varint(key) + i32(value_index)
+    // If the parser wrongly reads all keys first, the i32 bytes (e.g.
+    // little-endian 1 = 01 00 00 00) get treated as a later constant tag
+    // and we either mis-parse or report an unknown tag.
+    let mut payload = Vec::new();
+    write_varint(&mut payload, 2); // 2 entries
+    write_varint(&mut payload, 0); // key 0
+    payload.extend_from_slice(&1i32.to_le_bytes()); // value const idx 1
+    write_varint(&mut payload, 1); // key 1
+    payload.extend_from_slice(&(-1i32).to_le_bytes()); // value = nil sentinel
+
+    // Prepend a couple of string constants the keys can point at.
+    let mut s0 = Vec::new();
+    write_varint(&mut s0, 1); // string table idx 1
+    let mut s1 = Vec::new();
+    write_varint(&mut s1, 1);
+
+    let constants = vec![
+        (3u8, s0),
+        (3u8, s1),
+        (8u8, payload), // TABLE_WITH_CONSTANTS
+        (0u8, Vec::new()), // trailing NIL — must still parse if stream is aligned
+    ];
+
+    let bytes = build_chunk(7, &constants, &[]);
+    let chunk = match deserializer::deserialize(&bytes, 1).expect("table_with_constants") {
+        Bytecode::Chunk(c) => c,
+        other => panic!("expected Chunk, got {other:?}"),
+    };
+    let consts = &chunk.functions[0].constants;
+    assert_eq!(consts.len(), 4);
+    match &consts[2] {
+        Constant::TableWithConstants(entries) => {
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0].key, 0);
+            assert_eq!(entries[0].value_index, 1);
+            assert_eq!(entries[1].key, 1);
+            assert_eq!(entries[1].value_index, -1);
+        }
+        other => panic!("expected TableWithConstants, got {other:?}"),
+    }
+    assert!(matches!(consts[3], Constant::Nil));
+}
+
+#[test]
+fn typeinfo_does_not_reject_large_constant_tables() {
+    // Proto with typesize>0 and sizek > 100 must still parse. The old
+    // heuristic required sizek <= 100 after the typeinfo skip, which
+    // rejected real ModuleScripts and then picked a wrong skip.
+    let mut out = Vec::new();
+    out.push(6); // version
+    out.push(1); // types_version
+    write_varint(&mut out, 0); // no strings
+    write_varint(&mut out, 1); // 1 function
+
+    // proto header
+    out.extend_from_slice(&[2, 0, 0, 0]); // maxstack, nparams, nups, vararg
+    out.push(0); // flags
+    // typeinfo: size 4, four opaque bytes
+    write_varint(&mut out, 4);
+    out.extend_from_slice(&[0x0A, 0x00, 0x00, 0x00]);
+
+    // 1 instruction: RETURN
+    write_varint(&mut out, 1);
+    let insn: u32 = 0x16 | (0 << 8) | (1 << 16);
+    out.extend_from_slice(&insn.to_le_bytes());
+
+    // 120 NIL constants (sizek > 100)
+    write_varint(&mut out, 120);
+    for _ in 0..120 {
+        out.push(0);
+    }
+
+    write_varint(&mut out, 0); // child protos
+    write_varint(&mut out, 0); // line_defined
+    write_varint(&mut out, 0); // debugname
+    out.push(0); // no lineinfo
+    out.push(0); // no debuginfo
+    write_varint(&mut out, 0); // main
+
+    let chunk = match deserializer::deserialize(&out, 1).expect("large sizek + typeinfo") {
+        Bytecode::Chunk(c) => c,
+        other => panic!("expected Chunk, got {other:?}"),
+    };
+    assert_eq!(chunk.functions[0].constants.len(), 120);
+}
