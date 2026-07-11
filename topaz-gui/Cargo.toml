@@ -15,7 +15,7 @@ luau-lifter = { path = "../luau-lifter" }
 axum = "0.8"
 base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }
-tokio = { version = "1.42", features = ["rt", "net", "sync", "macros"] }
+tokio = { version = "1.42", features = ["rt", "rt-multi-thread", "net", "sync", "macros"] }
 
 eframe = { version = "0.31", default-features = false, features = ["glow", "wayland", "default_fonts", "x11", "web_screen_reader"] }
 
@@ -29,30 +29,91 @@ winit = { version = "0.30", features = ["android-native-activity"] }
 eframe = { version = "0.31", features = ["android-native-activity"] }
 log = "0.4"
 
+# --- Android enhancements ---
+android-clipboard = "0.1"
+android-permissions = { version = "0.1.2", features = ["android-activity", "async"] }
+jni = "0.21"
+ndk-context = "0.1"
+anyhow = "1.0"
+
 [package.metadata.android]
 package = "com.exec.topaz"
 apk_name = "Topaz"
-build_targets = ["armv7-linux-androideabi"]
+# Build for modern devices - arm64 + armv7
+build_targets = ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android"]
 
+# Target SDK 34 (Android 14), min SDK 24
+min_sdk_version = 24
+target_sdk_version = 34
+compile_sdk_version = 34
+
+# Make app debuggable so logcat works easily, remove for release
+# [package.metadata.android.application]
+# debuggable = true
+
+# --- Permissions ---
+# Internet for local server
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"
 
+# Legacy storage (API <= 32)
 [[package.metadata.android.uses_permission]]
 name = "android.permission.READ_EXTERNAL_STORAGE"
+max_sdk_version = 32
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.WRITE_EXTERNAL_STORAGE"
+max_sdk_version = 29
 
+# Modern media permissions (API 33+)
 [[package.metadata.android.uses_permission]]
 name = "android.permission.READ_MEDIA_IMAGES"
 
-[package.metadata.android.application]
-label = "Topaz"
+[[package.metadata.android.uses_permission]]
+name = "android.permission.READ_MEDIA_VIDEO"
 
+[[package.metadata.android.uses_permission]]
+name = "android.permission.READ_MEDIA_AUDIO"
+
+# For Android 14 photo picker partial access
+[[package.metadata.android.uses_permission]]
+name = "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+
+# All-files access (user must enable in Settings → Special access)
+# Still declare it so user can manually enable
+[[package.metadata.android.uses_permission]]
+name = "android.permission.MANAGE_EXTERNAL_STORAGE"
+
+# Optional: post notifications (for clipboard toast, server status)
+[[package.metadata.android.uses_permission]]
+name = "android.permission.POST_NOTIFICATIONS"
+
+# Keep screen on while decompiling
+[[package.metadata.android.uses_permission]]
+name = "android.permission.WAKE_LOCK"
+
+# --- Features ---
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.touchscreen"
+required = false
+
+# Not a game, not requiring high perf
+[[package.metadata.android.application]]
+label = "Topaz"
+icon = "@mipmap/ic_launcher"
+# Allow backup
+allow_backup = true
+# Request legacy external storage on Android 10 (API 29) to ease file access
+# This is ignored on API 30+
+# We set it via meta-data below
+
+# Main activity
 [[package.metadata.android.application.activity]]
 name = "android.app.NativeActivity"
-config_changes = "orientation|keyboardHidden|screenSize"
+config_changes = "orientation|keyboardHidden|screenSize|screenLayout|smallestScreenSize|uiMode|density"
 exported = true
+# Keep screen on
+keep_screen_on = true
 
 [[package.metadata.android.application.activity.intent_filter]]
 actions = ["android.intent.action.MAIN"]
@@ -61,3 +122,14 @@ categories = ["android.intent.category.LAUNCHER"]
 [[package.metadata.android.application.activity.meta_data]]
 name = "android.app.lib_name"
 value = "topaz_gui"
+
+# Request legacy storage flag for Android 10
+[[package.metadata.android.application.activity.meta_data]]
+name = "android.requestLegacyExternalStorage"
+value = "true"
+
+# Support opening .luac / .lua / .bin files via share / open-with
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.VIEW", "android.intent.action.EDIT", "android.intent.action.SEND"]
+categories = ["android.intent.category.DEFAULT", "android.intent.category.BROWSABLE"]
+data_mime_type = ["*/*"]

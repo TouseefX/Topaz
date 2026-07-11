@@ -8,6 +8,9 @@ use cfg::CfgSnapshot;
 pub mod cfg_view;
 pub mod server;
 
+#[cfg(target_os = "android")]
+pub mod android;
+
 use cfg_view::CfgViewState;
 use server::{ServerConfig, ServerHandle, ServerState};
 
@@ -85,7 +88,6 @@ pub fn run_desktop() -> eframe::Result {
 }
 
 /// Android entry point. eframe/winit on Android requires android_app passed via NativeOptions.
-/// This function is called by the Android runtime (NativeActivity) and must be `#[no_mangle]`.
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
@@ -97,6 +99,11 @@ fn android_main(app: AndroidApp) {
         std::env::set_var("RUST_BACKTRACE", "full");
     }
     log::info!("Topaz starting on Android");
+
+    // Store globally for permission/clipboard helpers
+    crate::android::init_android_app(app.clone());
+    // Kick off permission request early
+    crate::android::request_storage_permissions_async();
 
     let mut options = eframe::NativeOptions::default();
     // Critical: pass AndroidApp to winit
@@ -112,7 +119,10 @@ fn android_main(app: AndroidApp) {
     if let Err(e) = eframe::run_native(
         "Topaz",
         options,
-        Box::new(|cc| Ok(Box::new(TopazApp::new(cc)))),
+        Box::new(|cc| {
+            // ndk_context should already be initialized by winit, but ensure
+            Ok(Box::new(TopazApp::new(cc)))
+        }),
     ) {
         log::error!("eframe run_native error: {e:?}");
     }
@@ -180,10 +190,24 @@ pub struct TopazApp {
 
     // Android-specific: manual path input because rfd dialogs don't exist on Android
     android_manual_path: String,
+
+    // --- Android enhancements ---
+    #[cfg(target_os = "android")]
+    file_browser_open: bool,
+    #[cfg(target_os = "android")]
+    file_browser: crate::android::FileBrowser,
+    #[cfg(target_os = "android")]
+    permission_banner_dismissed: bool,
 }
 
 impl TopazApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        #[cfg(target_os = "android")]
+        {
+            // Trigger permission check again in UI thread just in case
+            crate::android::request_storage_permissions_async();
+        }
+
         Self {
             tab: Tab::Decompile,
             sub_tab: SubTab::Source,
@@ -195,7 +219,7 @@ impl TopazApp {
             raw_output: String::new(),
             output: String::new(),
             status: if cfg!(target_os = "android") {
-                "Ready on Android — enter path or use sample, then decompile.".to_string()
+                "Ready on Android — tap Open File → Browse, grant Files permission if asked.".to_string()
             } else {
                 "Ready — open a bytecode file to begin.".to_string()
             },
@@ -227,6 +251,12 @@ impl TopazApp {
             } else {
                 String::new()
             },
+            #[cfg(target_os = "android")]
+            file_browser_open: false,
+            #[cfg(target_os = "android")]
+            file_browser: crate::android::FileBrowser::new("/sdcard/Download"),
+            #[cfg(target_os = "android")]
+            permission_banner_dismissed: false,
         }
     }
 
@@ -240,16 +270,11 @@ impl TopazApp {
 
     #[cfg(target_os = "android")]
     fn pick_file(&mut self) {
-        // rfd not available on Android. Instruct user to use manual path input.
-        self.status = "File picker not available on Android. Use manual path field. \
-            Put file in /sdcard/Download and enter full path, then press Load."
-            .to_string();
+        // Open the in-app file browser instead of the old manual-only flow
+        self.file_browser_open = true;
+        self.status = "Opening Android file browser… grant Storage permission if prompted.".to_string();
         self.status_is_error = false;
-        // If manual path is set, try to load it
-        let p = self.android_manual_path.trim().to_string();
-        if !p.is_empty() {
-            self.load_file(PathBuf::from(p));
-        }
+        crate::android::request_storage_permissions_async();
     }
 
     fn load_lua51_sample(&mut self) {
@@ -294,14 +319,20 @@ impl TopazApp {
                 self.status = status;
                 self.status_is_error = false;
                 self.bytecode = Some(bytes);
-                self.input_path = Some(path);
+                self.input_path = Some(path.clone());
                 self.output.clear();
                 self.cfgs.clear();
                 self.cfg_view.reset();
+                #[cfg(target_os = "android")]
+                {
+                    self.android_manual_path = path.display().to_string();
+                }
             }
             Err(e) => {
                 self.status = format!("Failed to read file: {e}");
                 self.status_is_error = true;
+                #[cfg(target_os = "android")]
+                crate::android::toast(&format!("Read failed: {e}"));
             }
         }
     }
@@ -469,21 +500,36 @@ impl TopazApp {
             self.status_is_error = true;
             return;
         }
-        // On Android, save to well-known public Download dir
-        // Try multiple possible locations
-        let candidates = [
-            "/sdcard/Download/decompiled.lua",
-            "/storage/emulated/0/Download/decompiled.lua",
+        // Make sure we have permission before writing
+        crate::android::request_storage_permissions_async();
+
+        // Try app-private first (always writable), then public Downloads
+        let app_private = [
+            "/data/data/com.exec.topaz/files/decompiled.lua",
+            // some OEMs use com.touseefx.topaz – try that too
             "/data/data/com.touseefx.topaz/files/decompiled.lua",
         ];
-        for cand in candidates {
+        let public = [
+            "/sdcard/Download/decompiled.lua",
+            "/storage/emulated/0/Download/decompiled.lua",
+            "/storage/emulated/0/Documents/decompiled.lua",
+        ];
+
+        for cand in app_private.into_iter().chain(public.into_iter()) {
+            if let Some(parent) = std::path::Path::new(cand).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             match std::fs::write(cand, &self.output) {
                 Ok(()) => {
                     self.status = format!("Saved to: {cand}");
                     self.status_is_error = false;
+                    crate::android::toast("Saved ✓");
                     return;
                 }
-                Err(_) => continue,
+                Err(e) => {
+                    log::warn!("save failed {cand}: {e}");
+                    continue;
+                }
             }
         }
         // Fallback: temp dir
@@ -493,10 +539,12 @@ impl TopazApp {
             Ok(()) => {
                 self.status = format!("Saved to temp: {}", p.display());
                 self.status_is_error = false;
+                crate::android::toast("Saved to cache");
             }
             Err(e) => {
-                self.status = format!("Failed to save on Android: {e}");
+                self.status = format!("Failed to save on Android: {e} — grant Files permission in Settings");
                 self.status_is_error = true;
+                crate::android::toast("Save failed — check permissions");
             }
         }
     }
@@ -508,6 +556,26 @@ impl TopazApp {
             .map(|s| s.clone())
             .unwrap_or(ServerState::Stopped)
     }
+
+    // Unified clipboard copy that works on desktop + Android
+    fn copy_text_system(&self, text: &str, ctx: &egui::Context) -> String {
+        #[cfg(target_os = "android")]
+        {
+            if crate::android::copy_to_clipboard(text) {
+                crate::android::toast("Copied ✓");
+                return "Copied to system clipboard.".into();
+            } else {
+                // fallback to egui internal
+                ctx.copy_text(text.to_owned());
+                return "Copied to in-app clipboard (system failed — see logcat).".into();
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            ctx.copy_text(text.to_owned());
+            "Copied to clipboard.".into()
+        }
+    }
 }
 
 impl eframe::App for TopazApp {
@@ -518,6 +586,9 @@ impl eframe::App for TopazApp {
         }
 
         self.poll_decompile();
+
+        // Android: pump system clipboard into egui if user pasted externally?
+        // eframe doesn't do this automatically – we do manual paste buttons instead.
 
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(6.0);
@@ -540,6 +611,33 @@ impl eframe::App for TopazApp {
             });
             ui.add_space(4.0);
         });
+
+        // Android permission banner
+        #[cfg(target_os = "android")]
+        if !self.permission_banner_dismissed {
+            let perm = crate::android::permission_status();
+            let needs_perm = !(perm.storage_granted || perm.media_images || perm.media_video || perm.media_audio);
+            let first_check = perm.checked_at.is_none();
+            if needs_perm || first_check {
+                egui::TopBottomPanel::top("perm_banner").show(ctx, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(egui::Color32::from_rgb(255, 200, 90), "⚠ Files permission needed");
+                        ui.label(perm.last_message.clone());
+                        if ui.button("Grant").clicked() {
+                            crate::android::request_storage_permissions_async();
+                        }
+                        if ui.button("Open Settings").clicked() {
+                            crate::android::open_app_settings();
+                        }
+                        if ui.small_button("✕").clicked() {
+                            self.permission_banner_dismissed = true;
+                        }
+                    });
+                    ui.add_space(4.0);
+                });
+            }
+        }
 
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.add_space(2.0);
@@ -569,6 +667,40 @@ impl eframe::App for TopazApp {
             Tab::Settings => self.show_settings_tab(ui),
         });
 
+        // Android file browser modal
+        #[cfg(target_os = "android")]
+        if self.file_browser_open {
+            let mut open = self.file_browser_open;
+            egui::Window::new("📂 Open bytecode file")
+                .open(&mut open)
+                .resizable(true)
+                .default_width(520.0)
+                .default_height(520.0)
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    if let Some(picked) = self.file_browser.ui(ui) {
+                        self.load_file(picked);
+                        self.file_browser_open = false;
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Use this folder's path").clicked() {
+                            self.android_manual_path = self.file_browser.current_path().display().to_string();
+                        }
+                        if ui.button("SAF system picker…").clicked() {
+                            crate::android::launch_saf_open_document("*/*");
+                            crate::android::toast("System picker opened — pick file then return");
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Close").clicked() {
+                                self.file_browser_open = false;
+                            }
+                        });
+                    });
+                });
+            self.file_browser_open = open;
+        }
+
         if self.current_server_state().is_transitional() || self.is_decompiling() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
@@ -577,7 +709,7 @@ impl eframe::App for TopazApp {
 
 impl TopazApp {
     fn show_decompile_tab(&mut self, ui: &mut egui::Ui) {
-        // Android-specific manual path bar on top
+        // Android-specific manual path bar on top — now with Paste + Browse
         #[cfg(target_os = "android")]
         {
             egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -585,13 +717,37 @@ impl TopazApp {
                     ui.label("Path:");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.android_manual_path)
-                            .desired_width(260.0)
+                            .desired_width(ui.available_width() - 260.0)
                             .hint_text("/sdcard/Download/file.luac"),
                     );
+                    if ui.button("📋 Paste").clicked() {
+                        if let Some(t) = crate::android::paste_from_clipboard() {
+                            self.android_manual_path = t;
+                            self.status = "Pasted from clipboard".into();
+                            self.status_is_error = false;
+                        } else {
+                            self.status = "Clipboard empty or permission denied".into();
+                            self.status_is_error = true;
+                        }
+                    }
+                    if ui.button("📂 Browse…").clicked() {
+                        self.file_browser_open = true;
+                    }
                     if ui.button("Load File").clicked() {
                         self.load_from_manual_path();
                     }
-                    ui.label(egui::RichText::new("Use /sdcard/Download/").weak());
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.weak("Tip: put .luac in /sdcard/Download, then Browse → tap file.");
+                    if ui.small_button("Fix permissions").clicked() {
+                        crate::android::request_storage_permissions_async();
+                    }
+                    let perm = crate::android::permission_status();
+                    let ok = perm.storage_granted || perm.media_images;
+                    ui.colored_label(
+                        if ok { egui::Color32::from_rgb(90, 200, 120) } else { egui::Color32::from_rgb(220, 160, 60) },
+                        if ok { "✓ storage OK" } else { "⚠ no storage perm" }
+                    );
                 });
             });
             ui.add_space(4.0);
@@ -666,12 +822,21 @@ impl TopazApp {
                     self.save_output();
                 }
                 if ui
-                    .add_enabled(!self.output.is_empty(), egui::Button::new("Copy"))
+                    .add_enabled(!self.output.is_empty(), egui::Button::new("📋 Copy"))
                     .clicked()
                 {
-                    ui.ctx().copy_text(self.output.clone());
-                    self.status = "Copied to clipboard.".into();
+                    let msg = self.copy_text_system(&self.output, ui.ctx());
+                    self.status = msg;
                     self.status_is_error = false;
+                }
+                #[cfg(target_os = "android")]
+                if ui
+                    .add_enabled(!self.output.is_empty(), egui::Button::new("📤 Share…"))
+                    .clicked()
+                {
+                    // quick share via clipboard + toast, real ACTION_SEND could be added
+                    let _ = self.copy_text_system(&self.output, ui.ctx());
+                    crate::android::toast("Output copied — paste into any app to share");
                 }
             });
         });
@@ -684,6 +849,12 @@ impl TopazApp {
                 ui.monospace(path.display().to_string());
                 if let Some(bytes) = &self.bytecode {
                     ui.weak(format!("· {} bytes", bytes.len()));
+                }
+                #[cfg(target_os = "android")]
+                if ui.small_button("📋 copy path").clicked() {
+                    let p = path.display().to_string();
+                    self.status = self.copy_text_system(&p, ui.ctx());
+                    self.status_is_error = false;
                 }
             });
             ui.add_space(4.0);
@@ -783,6 +954,12 @@ impl TopazApp {
                     .desired_width(220.0)
                     .hint_text("filter lines…"),
             );
+            #[cfg(target_os = "android")]
+            if ui.small_button("📋 Paste").clicked() {
+                if let Some(t) = crate::android::paste_from_clipboard() {
+                    self.search_query = t;
+                }
+            }
             ui.add_space(6.0);
             ui.checkbox(&mut self.search_case_sensitive, "Aa")
                 .on_hover_text("Case-sensitive search");
@@ -875,6 +1052,12 @@ impl TopazApp {
                     .desired_width(110.0)
                     .hint_text("0x… or decimal"),
             );
+            #[cfg(target_os = "android")]
+            if ui.small_button("📋").clicked() {
+                if let Some(t) = crate::android::paste_from_clipboard() {
+                    self.hex_jump_text = t;
+                }
+            }
             let go = (resp.lost_focus()
                 && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                 || ui.small_button("Go").clicked();
@@ -949,7 +1132,7 @@ impl TopazApp {
             #[cfg(target_os = "android")]
             {
                 ui.add_space(4.0);
-                ui.weak("Android: UI scales for touch, file access via /sdcard/Download/");
+                ui.weak("Android: touch-optimized, system clipboard enabled, in-app file browser.");
             }
         });
 
@@ -982,12 +1165,37 @@ impl TopazApp {
 
         ui.add_space(8.0);
 
+        #[cfg(target_os = "android")]
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.label(egui::RichText::new("Android permissions").strong());
+            ui.add_space(4.0);
+            let p = crate::android::permission_status();
+            ui.monospace(format!(
+                "READ_EXTERNAL_STORAGE: {}\nREAD_MEDIA_IMAGES: {}\nREAD_MEDIA_VIDEO: {}\nREAD_MEDIA_AUDIO: {}\nMANAGE_EXTERNAL: {}",
+                p.storage_granted, p.media_images, p.media_video, p.media_audio, p.manage_external
+            ));
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("Request again").clicked() {
+                    crate::android::request_storage_permissions_async();
+                }
+                if ui.button("Open App Settings").clicked() {
+                    crate::android::open_app_settings();
+                }
+            });
+            ui.weak(&p.last_message);
+            ui.add_space(4.0);
+            ui.weak("Android 13+: grant Photos/Videos/Audio. Android 10-12: Files and media. If still denied: Settings → Apps → Topaz → Permissions → Files → Allow.");
+        });
+
+        ui.add_space(8.0);
+
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.label(egui::RichText::new("About").strong());
             ui.add_space(4.0);
             ui.label("Topaz · Luau and Lua 5.1 decompiler");
             #[cfg(target_os = "android")]
-            ui.label("Android build · pure Rust · eframe + NativeActivity");
+            ui.label("Android build · pure Rust · eframe + NativeActivity · system clipboard + SAF browser");
             #[cfg(not(target_os = "android"))]
             ui.label("Desktop build");
         });
@@ -1246,6 +1454,12 @@ fn endpoint_row(ui: &mut egui::Ui, method: &str, url: &str, hint: &str) {
         ui.colored_label(method_color, egui::RichText::new(method).strong().monospace());
         ui.monospace(url);
         if ui.small_button("Copy").clicked() {
+            #[cfg(target_os = "android")]
+            {
+                crate::android::copy_to_clipboard(url);
+                crate::android::toast("Copied URL");
+            }
+            #[cfg(not(target_os = "android"))]
             ui.ctx().copy_text(url.to_string());
         }
         ui.weak(hint);
