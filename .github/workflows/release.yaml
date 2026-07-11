@@ -263,7 +263,7 @@ jobs:
 
       - name: Build APK
         run: |
-          x build --platform android --arch arm
+          x build --platform android --arch armv7
           find target -name "*.apk" -type f | head -n 20
 
       - name: Rename and collect APK
