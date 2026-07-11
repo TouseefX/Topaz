@@ -263,11 +263,17 @@ impl TopazApp {
 
     #[cfg(target_os = "android")]
     fn pick_file(&mut self) {
-        // Open the in-app file browser instead of the old manual-only flow
+        if !crate::android::direct_file_access_granted() {
+            self.status = "Enable All files access, then press Open File again.".into();
+            self.status_is_error = true;
+            crate::android::request_storage_permissions_async();
+            return;
+        }
+
+        self.file_browser.refresh();
         self.file_browser_open = true;
-        self.status = "Opening Android file browser… grant Storage permission if prompted.".to_string();
+        self.status = "Opening Android file browser…".to_string();
         self.status_is_error = false;
-        crate::android::request_storage_permissions_async();
     }
 
     fn load_lua51_sample(&mut self) {
@@ -493,22 +499,25 @@ impl TopazApp {
             self.status_is_error = true;
             return;
         }
-        // Make sure we have permission before writing
-        crate::android::request_storage_permissions_async();
+        if !crate::android::direct_file_access_granted() {
+            self.status = "Enable All files access, then press Save Output again.".into();
+            self.status_is_error = true;
+            crate::android::open_app_settings();
+            return;
+        }
 
-        // Try app-private first (always writable), then public Downloads
-        let app_private = [
-            "/data/data/com.exec.topaz/files/decompiled.lua",
-            // some OEMs use com.touseefx.topaz – try that too
-            "/data/data/com.touseefx.topaz/files/decompiled.lua",
-        ];
+        // Prefer a user-visible location. The old code tried /data/data first,
+        // so it always succeeded there and never attempted Downloads.
         let public = [
             "/sdcard/Download/decompiled.lua",
             "/storage/emulated/0/Download/decompiled.lua",
             "/storage/emulated/0/Documents/decompiled.lua",
         ];
+        let app_private = [
+            "/data/data/com.exec.topaz/files/decompiled.lua",
+        ];
 
-        for cand in app_private.into_iter().chain(public.into_iter()) {
+        for cand in public.into_iter().chain(app_private.into_iter()) {
             if let Some(parent) = std::path::Path::new(cand).parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -555,7 +564,6 @@ impl TopazApp {
         #[cfg(target_os = "android")]
         {
             if crate::android::copy_to_clipboard(text) {
-                crate::android::toast("Copied ✓");
                 return "Copied to system clipboard.".into();
             } else {
                 // fallback to egui internal
@@ -609,7 +617,7 @@ impl eframe::App for TopazApp {
         #[cfg(target_os = "android")]
         if !self.permission_banner_dismissed {
             let perm = crate::android::permission_status();
-            let needs_perm = !(perm.storage_granted || perm.media_images || perm.media_video || perm.media_audio);
+            let needs_perm = !(perm.manage_external || perm.storage_granted || perm.media_images || perm.media_video || perm.media_audio);
             let first_check = perm.checked_at.is_none();
             if needs_perm || first_check {
                 egui::TopBottomPanel::top("perm_banner").show(ctx, |ui| {
@@ -680,10 +688,13 @@ impl eframe::App for TopazApp {
                         if ui.button("Use this folder's path").clicked() {
                             self.android_manual_path = self.file_browser.current_path().display().to_string();
                         }
-                        if ui.button("SAF system picker…").clicked() {
-                            crate::android::launch_saf_open_document("*/*");
-                            crate::android::toast("System picker opened — pick file then return");
-                        }
+                        ui.add_enabled(
+                            false,
+                            egui::Button::new("System picker requires Activity callback"),
+                        )
+                        .on_disabled_hover_text(
+                            "NativeActivity cannot receive the selected content URI yet; use this browser with All files access.",
+                        );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("Close").clicked() {
                                 self.file_browser_open = false;
@@ -724,7 +735,7 @@ impl TopazApp {
                         }
                     }
                     if ui.button("📂 Browse…").clicked() {
-                        self.file_browser_open = true;
+                        self.pick_file();
                     }
                     if ui.button("Load File").clicked() {
                         self.load_from_manual_path();
@@ -736,7 +747,7 @@ impl TopazApp {
                         crate::android::request_storage_permissions_async();
                     }
                     let perm = crate::android::permission_status();
-                    let ok = perm.storage_granted || perm.media_images;
+                    let ok = perm.manage_external || perm.storage_granted || perm.media_images;
                     ui.colored_label(
                         if ok { egui::Color32::from_rgb(90, 200, 120) } else { egui::Color32::from_rgb(220, 160, 60) },
                         if ok { "✓ storage OK" } else { "⚠ no storage perm" }
@@ -827,9 +838,13 @@ impl TopazApp {
                     .add_enabled(!self.output.is_empty(), egui::Button::new("📤 Share…"))
                     .clicked()
                 {
-                    // quick share via clipboard + toast, real ACTION_SEND could be added
-                    let _ = self.copy_text_system(&self.output, ui.ctx());
-                    crate::android::toast("Output copied — paste into any app to share");
+                    if crate::android::share_text(&self.output) {
+                        self.status = "Opened Android share sheet.".into();
+                        self.status_is_error = false;
+                    } else {
+                        self.status = "Could not open Android share sheet.".into();
+                        self.status_is_error = true;
+                    }
                 }
             });
         });
@@ -1174,13 +1189,13 @@ impl TopazApp {
                 if ui.button("Request again").clicked() {
                     crate::android::request_storage_permissions_async();
                 }
-                if ui.button("Open App Settings").clicked() {
+                if ui.button("Open All-files Settings").clicked() {
                     crate::android::open_app_settings();
                 }
             });
             ui.weak(&p.last_message);
             ui.add_space(4.0);
-            ui.weak("Android 13+: grant Photos/Videos/Audio. Android 10-12: Files and media. If still denied: Settings → Apps → Topaz → Permissions → Files → Allow.");
+            ui.weak("Android 11+: direct-path mode needs Special app access → All files access. Photo/video/audio permissions do not cover Lua or bytecode files.");
         });
 
         ui.add_space(8.0);

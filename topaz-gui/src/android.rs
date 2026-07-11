@@ -1,12 +1,11 @@
 // Android-specific utilities for Topaz
-// - system clipboard (android_clipboard)
+// - system clipboard (direct JNI)
 // - runtime storage permissions (android-permissions)
 // - in-app file browser
 // - SAF file picker fallback
 #![cfg(target_os = "android")]
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -29,40 +28,151 @@ pub fn android_app() -> Option<AndroidApp> {
 // Clipboard
 // --------------------------------------------------------------------
 
-pub fn copy_to_clipboard(text: &str) -> bool {
-    #[cfg(target_os = "android")]
-    {
-        match android_clipboard::set_text(text.to_string()) {
-            Ok(()) => {
-                info!("Copied {} bytes to Android clipboard", text.len());
-                true
-            }
-            Err(e) => {
-                error!("android_clipboard set_text failed: {e:?}");
-                false
-            }
-        }
+fn clear_pending_java_exception(env: &mut jni::JNIEnv<'_>) {
+    if matches!(env.exception_check(), Ok(true)) {
+        // A pending Java exception must not escape back through NativeActivity;
+        // doing so aborts the process with SIGABRT.
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
     }
-    #[cfg(not(target_os = "android"))]
-    {
-        let _ = text;
-        false
+}
+
+pub fn copy_to_clipboard(text: &str) -> bool {
+    use jni::objects::{JObject, JValue};
+
+    let ctx = ndk_context::android_context();
+    let Ok(vm) = (unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }) else {
+        return false;
+    };
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return false;
+    };
+    let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
+
+    let result = (|| -> anyhow::Result<()> {
+        let service = env.new_string("clipboard")?;
+        let manager = env
+            .call_method(
+                &activity,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&service)],
+            )?
+            .l()?;
+        if manager.is_null() {
+            anyhow::bail!("ClipboardManager is unavailable");
+        }
+
+        let label = env.new_string("Topaz")?;
+        let value = env.new_string(text)?;
+        let clip = env
+            .call_static_method(
+                "android/content/ClipData",
+                "newPlainText",
+                "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;",
+                &[JValue::Object(&label), JValue::Object(&value)],
+            )?
+            .l()?;
+        env.call_method(
+            manager,
+            "setPrimaryClip",
+            "(Landroid/content/ClipData;)V",
+            &[JValue::Object(&clip)],
+        )?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            info!("Copied {} bytes to Android clipboard", text.len());
+            true
+        }
+        Err(e) => {
+            clear_pending_java_exception(&mut env);
+            error!("Android clipboard copy failed: {e:?}");
+            false
+        }
     }
 }
 
 pub fn paste_from_clipboard() -> Option<String> {
-    #[cfg(target_os = "android")]
-    {
-        match android_clipboard::get_text() {
-            Ok(s) => Some(s),
-            Err(e) => {
-                warn!("clipboard get_text failed: {e:?}");
-                None
-            }
+    use jni::objects::{JObject, JString, JValue};
+
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
+    let mut env = vm.attach_current_thread().ok()?;
+    let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
+
+    let result = (|| -> anyhow::Result<Option<String>> {
+        let service = env.new_string("clipboard")?;
+        let manager = env
+            .call_method(
+                &activity,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&service)],
+            )?
+            .l()?;
+        if manager.is_null()
+            || !env.call_method(&manager, "hasPrimaryClip", "()Z", &[])?.z()?
+        {
+            return Ok(None);
+        }
+
+        let clip = env
+            .call_method(
+                &manager,
+                "getPrimaryClip",
+                "()Landroid/content/ClipData;",
+                &[],
+            )?
+            .l()?;
+        if clip.is_null() || env.call_method(&clip, "getItemCount", "()I", &[])?.i()? == 0 {
+            return Ok(None);
+        }
+
+        let item = env
+            .call_method(
+                &clip,
+                "getItemAt",
+                "(I)Landroid/content/ClipData$Item;",
+                &[JValue::Int(0)],
+            )?
+            .l()?;
+
+        // getText() may legally return null for URI/Intent/rich clipboard
+        // entries. coerceToText() is the Android-supported conversion API.
+        let chars = env
+            .call_method(
+                item,
+                "coerceToText",
+                "(Landroid/content/Context;)Ljava/lang/CharSequence;",
+                &[JValue::Object(&activity)],
+            )?
+            .l()?;
+        if chars.is_null() {
+            return Ok(None);
+        }
+
+        let string_obj = env
+            .call_method(chars, "toString", "()Ljava/lang/String;", &[])?
+            .l()?;
+        if string_obj.is_null() {
+            return Ok(None);
+        }
+        let string = JString::from(string_obj);
+        let value: String = env.get_string(&string)?.into();
+        Ok(Some(value))
+    })();
+
+    match result {
+        Ok(value) => value,
+        Err(e) => {
+            clear_pending_java_exception(&mut env);
+            warn!("Android clipboard paste failed: {e:?}");
+            None
         }
     }
-    #[cfg(not(target_os = "android"))]
-    None
 }
 
 // Small helper to use in egui: copy and return a status string
@@ -77,7 +187,6 @@ pub fn egui_copy(text: &str) -> &'static str {
 // --------------------------------------------------------------------
 // Permissions
 // --------------------------------------------------------------------
-// Uses android-permissions 0.1.2 with android-activity feature
 
 #[derive(Clone, Debug, Default)]
 pub struct PermissionStatus {
@@ -92,150 +201,99 @@ pub struct PermissionStatus {
 
 static PERM_STATUS: OnceLock<std::sync::Mutex<PermissionStatus>> = OnceLock::new();
 
-// android-permissions loads PermissionFragment through a DexClassLoader. Creating a
-// manager for every request creates several distinct Java classes with the same
-// name. Keep one manager/class loader for the process and never overlap requests.
-static PERMISSION_MANAGER: OnceLock<android_permissions::PermissionManager> = OnceLock::new();
-static PERMISSION_REQUEST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-
-fn permission_manager(
-    app: &AndroidApp,
-) -> Result<&'static android_permissions::PermissionManager, android_permissions::Error> {
-    if let Some(manager) = PERMISSION_MANAGER.get() {
-        return Ok(manager);
-    }
-
-    // More than one caller may race here. Both managers can be constructed, but
-    // only the winner is retained and returned, so all requests use one loader.
-    let manager = android_permissions::PermissionManager::create_from_android_app(app)?;
-    let _ = PERMISSION_MANAGER.set(manager);
-    Ok(PERMISSION_MANAGER
-        .get()
-        .expect("permission manager was initialized"))
-}
-
 fn perm_status_lock() -> &'static std::sync::Mutex<PermissionStatus> {
     PERM_STATUS.get_or_init(|| std::sync::Mutex::new(PermissionStatus::default()))
 }
 
 pub fn permission_status() -> PermissionStatus {
-    perm_status_lock().lock().unwrap().clone()
+    let mut status = perm_status_lock().lock().unwrap().clone();
+    if android_sdk_int() >= 30 {
+        status.manage_external = is_manage_external_storage_granted();
+    }
+    status
 }
 
-fn set_permission_status(s: PermissionStatus) {
-    *perm_status_lock().lock().unwrap() = s;
+fn set_permission_status(status: PermissionStatus) {
+    *perm_status_lock().lock().unwrap() = status;
 }
 
-// Call after a user action; repeated calls while a request is active are ignored.
 pub fn request_storage_permissions_async() {
-    let Some(app) = android_app() else {
-        warn!("request_storage_permissions: no AndroidApp yet");
-        return;
-    };
+    let sdk = android_sdk_int();
 
-    if PERMISSION_REQUEST_IN_FLIGHT
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        info!("A storage permission request is already in progress");
+    // Android 11+ uses scoped storage. READ_EXTERNAL_STORAGE and READ_MEDIA_*
+    // cannot grant access to arbitrary .lua/.luac/.bin files. Direct-path mode
+    // needs the special MANAGE_EXTERNAL_STORAGE settings switch instead.
+    if sdk >= 30 {
+        let granted = is_manage_external_storage_granted();
+        set_permission_status(PermissionStatus {
+            checked_at: Some(Instant::now()),
+            manage_external: granted,
+            last_message: if granted {
+                "All-files access is enabled.".into()
+            } else {
+                "Enable “Allow access to manage all files” for direct-path mode.".into()
+            },
+            ..Default::default()
+        });
+        if !granted {
+            open_app_settings();
+        }
         return;
     }
 
-    std::thread::spawn(move || {
-        struct InFlightGuard;
-        impl Drop for InFlightGuard {
-            fn drop(&mut self) {
-                PERMISSION_REQUEST_IN_FLIGHT.store(false, Ordering::Release);
-            }
-        }
-        let _in_flight_guard = InFlightGuard;
+    // Android 6-10 legacy fallback. No callback is required here; Android will
+    // show the dialog and the next file operation can check the result.
+    use jni::objects::{JObject, JValue};
+    let ctx = ndk_context::android_context();
+    let Ok(vm) = (unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }) else {
+        return;
+    };
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return;
+    };
+    let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
 
-        // android-permissions needs a JavaVM + Activity jobject. Reuse the
-        // process-wide manager so PermissionFragment always has one class identity.
-        match permission_manager(&app) {
-            Ok(manager) => {
-                use android_permissions as perm;
-                // Build a version-aware list
-                // API 33+ (Tiramisu): READ_MEDIA_*
-                // API 30-32: READ_EXTERNAL_STORAGE
-                // Always try MANAGE_EXTERNAL_STORAGE for “All files access” on API 30+
-                let to_request = [
-                    &perm::READ_EXTERNAL_STORAGE,
-                    &perm::WRITE_EXTERNAL_STORAGE,
-                    &perm::READ_MEDIA_IMAGES,
-                    &perm::READ_MEDIA_VIDEO,
-                    &perm::READ_MEDIA_AUDIO,
-                ];
+    let result = (|| -> anyhow::Result<()> {
+        let permissions = env.new_object_array(2, "java/lang/String", JObject::null())?;
+        let read = env.new_string("android.permission.READ_EXTERNAL_STORAGE")?;
+        let write = env.new_string("android.permission.WRITE_EXTERNAL_STORAGE")?;
+        env.set_object_array_element(&permissions, 0, read)?;
+        env.set_object_array_element(&permissions, 1, write)?;
+        env.call_method(
+            activity,
+            "requestPermissions",
+            "([Ljava/lang/String;I)V",
+            &[JValue::Object(&permissions), JValue::Int(7310)],
+        )?;
+        Ok(())
+    })();
 
-                let mut status = PermissionStatus {
-                    checked_at: Some(Instant::now()),
-                    last_message: "Requesting…".into(),
-                    ..Default::default()
-                };
+    if let Err(e) = result {
+        clear_pending_java_exception(&mut env);
+        error!("Legacy storage permission request failed: {e:?}");
+    }
+}
 
-                // check first
-                for p in to_request.iter() {
-                    if let Ok(granted) = manager.check(p) {
-                        match p.as_str() {
-                            "android.permission.READ_EXTERNAL_STORAGE" => status.storage_granted |= granted,
-                            "android.permission.READ_MEDIA_IMAGES" => status.media_images = granted,
-                            "android.permission.READ_MEDIA_VIDEO" => status.media_video = granted,
-                            "android.permission.READ_MEDIA_AUDIO" => status.media_audio = granted,
-                            _ => {}
-                        }
-                    }
-                }
+pub fn direct_file_access_granted() -> bool {
+    android_sdk_int() < 30 || is_manage_external_storage_granted()
+}
 
-                // actually request (blocking, shows system dialog)
-                match manager.request(&to_request) {
-                    Ok(grants) => {
-                        let mut msg = String::new();
-                        for (k, v) in &grants {
-                            msg.push_str(&format!("{}: {}  ", k.rsplit('.').next().unwrap_or(k), if *v {"✓"} else {"✗"}));
-                            match k.as_str() {
-                                "android.permission.READ_EXTERNAL_STORAGE" => status.storage_granted = *v,
-                                "android.permission.READ_MEDIA_IMAGES" => status.media_images = *v,
-                                "android.permission.READ_MEDIA_VIDEO" => status.media_video = *v,
-                                "android.permission.READ_MEDIA_AUDIO" => status.media_audio = *v,
-                                _ => {}
-                            }
-                        }
-                        status.last_message = if status.storage_granted || status.media_images || status.media_video || status.media_audio {
-                            format!("Permissions OK — {msg}")
-                        } else {
-                            format!("Permissions denied — {msg} — use Settings → Apps → Topaz → Permissions → Allow Files")
-                        };
-                        info!("{}", status.last_message);
-                    }
-                    Err(e) => {
-                        error!("permission request failed: {e}");
-                        status.last_message = format!("Permission request error: {e}");
-                    }
-                }
-
-                // Try to detect MANAGE_EXTERNAL_STORAGE via AppOps (best-effort)
-                status.manage_external = is_manage_external_storage_granted();
-
-                status.checked_at = Some(Instant::now());
-                set_permission_status(status);
-            }
-            Err(e) => {
-                error!("PermissionManager initialization failed: {e:?}");
-                set_permission_status(PermissionStatus{
-                    checked_at: Some(Instant::now()),
-                    last_message: format!("Permission manager init failed: {e}"),
-                    ..Default::default()
-                });
-            }
-        }
-    });
+fn android_sdk_int() -> i32 {
+    (|| -> anyhow::Result<i32> {
+        let ctx = ndk_context::android_context();
+        let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }?;
+        let mut env = vm.attach_current_thread()?;
+        Ok(env
+            .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")?
+            .i()?)
+    })()
+    .unwrap_or(0)
 }
 
 // Best-effort check for MANAGE_EXTERNAL_STORAGE via Environment.isExternalStorageManager()
 fn is_manage_external_storage_granted() -> bool {
     // Do a tiny JNI call – if anything fails, return false
     (|| -> anyhow::Result<bool> {
-        use jni::objects::JObject;
         let ctx = ndk_context::android_context();
         let vm = unsafe { jni::JavaVM::from_raw(ctx.vm() as *mut _) }?;
         let mut env = vm.attach_current_thread()?;
@@ -256,56 +314,55 @@ fn is_manage_external_storage_granted() -> bool {
 }
 
 pub fn open_app_settings() {
-    // Launch ACTION_APPLICATION_DETAILS_SETTINGS
-    let Some(_app) = android_app() else { return };
-    (|| -> anyhow::Result<()> {
-        use jni::objects::{JObject, JString, JValue};
-        let ctx = ndk_context::android_context();
-        let vm = unsafe { jni::JavaVM::from_raw(ctx.vm() as *mut _) }?;
-        let mut env = vm.attach_current_thread()?;
-        let activity = unsafe { JObject::from_raw(ctx.context() as *mut _) };
+    // Android 11+: open the app-specific "Manage all files" special-access
+    // screen. This is not part of the normal runtime permission dialog.
+    use jni::objects::{JObject, JValue};
 
-        let intent_class = env.find_class("android/content/Intent")?;
-        let action_settings = env.new_string("android.settings.APPLICATION_DETAILS_SETTINGS")?;
+    let ctx = ndk_context::android_context();
+    let Ok(vm) = (unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }) else {
+        return;
+    };
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return;
+    };
+    let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
+
+    let result = (|| -> anyhow::Result<()> {
+        let action = env.new_string("android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION")?;
         let intent = env.new_object(
-            intent_class,
+            "android/content/Intent",
             "(Ljava/lang/String;)V",
-            &[(&action_settings).into()],
+            &[JValue::Object(&action)],
         )?;
 
-        // Uri.parse("package:com.exec.topaz")
-        let uri_class = env.find_class("android/net/Uri")?;
-        let pkg_str = env.new_string("package:com.exec.topaz")?;
-        let uri = env.call_static_method(
-            uri_class,
-            "parse",
-            "(Ljava/lang/String;)Landroid/net/Uri;",
-            &[(&pkg_str).into()],
-        )?.l()?;
-
+        let package = env.new_string("package:com.exec.topaz")?;
+        let uri = env
+            .call_static_method(
+                "android/net/Uri",
+                "parse",
+                "(Ljava/lang/String;)Landroid/net/Uri;",
+                &[JValue::Object(&package)],
+            )?
+            .l()?;
         env.call_method(
             &intent,
             "setData",
             "(Landroid/net/Uri;)Landroid/content/Intent;",
-            &[(&uri).into()],
+            &[JValue::Object(&uri)],
         )?;
-
-        // FLAG_ACTIVITY_NEW_TASK
-        env.call_method(
-            &intent,
-            "addFlags",
-            "(I)Landroid/content/Intent;",
-            &[JValue::Int(0x10000000)],
-        )?;
-
         env.call_method(
             activity,
             "startActivity",
             "(Landroid/content/Intent;)V",
-            &[(&intent).into()],
+            &[JValue::Object(&intent)],
         )?;
         Ok(())
-    })().map_err(|e| error!("open_app_settings failed: {e:?}")).ok();
+    })();
+
+    if let Err(e) = result {
+        clear_pending_java_exception(&mut env);
+        error!("open_app_settings failed: {e:?}");
+    }
 }
 
 // --------------------------------------------------------------------
@@ -488,49 +545,126 @@ impl FileBrowser {
 // User must manually copy file path back — so we primarily rely on FileBrowser.
 // --------------------------------------------------------------------
 pub fn launch_saf_open_document(mime: &str) {
-    let Some(_app) = android_app() else { return };
-    (|| -> anyhow::Result<()> {
-        use jni::objects::{JObject, JValue};
-        let ctx = ndk_context::android_context();
-        let vm = unsafe { jni::JavaVM::from_raw(ctx.vm() as *mut _) }?;
-        let mut env = vm.attach_current_thread()?;
-        let activity = unsafe { JObject::from_raw(ctx.context() as *mut _) };
+    use jni::objects::{JObject, JValue};
 
-        // Intent(Intent.ACTION_OPEN_DOCUMENT)
-        let intent_class = env.find_class("android/content/Intent")?;
+    let ctx = ndk_context::android_context();
+    let Ok(vm) = (unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }) else {
+        return;
+    };
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return;
+    };
+    let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
+
+    let result = (|| -> anyhow::Result<()> {
         let action = env.new_string("android.intent.action.OPEN_DOCUMENT")?;
-        let intent = env.new_object(intent_class, "(Ljava/lang/String;)V", &[(&action).into()])?;
+        let intent = env.new_object(
+            "android/content/Intent",
+            "(Ljava/lang/String;)V",
+            &[JValue::Object(&action)],
+        )?;
+        let mime = env.new_string(mime)?;
+        env.call_method(
+            &intent,
+            "setType",
+            "(Ljava/lang/String;)Landroid/content/Intent;",
+            &[JValue::Object(&mime)],
+        )?;
+        let category = env.new_string("android.intent.category.OPENABLE")?;
+        env.call_method(
+            &intent,
+            "addCategory",
+            "(Ljava/lang/String;)Landroid/content/Intent;",
+            &[JValue::Object(&category)],
+        )?;
 
-        // intent.setType(mime)
-        let mime_s = env.new_string(mime)?;
-        env.call_method(&intent, "setType", "(Ljava/lang/String;)Landroid/content/Intent;", &[(&mime_s).into()])?;
-        // addCategory OPENABLE
-        let cat = env.new_string("android.intent.category.OPENABLE")?;
-        env.call_method(&intent, "addCategory", "(Ljava/lang/String;)Landroid/content/Intent;", &[(&cat).into()])?;
-
-        // startActivityForResult is deprecated, use startActivity
-        env.call_method(activity, "startActivity", "(Landroid/content/Intent;)V", &[(&intent).into()])?;
+        // This only opens the picker. Receiving its content:// result requires
+        // an Activity callback and is intentionally not claimed as a loaded file.
+        env.call_method(
+            activity,
+            "startActivity",
+            "(Landroid/content/Intent;)V",
+            &[JValue::Object(&intent)],
+        )?;
         Ok(())
-    })().map_err(|e| warn!("launch_saf_open_document failed: {e:?}")).ok();
+    })();
+
+    if let Err(e) = result {
+        clear_pending_java_exception(&mut env);
+        warn!("launch_saf_open_document failed: {e:?}");
+    }
 }
 
-// Toast helper
-pub fn toast(msg: &str) {
-    (|| -> anyhow::Result<()> {
-        use jni::objects::{JObject, JValue};
-        let ctx = ndk_context::android_context();
-        let vm = unsafe { jni::JavaVM::from_raw(ctx.vm() as *mut _) }?;
-        let mut env = vm.attach_current_thread()?;
-        let activity = unsafe { JObject::from_raw(ctx.context() as *mut _) };
-        let text = env.new_string(msg)?;
-        let toast_class = env.find_class("android/widget/Toast")?;
-        let toast_obj = env.call_static_method(
-            toast_class,
-            "makeText",
-            "(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;",
-            &[(&activity).into(), (&text).into(), JValue::Int(0)],
-        )?.l()?;
-        env.call_method(toast_obj, "show", "()V", &[])?;
+pub fn share_text(text: &str) -> bool {
+    use jni::objects::{JObject, JValue};
+
+    let ctx = ndk_context::android_context();
+    let Ok(vm) = (unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }) else {
+        return false;
+    };
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return false;
+    };
+    let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
+
+    let result = (|| -> anyhow::Result<()> {
+        let action = env.new_string("android.intent.action.SEND")?;
+        let send = env.new_object(
+            "android/content/Intent",
+            "(Ljava/lang/String;)V",
+            &[JValue::Object(&action)],
+        )?;
+
+        let mime = env.new_string("text/plain")?;
+        env.call_method(
+            &send,
+            "setType",
+            "(Ljava/lang/String;)Landroid/content/Intent;",
+            &[JValue::Object(&mime)],
+        )?;
+
+        let extra_text = env.new_string("android.intent.extra.TEXT")?;
+        let value = env.new_string(text)?;
+        env.call_method(
+            &send,
+            "putExtra",
+            "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
+            &[JValue::Object(&extra_text), JValue::Object(&value)],
+        )?;
+
+        let title = env.new_string("Share decompiled output")?;
+        let chooser = env
+            .call_static_method(
+                "android/content/Intent",
+                "createChooser",
+                "(Landroid/content/Intent;Ljava/lang/CharSequence;)Landroid/content/Intent;",
+                &[JValue::Object(&send), JValue::Object(&title)],
+            )?
+            .l()?;
+
+        env.call_method(
+            activity,
+            "startActivity",
+            "(Landroid/content/Intent;)V",
+            &[JValue::Object(&chooser)],
+        )?;
         Ok(())
-    })().map_err(|e| warn!("toast failed: {e:?}")).ok();
+    })();
+
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            clear_pending_java_exception(&mut env);
+            error!("Android share failed: {e:?}");
+            false
+        }
+    }
+}
+
+// Toast.makeText() was previously called from android_main, which is not the
+// Java UI/Looper thread. Some Android versions abort the native process in that
+// situation. Keep UI feedback in the egui status bar until a Java UI-thread
+// bridge is added.
+pub fn toast(msg: &str) {
+    info!("Topaz notification: {msg}");
 }

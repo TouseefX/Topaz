@@ -29,8 +29,6 @@ winit = { version = "0.30", features = ["android-native-activity"] }
 eframe = { version = "0.31", features = ["android-native-activity"] }
 log = "0.4"
 # --- Android enhancements ---
-android_clipboard = "0.1"
-android-permissions = { version = "0.1.2", features = ["android-activity", "async"] }
 jni = "0.21"
 ndk-context = "0.1"
 anyhow = "1.0"
