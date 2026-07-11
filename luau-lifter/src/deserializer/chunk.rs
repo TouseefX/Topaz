@@ -117,7 +117,38 @@ impl Chunk {
         offset += advance;
         let mut functions = Vec::with_capacity(function_count as usize);
         for _ in 0..function_count {
-            let f = Function::parse(data, &mut offset, encode_key, &string_table)?;
+            // Version 12+ prefixes each proto with a size varint so loaders
+            // can skip unknown trailing fields. Consume it and pass the
+            // remaining budget into Function::parse.
+            let proto_size_limit = if version >= 12 {
+                let (proto_size, adv) = read_leb128_u32(data, offset).map_err(|e| {
+                    ParseError {
+                        message: format!("proto size: {e}"),
+                        position: start,
+                    }
+                })?;
+                offset += adv;
+                Some(proto_size as usize)
+            } else {
+                None
+            };
+            let proto_start = offset;
+            let f = Function::parse(data, &mut offset, encode_key, &string_table, version)?;
+            if let Some(proto_size) = proto_size_limit {
+                // Skip any unknown trailing bytes the current parser
+                // doesn't understand (cost model, future fields, …).
+                let consumed = offset.saturating_sub(proto_start);
+                if consumed > proto_size {
+                    return Err(ParseError {
+                        message: format!(
+                            "proto overran declared size: consumed {} > size {}",
+                            consumed, proto_size
+                        ),
+                        position: proto_start,
+                    });
+                }
+                offset = proto_start + proto_size;
+            }
             functions.push(f);
         }
 

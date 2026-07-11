@@ -4,7 +4,7 @@ use crate::{instruction::*, op_code::OpCode};
 
 use super::{
     constant::Constant,
-    leb128::read_leb128_u32,
+    leb128::{read_leb128_u32, read_leb128_u64},
 };
 
 // Constants from upstream Luau (LBC_* enum values).
@@ -166,11 +166,14 @@ impl Function {
     /// Parse a single function's body from `data` at `offset`.
     /// `strings` is the chunk-level string table used to resolve
     /// `LBC_CONSTANT_STRING` indices back to the underlying bytes.
+    /// `version` is the chunk bytecode version (needed for version-
+    /// gated trailing sections such as the feedback vector).
     pub(crate) fn parse(
         data: &[u8],
         offset: &mut usize,
         encode_key: u8,
-        strings: &[Vec<u8>],
+        _strings: &[Vec<u8>],
+        version: u8,
     ) -> Result<Self, ParseError> {
         let start = *offset;
 
@@ -190,102 +193,114 @@ impl Function {
             }};
         }
 
-        // -- 5-byte header --
-        need!(5);
+        // -- Header --
+        // Layout (lvmload.cpp):
+        //   u8 maxstacksize
+        //   u8 numparams
+        //   u8 nups
+        //   u8 is_vararg
+        //   u8 flags            (only if version >= 4)
+        //   typeinfo section    (only if version >= 4)
+        need!(4);
         let max_stack_size = data[*offset];
         let num_parameters = data[*offset + 1];
         let num_upvalues = data[*offset + 2];
         let is_vararg = data[*offset + 3] != 0;
-        let _flags = data[*offset + 4];
-        *offset += 5;
+        *offset += 4;
 
-        // -- Type info section --
-        // Per upstream `BytecodeBuilder::writeFunction`, the format
-        // is:
-        //
-        //   varint(typesize)               -- total size of inner block
-        //                                    (== 0 ⇒ no typeinfo)
-        //   <typesize bytes of inner>      -- opaque blob
-        //
-        // The VM in `lvmload.cpp` just `memcpy`s the whole inner
-        // blob into the proto, so the upstream reader doesn't care
-        // about its contents.
-        //
-        // In practice, the writer in luau-compile 0.728 (the build
-        // we test against) produces an inner block whose internal
-        // structure doesn't always match the documented format
-        // (which would be 3 varints + data). The `typesize` varint
-        // may be 0, or it may be a small number that doesn't
-        // account for the full inner block. We try the modern
-        // "skip typesize bytes" interpretation first; if it
-        // doesn't produce a plausible rest of the function, we
-        // fall back to a brute-force search of skip amounts (0 to
-        // 32 bytes) and pick the one where the resulting
-        // codesize + sizek are both plausible.
-        let (types_size, advance) = read_leb128_u32(data, *offset)
-            .map_err(|e| ParseError { message: format!("types_size: {e}"), position: start })?;
-        *offset += advance;
-        if types_size > 0 {
-            let after_varint = *offset;
-            let modern_end = after_varint + types_size as usize;
-            // Check if the modern interpretation produces a
-            // plausible rest of the function.
-            let modern_ok = if modern_end > data.len() {
-                false
-            } else if let Ok((cs, csadv)) = read_leb128_u32(data, modern_end) {
-                if (1..=10000).contains(&cs) {
-                    let insns_end = modern_end + csadv + (cs as usize) * 4;
-                    insns_end <= data.len()
-                        && read_leb128_u32(data, insns_end)
-                            .map(|(sk, _)| sk <= 100)
-                            .unwrap_or(false)
+        if version >= 4 {
+            need!(1);
+            let _flags = data[*offset];
+            *offset += 1;
+
+            // -- Type info section --
+            // Per upstream `BytecodeBuilder::writeFunction`, the format
+            // is:
+            //
+            //   varint(typesize)               -- total size of inner block
+            //                                    (== 0 ⇒ no typeinfo)
+            //   <typesize bytes of inner>      -- opaque blob
+            //
+            // The VM in `lvmload.cpp` just `memcpy`s the whole inner
+            // blob into the proto, so the upstream reader doesn't care
+            // about its contents.
+            //
+            // In practice, the writer in luau-compile 0.728 (the build
+            // we test against) produces an inner block whose internal
+            // structure doesn't always match the documented format
+            // (which would be 3 varints + data). The `typesize` varint
+            // may be 0, or it may be a small number that doesn't
+            // account for the full inner block. We try the modern
+            // "skip typesize bytes" interpretation first; if it
+            // doesn't produce a plausible rest of the function, we
+            // fall back to a brute-force search of skip amounts (0 to
+            // 32 bytes) and pick the one where the resulting
+            // codesize + sizek are both plausible.
+            let (types_size, advance) = read_leb128_u32(data, *offset)
+                .map_err(|e| ParseError { message: format!("types_size: {e}"), position: start })?;
+            *offset += advance;
+            if types_size > 0 {
+                let after_varint = *offset;
+                let modern_end = after_varint + types_size as usize;
+                // Check if the modern interpretation produces a
+                // plausible rest of the function.
+                let modern_ok = if modern_end > data.len() {
+                    false
+                } else if let Ok((cs, csadv)) = read_leb128_u32(data, modern_end) {
+                    if (1..=10000).contains(&cs) {
+                        let insns_end = modern_end + csadv + (cs as usize) * 4;
+                        insns_end <= data.len()
+                            && read_leb128_u32(data, insns_end)
+                                .map(|(sk, _)| sk <= 100)
+                                .unwrap_or(false)
+                    } else {
+                        false
+                    }
                 } else {
                     false
-                }
-            } else {
-                false
-            };
-            if modern_ok {
-                *offset = modern_end;
-            } else {
-                // Fall back to brute-force search. Try all
-                // plausible skip amounts and pick the first one
-                // that produces a valid rest of the function
-                // (codesize in 1..=10000, followed by codesize*4
-                // bytes of instructions, followed by a sizek
-                // varint <= 100).
-                let mut best_skip: Option<usize> = None;
-                for skip_delta in 0..=32 {
-                    let candidate_end = after_varint + skip_delta;
-                    if candidate_end > data.len() {
-                        break;
-                    }
-                    if let Ok((cs, csadv)) = read_leb128_u32(data, candidate_end) {
-                        if (1..=10000).contains(&cs) {
-                            let insns_end = candidate_end + csadv + (cs as usize) * 4;
-                            if insns_end <= data.len() {
-                                if let Ok((sk, _)) = read_leb128_u32(data, insns_end) {
-                                    if sk <= 100 {
-                                        best_skip = Some(candidate_end);
-                                        break;
+                };
+                if modern_ok {
+                    *offset = modern_end;
+                } else {
+                    // Fall back to brute-force search. Try all
+                    // plausible skip amounts and pick the first one
+                    // that produces a valid rest of the function
+                    // (codesize in 1..=10000, followed by codesize*4
+                    // bytes of instructions, followed by a sizek
+                    // varint <= 100).
+                    let mut best_skip: Option<usize> = None;
+                    for skip_delta in 0..=32 {
+                        let candidate_end = after_varint + skip_delta;
+                        if candidate_end > data.len() {
+                            break;
+                        }
+                        if let Ok((cs, csadv)) = read_leb128_u32(data, candidate_end) {
+                            if (1..=10000).contains(&cs) {
+                                let insns_end = candidate_end + csadv + (cs as usize) * 4;
+                                if insns_end <= data.len() {
+                                    if let Ok((sk, _)) = read_leb128_u32(data, insns_end) {
+                                        if sk <= 100 {
+                                            best_skip = Some(candidate_end);
+                                            break;
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                    let chosen = best_skip.unwrap_or(modern_end);
+                    if chosen > data.len() {
+                        return Err(ParseError {
+                            message: format!(
+                                "typeinfo section would overflow: end={} > data.len()={}",
+                                chosen,
+                                data.len()
+                            ),
+                            position: start,
+                        });
+                    }
+                    *offset = chosen;
                 }
-                let chosen = best_skip.unwrap_or(modern_end);
-                if chosen > data.len() {
-                    return Err(ParseError {
-                        message: format!(
-                            "typeinfo section would overflow: end={} > data.len()={}",
-                            chosen,
-                            data.len()
-                        ),
-                        position: start,
-                    });
-                }
-                *offset = chosen;
             }
         }
 
@@ -410,45 +425,72 @@ impl Function {
                     constants.push(Constant::Closure(v as usize));
                 }
                 LBC_CONSTANT_INTEGER => {
+                    // Layout (lvmload.cpp / BytecodeBuilder):
+                    //   u8  is_negative
+                    //   varint64 magnitude
+                    // value = is_negative ? (~magnitude + 1) : magnitude
                     need!(1);
                     let is_negative = data[*offset] != 0;
                     *offset += 1;
                     let (magnitude, adv) =
-                        read_leb128_u32(data, *offset).map_err(|e| ParseError {
+                        read_leb128_u64(data, *offset).map_err(|e| ParseError {
                             message: format!("int magnitude: {e}"),
                             position: start,
                         })?;
                     *offset += adv;
                     let v: i64 = if is_negative {
-                        !(magnitude as i64).wrapping_sub(1)
+                        (!magnitude).wrapping_add(1) as i64
                     } else {
                         magnitude as i64
                     };
                     constants.push(Constant::Integer(v));
                 }
                 LBC_CONSTANT_CLASS_SHAPE => {
-                    // Topaz's existing constant parser treats this as
-                    // Nil (it doesn't have a class-shape representation
-                    // in the decompiler output). We need to skip the
-                    // bytes that follow. The format is:
-                    //   varint(num_fields)
-                    //   num_fields × varint(index)
-                    let (nfields, adv) = read_leb128_u32(data, *offset).map_err(|e| {
+                    // Real layout from upstream lvmload.cpp:
+                    //   varint(class_name_const_idx)
+                    //   varint(num_properties)
+                    //   varint(num_methods)
+                    //   (num_properties + num_methods) × varint(member_name_const_idx)
+                    //
+                    // Older Topaz code only read a single field count,
+                    // which desynced the stream so the *next* constant's
+                    // tag byte was actually part of the class-shape
+                    // payload (commonly showing up as "unknown constant
+                    // tag 11" when a feedback-slot type or a small
+                    // varint byte was misread as a tag).
+                    let (_class_name, adv) = read_leb128_u32(data, *offset).map_err(|e| {
                         ParseError {
-                            message: format!("class_shape nfields: {e}"),
+                            message: format!("class_shape class_name: {e}"),
                             position: start,
                         }
                     })?;
                     *offset += adv;
-                    for _ in 0..nfields {
+                    let (nprops, adv) = read_leb128_u32(data, *offset).map_err(|e| {
+                        ParseError {
+                            message: format!("class_shape nprops: {e}"),
+                            position: start,
+                        }
+                    })?;
+                    *offset += adv;
+                    let (nmethods, adv) = read_leb128_u32(data, *offset).map_err(|e| {
+                        ParseError {
+                            message: format!("class_shape nmethods: {e}"),
+                            position: start,
+                        }
+                    })?;
+                    *offset += adv;
+                    let nmembers = (nprops as u64)
+                        .saturating_add(nmethods as u64);
+                    for _ in 0..nmembers {
                         let (_, adv) = read_leb128_u32(data, *offset).map_err(|e| {
                             ParseError {
-                                message: format!("class_shape field: {e}"),
+                                message: format!("class_shape member: {e}"),
                                 position: start,
                             }
                         })?;
                         *offset += adv;
                     }
+                    // No decompiler representation for class shapes yet.
                     constants.push(Constant::Nil);
                 }
                 other => {
@@ -599,6 +641,42 @@ impl Function {
         } else {
             None
         };
+
+        // -- Feedback vector (version >= 11) --
+        // Layout (lvmload.cpp):
+        //   varint(feedbackvecsize)
+        //   feedbackvecsize × (u8 slottype + varint pc)
+        // We only need to consume the bytes so the next proto (or the
+        // main-function index) stays aligned. The decompiler does not
+        // currently use feedback data.
+        if version >= 11 {
+            let (fb_count, advance) = read_leb128_u32(data, *offset).map_err(|e| {
+                ParseError {
+                    message: format!("feedbackvecsize: {e}"),
+                    position: start,
+                }
+            })?;
+            *offset += advance;
+            for _ in 0..fb_count {
+                need!(1);
+                // slottype (LFT_CALLTARGET = 0 today; ignore value)
+                *offset += 1;
+                let (_, adv) = read_leb128_u32(data, *offset).map_err(|e| {
+                    ParseError {
+                        message: format!("feedback slot pc: {e}"),
+                        position: start,
+                    }
+                })?;
+                *offset += adv;
+            }
+        }
+
+        // -- Cost model (version >= 12, only if LPF_INLINABLE) --
+        // Consumed by the version-12 size prefix skip in Chunk::parse
+        // when present; we deliberately do not try to re-derive the
+        // flag bit here because the size prefix already lets us jump
+        // past unknown trailing data.
+
 
         Ok(Function {
             max_stack_size,

@@ -340,12 +340,24 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     }
 
     fn format_closure_body(&mut self, closure: &Closure) -> fmt::Result {
+        // Indentation contract:
+        // - Caller has already written `function (...)` (and any trailing
+        //   comment) at the current indentation level.
+        // - We emit a newline, then the body statements at
+        //   `indentation_level + 1`, then leave the cursor indented at
+        //   the *outer* level so the caller can write `end`.
+        //
+        // Previous code bumped indentation for the upvalue comment, then
+        // dropped it *before* formatting the body. That left multi-line
+        // function bodies (especially nested as table values) printing
+        // their statements at the wrong indent and made the trailing
+        // `end` look detached from the `function(...)` header — exactly
+        // the broken shape in the Welcome-badge screenshot.
         let function = closure.function.lock();
         if !function.body.is_empty() || !closure.upvalues.is_empty() {
             writeln!(self.output)?;
             self.indentation_level += 1;
-            
-            
+
             if !closure.upvalues.is_empty() {
                 self.indent()?;
                 write!(self.output, "-- upvalues: ")?;
@@ -365,12 +377,16 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
                 }
                 writeln!(self.output)?;
             }
-            self.indentation_level -= 1;
 
             if !function.body.is_empty() {
-                self.format_block(&function.body)?;
+                // format_block_no_indent (not format_block) so we don't
+                // bump indentation a second time — we're already one
+                // level deeper than the `function`/`end` keywords.
+                self.format_block_no_indent(&function.body)?;
                 writeln!(self.output)?;
             }
+
+            self.indentation_level -= 1;
             self.indent()
         } else {
             write!(self.output, " ")
@@ -490,6 +506,13 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         Ok(())
     }
     pub(crate) fn is_valid_name(name: &[u8]) -> bool {
+        // Empty strings and strings that don't start with a letter/underscore
+        // cannot be bare identifiers. Emitting ` = nil` for an empty-string
+        // key (is_valid_name returned true for "") was a real bug in table
+        // constructors: the key was dropped and only `= nil` remained.
+        if name.is_empty() {
+            return false;
+        }
         if !(name
             .iter()
             .enumerate()
@@ -497,17 +520,19 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         {
             return false;
         }
-        
+
         const RESERVED_KEYWORDS: &[&str] = &[
             "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
             "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
+            // Luau additions
+            "continue", "export", "type", "typeof",
         ];
 
         let name_str = std::str::from_utf8(name).unwrap_or("");
         if RESERVED_KEYWORDS.contains(&name_str) {
             return false;
         }
-        return true;
+        true
     }
 
     
@@ -836,5 +861,34 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             Statement::Return(r#return) => self.format_return(r#return),
             _ => write!(self.output, "{}", statement),
         }
+    }
+}
+
+
+
+#[cfg(test)]
+mod is_valid_name_tests {
+    use super::Formatter;
+
+    type F<'a> = Formatter<'a, String>;
+
+    #[test]
+    fn empty_string_is_not_a_valid_name() {
+        assert!(!F::is_valid_name(b""));
+    }
+
+    #[test]
+    fn normal_identifiers_are_valid() {
+        assert!(F::is_valid_name(b"Hello"));
+        assert!(F::is_valid_name(b"_x"));
+        assert!(F::is_valid_name(b"a1"));
+    }
+
+    #[test]
+    fn keywords_and_bad_starts_are_invalid() {
+        assert!(!F::is_valid_name(b"end"));
+        assert!(!F::is_valid_name(b"continue"));
+        assert!(!F::is_valid_name(b"1abc"));
+        assert!(!F::is_valid_name(b"P-Rank"));
     }
 }

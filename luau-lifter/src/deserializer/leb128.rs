@@ -35,3 +35,31 @@ pub fn read_leb128_u32(data: &[u8], offset: usize) -> Result<(u32, usize), Strin
         shift += 7;
     }
 }
+
+/// Read an unsigned 64-bit LEB128 varint from `data` at `offset`.
+///
+/// Used for `LBC_CONSTANT_INTEGER` magnitudes (Luau bytecode version 8+)
+/// which can exceed 32 bits.
+pub fn read_leb128_u64(data: &[u8], offset: usize) -> Result<(u64, usize), String> {
+    let mut result: u64 = 0;
+    let mut shift: u32 = 0;
+    let mut i = 0usize;
+    loop {
+        if offset + i >= data.len() {
+            return Err("LEB128: unexpected EOF".into());
+        }
+        let byte = data[offset + i];
+        i += 1;
+        if shift >= 64 {
+            return Err(format!(
+                "LEB128: varint exceeds u64 (shift={}, byte=0x{:02x})",
+                shift, byte
+            ));
+        }
+        result |= ((byte & 0x7f) as u64) << shift;
+        if (byte & 0x80) == 0 {
+            return Ok((result, i));
+        }
+        shift += 7;
+    }
+}

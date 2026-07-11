@@ -74,7 +74,12 @@ impl fmt::Display for Literal {
                 let printed = buffer.format_finite(value);
                 write!(f, "{}", printed.strip_suffix(".0").unwrap_or(printed))
             }
-            &Literal::Integer(value) => write!(f, "{}i", value),
+            // Integer constants come from LBC_CONSTANT_INTEGER. Luau source
+            // has no distinct integer literal syntax (numbers are just
+            // numbers), so emit a plain decimal without a type suffix.
+            // The previous `Ni` form produced invalid Luau (`30i`) and
+            // confused readers of decompiled tables/rank values.
+            &Literal::Integer(value) => write!(f, "{}", value),
             Literal::String(value) => {
                 write!(
                     f,
@@ -90,5 +95,18 @@ impl fmt::Display for Literal {
                 }
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mod integer_display_tests {
+    use super::Literal;
+
+    #[test]
+    fn integer_literals_print_without_suffix() {
+        assert_eq!(Literal::Integer(30).to_string(), "30");
+        assert_eq!(Literal::Integer(-7).to_string(), "-7");
+        assert_eq!(Literal::Integer(0).to_string(), "0");
     }
 }

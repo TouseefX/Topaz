@@ -1627,26 +1627,45 @@ impl<'a> Lifter<'a> {
                         ));
                     }
                     OpCode::LOP_DUPTABLE => {
+                        // LBC_CONSTANT_TABLE stores only keys; the VM
+                        // materialises the table with those keys set to
+                        // `0` (numeric) at runtime, and subsequent
+                        // SETTABLEKS/SETTABLE fill the real values. For
+                        // decompilation we emit the keys with `nil`
+                        // placeholders so the post-process table-cleanup
+                        // pass can merge later assignments into a single
+                        // constructor, and so keys never show up as bare
+                        // `= nil` entries (which is what happened when
+                        // plain Table shapes were treated as empty).
+                        //
+                        // LBC_CONSTANT_TABLE_WITH_CONSTANTS stores key +
+                        // packed constant value indices (value_idx < 0
+                        // means nil).
                         let table_rvalue: ast::RValue = match self.function_list[self.function.id]
                             .constants
                             .get(d as usize)
-                            .unwrap()
                         {
-                            BytecodeConstant::TableWithConstants(entries) => {
-                                let entries: Vec<(usize, i32)> = entries
-                                    .iter()
-                                    .map(|e| (e.key, e.value_index))
-                                    .collect();
+                            Some(BytecodeConstant::TableWithConstants(entries)) => {
                                 let pairs = entries
-                                    .into_iter()
-                                    .map(|(key_idx, value_idx)| {
-                                        let key: ast::RValue = self.constant(key_idx).into();
-                                        let value: ast::RValue = if value_idx < 0 {
+                                    .iter()
+                                    .map(|e| {
+                                        let key: ast::RValue = self.constant(e.key).into();
+                                        let value: ast::RValue = if e.value_index < 0 {
                                             ast::Literal::Nil.into()
                                         } else {
-                                            self.constant(value_idx as usize).into()
+                                            self.constant(e.value_index as usize).into()
                                         };
                                         (Some(key), value)
+                                    })
+                                    .collect();
+                                ast::Table(pairs).into()
+                            }
+                            Some(BytecodeConstant::Table(keys)) => {
+                                let pairs = keys
+                                    .iter()
+                                    .map(|&key_idx| {
+                                        let key: ast::RValue = self.constant(key_idx).into();
+                                        (Some(key), ast::Literal::Nil.into())
                                     })
                                     .collect();
                                 ast::Table(pairs).into()
