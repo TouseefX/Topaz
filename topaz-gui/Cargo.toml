@@ -17,12 +17,10 @@ base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.42", features = ["rt", "net", "sync", "macros"] }
 
-# eframe core (glow backend for max compat). Default-features disabled so we can avoid accesskit on Android.
 eframe = { version = "0.31", default-features = false, features = ["glow", "wayland", "default_fonts", "x11", "web_screen_reader"] }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = "0.15"
-# accesskit only on desktop (conflicts with android-native-activity)
 eframe = { version = "0.31", features = ["accesskit"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
@@ -50,3 +48,16 @@ name = "android.permission.READ_MEDIA_IMAGES"
 
 [package.metadata.android.application]
 label = "Topaz"
+
+[[package.metadata.android.application.activity]]
+name = "android.app.NativeActivity"
+config_changes = "orientation|keyboardHidden|screenSize"
+exported = true
+
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.MAIN"]
+categories = ["android.intent.category.LAUNCHER"]
+
+[[package.metadata.android.application.activity.meta_data]]
+name = "android.app.lib_name"
+value = "topaz_gui"

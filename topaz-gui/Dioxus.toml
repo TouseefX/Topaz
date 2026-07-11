@@ -1,6 +1,0 @@
-[application]
-name = "Topaz"
-
-[bundle]
-identifier = "com.exec.topaz"
-publisher = "Exec Team"

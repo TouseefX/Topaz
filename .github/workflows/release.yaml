@@ -259,28 +259,27 @@ jobs:
       - name: Install cargo-apk + cargo-ndk
         uses: taiki-e/install-action@v2
         with:
-          tool: dioxus-cli,cargo-ndk
+          tool: cargo-apk2,cargo-ndk
 
       - name: Build APK
         run: |
-          dx build --platform android
-          find target -name "*.apk" -type f | head -n 20
+          cargo apk2 build -p topaz-gui --lib
+          find target -name "*.apk" -type f
 
       - name: Rename and collect APK
         shell: bash
         run: |
           set -e
-          APK=$(find target -path '*/release/*' -name '*.apk' -type f | head -n 1)
-          [ -z "$APK" ] && APK=$(find target -name "*.apk" -type f | head -n 1)
+          APK=$(find target -name "*.apk" -type f | head -n 1)
           [ -z "$APK" ] && { echo "APK not found!"; exit 1; }
-          cp "$APK" Topaz-release.apk
-          ls -lh Topaz-release.apk
+          cp "$APK" Topaz-debug.apk
+          ls -lh Topaz-debug.apk
 
       - name: Upload APK to release
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ./Topaz-release.apk
+          file: ./Topaz-debug.apk
           asset_name: Topaz-android.apk
           tag: ${{ needs.draft-release.outputs.tag }}
           overwrite: true
