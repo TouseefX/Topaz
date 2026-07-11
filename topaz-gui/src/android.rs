@@ -6,6 +6,7 @@
 #![cfg(target_os = "android")]
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -91,6 +92,28 @@ pub struct PermissionStatus {
 
 static PERM_STATUS: OnceLock<std::sync::Mutex<PermissionStatus>> = OnceLock::new();
 
+// android-permissions loads PermissionFragment through a DexClassLoader. Creating a
+// manager for every request creates several distinct Java classes with the same
+// name. Keep one manager/class loader for the process and never overlap requests.
+static PERMISSION_MANAGER: OnceLock<android_permissions::PermissionManager> = OnceLock::new();
+static PERMISSION_REQUEST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+fn permission_manager(
+    app: &AndroidApp,
+) -> Result<&'static android_permissions::PermissionManager, android_permissions::Error> {
+    if let Some(manager) = PERMISSION_MANAGER.get() {
+        return Ok(manager);
+    }
+
+    // More than one caller may race here. Both managers can be constructed, but
+    // only the winner is retained and returned, so all requests use one loader.
+    let manager = android_permissions::PermissionManager::create_from_android_app(app)?;
+    let _ = PERMISSION_MANAGER.set(manager);
+    Ok(PERMISSION_MANAGER
+        .get()
+        .expect("permission manager was initialized"))
+}
+
 fn perm_status_lock() -> &'static std::sync::Mutex<PermissionStatus> {
     PERM_STATUS.get_or_init(|| std::sync::Mutex::new(PermissionStatus::default()))
 }
@@ -103,17 +126,33 @@ fn set_permission_status(s: PermissionStatus) {
     *perm_status_lock().lock().unwrap() = s;
 }
 
-// Call once at startup, and again from UI button
+// Call after a user action; repeated calls while a request is active are ignored.
 pub fn request_storage_permissions_async() {
     let Some(app) = android_app() else {
         warn!("request_storage_permissions: no AndroidApp yet");
         return;
     };
 
+    if PERMISSION_REQUEST_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        info!("A storage permission request is already in progress");
+        return;
+    }
+
     std::thread::spawn(move || {
-        // android-permissions needs a JavaVM + Activity jobject
-        // The 0.1.2 crate provides create_from_android_app
-        match android_permissions::PermissionManager::create_from_android_app(&app) {
+        struct InFlightGuard;
+        impl Drop for InFlightGuard {
+            fn drop(&mut self) {
+                PERMISSION_REQUEST_IN_FLIGHT.store(false, Ordering::Release);
+            }
+        }
+        let _in_flight_guard = InFlightGuard;
+
+        // android-permissions needs a JavaVM + Activity jobject. Reuse the
+        // process-wide manager so PermissionFragment always has one class identity.
+        match permission_manager(&app) {
             Ok(manager) => {
                 use android_permissions as perm;
                 // Build a version-aware list
@@ -181,7 +220,7 @@ pub fn request_storage_permissions_async() {
                 set_permission_status(status);
             }
             Err(e) => {
-                error!("PermissionManager::create_from_android_app failed: {e:?}");
+                error!("PermissionManager initialization failed: {e:?}");
                 set_permission_status(PermissionStatus{
                     checked_at: Some(Instant::now()),
                     last_message: format!("Permission manager init failed: {e}"),

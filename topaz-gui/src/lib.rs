@@ -100,10 +100,9 @@ fn android_main(app: AndroidApp) {
     }
     log::info!("Topaz starting on Android");
 
-    // Store globally for permission/clipboard helpers
+    // Store globally for permission/clipboard helpers. Ask for permissions only
+    // after a user action (Open File / Grant), not while the app is starting.
     crate::android::init_android_app(app.clone());
-    // Kick off permission request early
-    crate::android::request_storage_permissions_async();
 
     let mut options = eframe::NativeOptions::default();
     // Critical: pass AndroidApp to winit
@@ -202,12 +201,6 @@ pub struct TopazApp {
 
 impl TopazApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        #[cfg(target_os = "android")]
-        {
-            // Trigger permission check again in UI thread just in case
-            crate::android::request_storage_permissions_async();
-        }
-
         Self {
             tab: Tab::Decompile,
             sub_tab: SubTab::Source,
@@ -844,16 +837,18 @@ impl TopazApp {
         ui.add_space(4.0);
 
         if let Some(path) = &self.input_path {
+            let path_str = path.display().to_string();
+            let byte_count = self.bytecode.as_ref().map(|b| b.len());
+
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("File:").strong());
-                ui.monospace(path.display().to_string());
-                if let Some(bytes) = &self.bytecode {
-                    ui.weak(format!("· {} bytes", bytes.len()));
+                ui.monospace(&path_str);
+                if let Some(len) = byte_count {
+                    ui.weak(format!("· {} bytes", len));
                 }
                 #[cfg(target_os = "android")]
                 if ui.small_button("📋 copy path").clicked() {
-                    let p = path.display().to_string();
-                    self.status = self.copy_text_system(&p, ui.ctx());
+                    self.status = self.copy_text_system(&path_str, ui.ctx());
                     self.status_is_error = false;
                 }
             });
