@@ -32,7 +32,7 @@ eframe = { version = "0.31", features = ["android-native-activity"] }
 log = "0.4"
 
 [package.metadata.android]
-package = "com.touseefx.topaz"
+package = "com.exec.topaz"
 apk_name = "Topaz"
 build_targets = ["armv7-linux-androideabi"]
 

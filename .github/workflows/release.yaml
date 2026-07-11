@@ -259,11 +259,11 @@ jobs:
       - name: Install cargo-apk + cargo-ndk
         uses: taiki-e/install-action@v2
         with:
-          tool: xbuild,cargo-ndk
+          tool: dioxus-cli,cargo-ndk
 
       - name: Build APK
         run: |
-          x build --platform android --arch armv7
+          dx build --platform android
           find target -name "*.apk" -type f | head -n 20
 
       - name: Rename and collect APK
