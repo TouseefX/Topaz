@@ -39,38 +39,6 @@ pub struct DebugInfo {
     pub upvalue_names: Vec<usize>,
 }
 
-const OPCODES_WITH_AUX: &[OpCode] = &[
-    OpCode::LOP_GETGLOBAL,
-    OpCode::LOP_SETGLOBAL,
-    OpCode::LOP_GETIMPORT,
-    OpCode::LOP_GETTABLEKS,
-    OpCode::LOP_SETTABLEKS,
-    OpCode::LOP_NAMECALL,
-    OpCode::LOP_JUMPIFEQ,
-    OpCode::LOP_JUMPIFLE,
-    OpCode::LOP_JUMPIFLT,
-    OpCode::LOP_JUMPIFNOTEQ,
-    OpCode::LOP_JUMPIFNOTLE,
-    OpCode::LOP_JUMPIFNOTLT,
-    OpCode::LOP_NEWTABLE,
-    OpCode::LOP_SETLIST,
-    OpCode::LOP_FORGLOOP,
-    OpCode::LOP_LOADKX,
-    OpCode::LOP_FASTCALL2,
-    OpCode::LOP_FASTCALL2K,
-    OpCode::LOP_FASTCALL3,
-    OpCode::LOP_JUMPXEQKNIL,
-    OpCode::LOP_JUMPXEQKB,
-    OpCode::LOP_JUMPXEQKN,
-    OpCode::LOP_JUMPXEQKS,
-    OpCode::LOP_GETUDATAKS,
-    OpCode::LOP_SETUDATAKS,
-    OpCode::LOP_NAMECALLUDATA,
-    OpCode::LOP_NEWCLASSMEMBER,
-    OpCode::LOP_CALLFB,
-    OpCode::LOP_CMPPROTO,
-];
-
 #[derive(Debug)]
 pub struct Function {
     pub max_stack_size: u8,
@@ -115,6 +83,17 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+
+/// Map Topaz OpCode → word length via luaur-common's getOpLength
+/// (same table as C++ Luau / luaur VM).
+fn luaur_op_length(op: OpCode) -> i32 {
+    use luaur::common::enums::luau_opcode::LuauOpcode;
+    use luaur::common::functions::get_op_length::get_op_length;
+    // Topaz and luaur both use the upstream LOP_* numeric order.
+    let luau_op = LuauOpcode::from(op as u8);
+    get_op_length(luau_op)
+}
+
 impl Function {
     /// Decode a sequence of raw instruction words (with the encode
     /// key applied to the op-code byte) into a Vec of `Instruction`
@@ -134,7 +113,9 @@ impl Function {
                 | Instruction::AD { op_code, .. }
                 | Instruction::E { op_code, .. } => op_code,
             };
-            if OPCODES_WITH_AUX.contains(&op) {
+            // Instruction width from luaur (faithful port of Luau getOpLength).
+            let op_len = luaur_op_length(op);
+            if op_len == 2 {
                 let Some(&aux) = raw.get(pc + 1) else {
                     return Err(format!("expected AUX word for op {:?}", op));
                 };
@@ -208,9 +189,13 @@ impl Function {
         let is_vararg = data[*offset + 3] != 0;
         *offset += 4;
 
+        // LPF_INLINABLE bit (Bytecode.h / ruau ProtoFlag::INLINABLE).
+        const LPF_INLINABLE: u8 = 1 << 3;
+        let mut flags: u8 = 0;
+
         if version >= 4 {
             need!(1);
-            let _flags = data[*offset];
+            flags = data[*offset];
             *offset += 1;
 
             // -- Type info section --
@@ -630,11 +615,24 @@ impl Function {
         }
 
         // -- Cost model (version >= 12, only if LPF_INLINABLE) --
-        // Consumed by the version-12 size prefix skip in Chunk::parse
-        // when present; we deliberately do not try to re-derive the
-        // flag bit here because the size prefix already lets us jump
-        // past unknown trailing data.
+        // lvmload.cpp: if (version >= 12 && (flags & LPF_INLINABLE))
+        //   p->cost = readVarInt64(...);
+        // Without a size prefix on older experimental builds this is
+        // mandatory for stream alignment; with version-12 size prefixes
+        // Chunk::parse also snaps to the declared end, but we still
+        // consume the field so `offset` stays accurate for the size
+        // check.
+        if version >= 12 && (flags & LPF_INLINABLE) != 0 {
+            let (_cost, advance) = read_leb128_u64(data, *offset).map_err(|e| {
+                ParseError {
+                    message: format!("proto cost: {e}"),
+                    position: start,
+                }
+            })?;
+            *offset += advance;
+        }
 
+        let _ = flags; // reserved for future decompiler use
 
         Ok(Function {
             max_stack_size,

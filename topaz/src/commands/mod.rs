@@ -27,12 +27,12 @@ pub enum Commands {
         #[arg(short, long, default_value_t = false)]
         lua51: bool,
 
-        /// Force the ruau-bytecode crate as the deserializer backend.
-        /// By default Topaz now prefers ruau for plain Luau bytecode
-        /// and falls back to the built-in deserializer for shuffled /
-        /// custom-key inputs that still need the legacy path.
-        #[arg(long, default_value_t = false)]
-        ruau: bool,
+        /// Force the luaur-compatible plain-opcode path (encode key 1).
+        /// Default already prefers that for LBC versions 3..=11, then falls
+        /// back to the native deserializer with encode-key detection for
+        /// Roblox client dumps (key 203).
+        #[arg(long, default_value_t = false, alias = "ruau")]
+        luaur: bool,
     },
 
     

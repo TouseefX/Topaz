@@ -331,3 +331,193 @@ fn typeinfo_does_not_reject_large_constant_tables() {
     };
     assert_eq!(chunk.functions[0].constants.len(), 120);
 }
+
+/// Exhaustive constant-tag payload sizes. If any arm under- or over-reads,
+/// a trailing known NIL will not land on a tag byte and the test fails.
+#[test]
+fn every_known_constant_tag_roundtrips_stream_alignment() {
+    // Build one constant of every known tag, then a sentinel NIL.
+    let mut constants: Vec<(u8, Vec<u8>)> = Vec::new();
+
+    // 0 NIL
+    constants.push((0, vec![]));
+    // 1 BOOLEAN true
+    constants.push((1, vec![1]));
+    // 2 NUMBER 1.5
+    {
+        let mut p = Vec::new();
+        p.extend_from_slice(&1.5f64.to_le_bytes());
+        constants.push((2, p));
+    }
+    // 3 STRING idx 1
+    {
+        let mut p = Vec::new();
+        write_varint(&mut p, 1);
+        constants.push((3, p));
+    }
+    // 4 IMPORT
+    {
+        let mut p = Vec::new();
+        p.extend_from_slice(&0u32.to_le_bytes());
+        constants.push((4, p));
+    }
+    // 5 TABLE with 2 keys
+    {
+        let mut p = Vec::new();
+        write_varint(&mut p, 2);
+        write_varint(&mut p, 0);
+        write_varint(&mut p, 1);
+        constants.push((5, p));
+    }
+    // 6 CLOSURE proto 0
+    {
+        let mut p = Vec::new();
+        write_varint(&mut p, 0);
+        constants.push((6, p));
+    }
+    // 7 VECTOR
+    {
+        let mut p = Vec::new();
+        for f in [1.0f32, 2.0, 3.0, 0.0] {
+            p.extend_from_slice(&f.to_le_bytes());
+        }
+        constants.push((7, p));
+    }
+    // 8 TABLE_WITH_CONSTANTS interleaved
+    {
+        let mut p = Vec::new();
+        write_varint(&mut p, 2);
+        write_varint(&mut p, 0);
+        p.extend_from_slice(&1i32.to_le_bytes());
+        write_varint(&mut p, 1);
+        p.extend_from_slice(&(-1i32).to_le_bytes());
+        constants.push((8, p));
+    }
+    // 9 INTEGER large
+    {
+        let mut p = Vec::new();
+        p.push(0);
+        write_varint64(&mut p, 1u64 << 40);
+        constants.push((9, p));
+    }
+    // 10 CLASS_SHAPE
+    {
+        let mut p = Vec::new();
+        write_varint(&mut p, 0); // class name
+        write_varint(&mut p, 2); // nprops
+        write_varint(&mut p, 1); // nmethods
+        write_varint(&mut p, 0);
+        write_varint(&mut p, 1);
+        write_varint(&mut p, 0);
+        constants.push((10, p));
+    }
+    // sentinel
+    constants.push((0, vec![]));
+
+    let bytes = build_chunk(10, &constants, &[]);
+    let chunk = match deserializer::deserialize(&bytes, 1).expect("all tags") {
+        Bytecode::Chunk(c) => c,
+        other => panic!("expected Chunk, got {other:?}"),
+    };
+    let consts = &chunk.functions[0].constants;
+    assert_eq!(consts.len(), constants.len());
+    assert!(matches!(consts[0], Constant::Nil));
+    assert!(matches!(consts[1], Constant::Boolean(true)));
+    assert!(matches!(consts[2], Constant::Number(n) if (n - 1.5).abs() < 1e-9));
+    assert!(matches!(consts[3], Constant::String(1)));
+    assert!(matches!(consts[4], Constant::Import(0)));
+    assert!(matches!(consts[5], Constant::Table(ref k) if k == &[0, 1]));
+    assert!(matches!(consts[6], Constant::Closure(0)));
+    assert!(matches!(consts[7], Constant::Vector(1.0, 2.0, 3.0, 0.0)));
+    match &consts[8] {
+        Constant::TableWithConstants(e) => {
+            assert_eq!(e.len(), 2);
+            assert_eq!(e[0].key, 0);
+            assert_eq!(e[0].value_index, 1);
+            assert_eq!(e[1].key, 1);
+            assert_eq!(e[1].value_index, -1);
+        }
+        other => panic!("expected TableWithConstants, got {other:?}"),
+    }
+    assert!(matches!(consts[9], Constant::Integer(v) if v == (1i64 << 40)));
+    assert!(matches!(consts[10], Constant::Nil)); // class shape -> Nil
+    assert!(matches!(consts[11], Constant::Nil)); // sentinel
+}
+
+#[test]
+fn multi_proto_with_feedback_stays_aligned() {
+    // Two protos, version 11, each with a feedback slot. Main = 1.
+    // If feedback is not consumed, proto 1 starts mid-stream.
+    let mut out = Vec::new();
+    out.push(11);
+    out.push(1); // types_version
+    write_varint(&mut out, 0); // strings
+    write_varint(&mut out, 2); // two functions
+
+    for _ in 0..2 {
+        out.extend_from_slice(&[1, 0, 0, 0]); // header
+        out.push(0); // flags
+        write_varint(&mut out, 0); // typesize
+        write_varint(&mut out, 1); // codesize
+        let insn: u32 = 0x16 | (1 << 16);
+        out.extend_from_slice(&insn.to_le_bytes());
+        write_varint(&mut out, 1); // sizek
+        out.push(0); // NIL
+        write_varint(&mut out, 0); // children
+        write_varint(&mut out, 0); // line
+        write_varint(&mut out, 0); // name
+        out.push(0); // no lineinfo
+        out.push(0); // no debuginfo
+        write_varint(&mut out, 1); // 1 feedback slot
+        out.push(0); // kind
+        write_varint(&mut out, 0); // pc
+    }
+    write_varint(&mut out, 1); // main = 1
+
+    let chunk = match deserializer::deserialize(&out, 1).expect("multi proto v11") {
+        Bytecode::Chunk(c) => c,
+        other => panic!("expected Chunk, got {other:?}"),
+    };
+    assert_eq!(chunk.functions.len(), 2);
+    assert_eq!(chunk.main, 1);
+    assert_eq!(chunk.functions[0].constants.len(), 1);
+    assert_eq!(chunk.functions[1].constants.len(), 1);
+}
+
+#[test]
+fn version12_inlinable_cost_is_consumed() {
+    // Without reading the cost varint, the size-prefix snap still works,
+    // but offset accounting for the size check would fail if cost were
+    // larger than remaining declared padding. Test explicit consumption.
+    let mut body = Vec::new();
+    body.extend_from_slice(&[1, 0, 0, 0]); // header
+    body.push(1 << 3); // flags = LPF_INLINABLE
+    write_varint(&mut body, 0); // typesize
+    write_varint(&mut body, 1);
+    body.extend_from_slice(&(0x16u32 | (1 << 16)).to_le_bytes());
+    write_varint(&mut body, 0); // sizek
+    write_varint(&mut body, 0); // children
+    write_varint(&mut body, 0);
+    write_varint(&mut body, 0);
+    body.push(0);
+    body.push(0);
+    // feedback (v11+)
+    write_varint(&mut body, 0);
+    // cost
+    write_varint64(&mut body, 999);
+
+    let mut out = Vec::new();
+    out.push(12);
+    out.push(1);
+    write_varint(&mut out, 0);
+    write_varint(&mut out, 1);
+    write_varint(&mut out, body.len() as u32);
+    out.extend_from_slice(&body);
+    write_varint(&mut out, 0); // main
+
+    let chunk = match deserializer::deserialize(&out, 1).expect("v12 cost") {
+        Bytecode::Chunk(c) => c,
+        other => panic!("expected Chunk, got {other:?}"),
+    };
+    assert_eq!(chunk.functions.len(), 1);
+}

@@ -26,7 +26,10 @@ rayon = "1.5.3"
 triomphe = "0.1.8"
 parking_lot = "0.12.1"
 walkdir = "2.3.2"
-ruau-bytecode = { git = "https://github.com/cortesi/ruau.git" }
+# Full Luau engine port (compiler/VM/typechecker). Used for version
+# policy alignment and as the "plain Luau" decode preference. Roblox
+# encode-key dumps still fall back to Topaz's native deserializer.
+luaur = { git = "https://github.com/pjankiewicz/luaur.git", default-features = false }
 
 [features]
 dhat-heap = []

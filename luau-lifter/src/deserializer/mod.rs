@@ -3,6 +3,7 @@ pub mod chunk;
 pub mod constant;
 pub mod function;
 pub mod leb128;
+pub mod loadsafe_ir;
 
 /// Parse a Luau bytecode blob. Returns a `Bytecode::Chunk(Chunk)` on
 /// success, or a `Bytecode::Error(String)` if the bytecode itself is

@@ -6,6 +6,9 @@
 //! and we parse it manually for better control over the exact byte
 //! layout).
 //!
+//! Tag 10 (`CLASS_SHAPE`) is consumed by the loadsafe IR decoder and
+//! lowered to `Nil` (no first-class AST form yet).
+//!
 //! See the Luau source for the authoritative definition:
 //! <https://github.com/luau-lang/luau/blob/master/Common/include/Luau/Bytecode.h>
 

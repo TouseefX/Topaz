@@ -2,7 +2,7 @@ use std::path::Path;
 
 use base64::prelude::*;
 
-pub fn decompile_no_io<T>(bytecode: T, encode_key: u8, lua51: bool, ruau: bool) -> String
+pub fn decompile_no_io<T>(bytecode: T, encode_key: u8, lua51: bool, luaur: bool) -> String
 where
     T: Into<Vec<u8>>,
 {
@@ -13,8 +13,8 @@ where
 
     if lua51 {
         lua51_lifter::decompile_bytecode(&bytecode)
-    } else if ruau {
-        luau_lifter::decompile_bytecode_via_ruau(&bytecode, encode_key)
+    } else if luaur {
+        luau_lifter::decompile_bytecode_via_luaur(&bytecode, encode_key)
     } else {
         luau_lifter::decompile_bytecode_default(&bytecode, encode_key)
     }
@@ -25,9 +25,9 @@ pub fn decompile(
     output: &Path,
     encode_key: u8,
     lua51: bool,
-    ruau: bool,
+    luaur: bool,
 ) -> Result<(), std::io::Error> {
     let bytecode = std::fs::read(input)?;
-    let out = decompile_no_io(bytecode, encode_key, lua51, ruau);
+    let out = decompile_no_io(bytecode, encode_key, lua51, luaur);
     std::fs::write(output, out)
 }
