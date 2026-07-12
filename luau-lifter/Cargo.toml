@@ -29,7 +29,8 @@ walkdir = "2.3.2"
 # Full Luau engine port (compiler/VM/typechecker). Used for version
 # policy alignment and as the "plain Luau" decode preference. Roblox
 # encode-key dumps still fall back to Topaz's native deserializer.
-luaur = { git = "https://github.com/pjankiewicz/luaur.git", default-features = false }
+# Use my fork for Android support
+luaur = { git = "https://github.com/TouseefX/luaur.git", default-features = false }
 
 [features]
 dhat-heap = []
