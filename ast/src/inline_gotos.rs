@@ -36,7 +36,7 @@ use crate::{
 };
 
 pub fn inline_short_gotos(block: &mut Block) {
-    for _ in 0..16 {
+    for _ in 0..64 {
         let mut changed = false;
         changed |= eliminate_join_gotos(block);
         let tails = collect_short_tails(block);
@@ -280,88 +280,90 @@ fn rewrite_fallthrough_joins(block: &mut Block) -> bool {
     let mut changed = false;
     let mut i = 0;
     while i < block.0.len() {
-        // Need at least: If, Goto, Label
-        if i + 2 >= block.0.len() {
+        // Patterns:
+        //   A) if C then ... goto L end; [middle]; goto L; ::L:: rest
+        //   B) if C then ... goto L end; [middle]; ::L:: rest
+        //      (middle is the "else" fallthrough; then jumps over middle to join)
+        //
+        // For B, rewrite to: if C then ... end; middle; rest
+        // For A, same but also drop the second goto.
+        if i + 1 >= block.0.len() {
             break;
         }
 
-        let label_idx = match find_join_after_if(block, i) {
-            Some(x) => x,
-            None => {
-                i += 1;
-                continue;
-            }
-        };
-
-        let label = match label_name(&block.0[label_idx]) {
-            Some(n) => n.to_string(),
-            None => {
-                i += 1;
-                continue;
-            }
-        };
-
-        // Confirm if at i ends with goto label, and statement before label is goto label.
-        let if_ok = match &block.0[i] {
-            Statement::If(r#if) => {
-                let then_b = r#if.then_block.lock();
-                let else_b = r#if.else_block.lock();
-                ends_with_goto_named(&then_b.0, &label) && else_b.0.is_empty()
-            }
-            _ => false,
-        };
-        if !if_ok {
+        let Some((label, label_idx, has_pre_goto)) = find_join_after_if(block, i) else {
             i += 1;
             continue;
-        }
+        };
 
-        if goto_name(&block.0[label_idx - 1]) != Some(label.as_str()) {
-            i += 1;
-            continue;
-        }
-
-        // Rewrite: strip goto from then; remove goto before label and the label itself.
+        // Strip trailing goto L from then (and nested pure skip gotos already handled).
         if let Statement::If(r#if) = &mut block.0[i] {
             let mut then_b = r#if.then_block.lock();
             strip_trailing_goto(&mut then_b.0, &label);
+            // Also strip trailing gotos from nested ifs that only jump to L? leave for now.
         }
 
-        // Remove goto and label (indices label_idx-1 and label_idx)
-        block.0.remove(label_idx); // label first (higher index)
-        block.0.remove(label_idx - 1); // goto
+        // Remove label; if a goto immediately precedes it, remove that too.
+        block.0.remove(label_idx);
+        if has_pre_goto {
+            block.0.remove(label_idx - 1);
+        }
         changed = true;
-        // don't advance i; re-scan
+        // re-scan from i
     }
     changed
 }
 
-/// Find index of `::L::` such that block[i] is `if` ending in goto L and
-/// some later stmt is goto L immediately before that label.
-fn find_join_after_if(block: &Block, if_idx: usize) -> Option<usize> {
+/// Returns (label_name, label_index, pre_goto_before_label).
+///
+/// Accepts:
+/// - `goto L; ::L::` after the if (with optional middle stmts)
+/// - bare `::L::` after the if when the if's then ends with `goto L`
+///   and no other goto L exists in the middle (then is skipping middle).
+fn find_join_after_if(block: &Block, if_idx: usize) -> Option<(String, usize, bool)> {
     let Statement::If(r#if) = &block.0[if_idx] else {
         return None;
     };
     let then_b = r#if.then_block.lock();
     let else_b = r#if.else_block.lock();
+    // Allow empty else; if else is non-empty this is not a fallthrough join.
     if !else_b.0.is_empty() {
         return None;
     }
-    let label = goto_name(then_b.0.last()?)?;
-    let label = label.to_string();
+    let label = goto_name(then_b.0.last()?)?.to_string();
+
+    // then must end with goto L; optionally allow nested structure that ends that way.
+    if !ends_with_goto_named(&then_b.0, &label) {
+        return None;
+    }
     drop(then_b);
     drop(else_b);
 
-    // Search forward for goto L; ::L::
+    // Find ::L:: after if_idx. Prefer the first label L that is only targeted
+    // by the then-arm and optional single goto L just before the label.
     let mut j = if_idx + 1;
-    while j + 1 < block.0.len() {
-        if goto_name(&block.0[j]) == Some(label.as_str())
-            && label_name(&block.0[j + 1]) == Some(label.as_str())
-        {
-            return Some(j + 1);
-        }
-        // Stop if we hit another label definition of L earlier
+    while j < block.0.len() {
         if label_name(&block.0[j]) == Some(label.as_str()) {
-            return None;
+            let has_pre_goto =
+                j > if_idx + 0 && goto_name(&block.0[j - 1]) == Some(label.as_str());
+            // Middle must not define the same label earlier (we're at first L).
+            // Middle may contain other gotos to L only if has_pre_goto (the one we remove).
+            // If middle has additional goto L not immediately before label, bail.
+            let mut k = if_idx + 1;
+            while k < j {
+                if k == j - 1 && has_pre_goto {
+                    k += 1;
+                    continue;
+                }
+                if goto_name(&block.0[k]) == Some(label.as_str()) {
+                    return None;
+                }
+                if label_name(&block.0[k]) == Some(label.as_str()) {
+                    return None;
+                }
+                k += 1;
+            }
+            return Some((label, j, has_pre_goto));
         }
         j += 1;
     }
@@ -419,7 +421,7 @@ fn walk_for_tails(block: &Block, out: &mut FxHashMap<String, Vec<Statement>>) {
     }
 }
 
-const MAX_TAIL_LEN: usize = 16;
+const MAX_TAIL_LEN: usize = 64;
 
 fn extract_short_tail(stmts: &[Statement], from: usize) -> Option<Vec<Statement>> {
     if from >= stmts.len() {
@@ -624,6 +626,43 @@ mod tests {
                 Statement::Return(crate::Return::new(vec![])),
             ]),
         ))]);
+        inline_short_gotos(&mut body);
+        let s = body.to_string();
+        assert!(!s.contains("goto"), "gotos remain: {s}");
+        assert!(!s.contains("::l1::"), "label remains: {s}");
+    }
+
+
+
+    #[test]
+    fn fallthrough_join_without_second_goto() {
+        // if true then x; goto l1 end
+        // y
+        // ::l1::
+        // return
+        // → if true then x end; y; return
+        use crate::Assign;
+        let work = Statement::Assign(Assign::new(
+            vec![crate::LValue::Local(crate::RcLocal::default())],
+            vec![Literal::Number(1.0).into()],
+        ));
+        let mid = Statement::Assign(Assign::new(
+            vec![crate::LValue::Local(crate::RcLocal::default())],
+            vec![Literal::Number(2.0).into()],
+        ));
+        let mut body = Block(vec![
+            Statement::If(If::new(
+                lit_true(),
+                Block(vec![
+                    work,
+                    Statement::Goto(Goto::new(Label("l1".into()))),
+                ]),
+                Block::default(),
+            )),
+            mid,
+            Statement::Label(Label("l1".into())),
+            Statement::Return(crate::Return::new(vec![])),
+        ]);
         inline_short_gotos(&mut body);
         let s = body.to_string();
         assert!(!s.contains("goto"), "gotos remain: {s}");
