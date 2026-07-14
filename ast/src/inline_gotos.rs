@@ -350,10 +350,11 @@ fn rewrite_fallthrough_joins(block: &mut Block) -> bool {
         // Patterns:
         //   A) if C then ... goto L end; [middle]; goto L; ::L:: rest
         //   B) if C then ... goto L end; [middle]; ::L:: rest
-        //      (middle is the "else" fallthrough; then jumps over middle to join)
         //
-        // For B, rewrite to: if C then ... end; middle; rest
-        // For A, same but also drop the second goto.
+        // Nested skip-forward gotos to L inside C's then (e.g. early exit
+        // past a sibling block) MUST be rewritten to if/else BEFORE we
+        // remove ::L::, otherwise drop_unresolved_trailing_gotos deletes
+        // them and both blocks run (silent behavior bug).
         if i + 1 >= block.0.len() {
             break;
         }
@@ -363,21 +364,135 @@ fn rewrite_fallthrough_joins(block: &mut Block) -> bool {
             continue;
         };
 
-        // Strip trailing goto L from then and nested ifs that end with goto L.
         if let Statement::If(r#if) = &mut block.0[i] {
             let mut then_b = r#if.then_block.lock();
-            strip_trailing_goto_deep(&mut then_b.0, &label);
+            // 1) Preserve skip-forward semantics for every remaining goto L.
+            while rewrite_one_skip_forward_to_label(&mut then_b.0, &label) {
+                changed = true;
+            }
+            // 2) Only now remove the trailing join jump at end of then.
+            if strip_trailing_goto(&mut then_b.0, &label) {
+                changed = true;
+            }
         }
 
-        // Remove label; if a goto immediately precedes it, remove that too.
+        // 3) Remove label (and optional pre-goto) — safe: no nested goto L left.
         block.0.remove(label_idx);
         if has_pre_goto {
             block.0.remove(label_idx - 1);
         }
         changed = true;
-        // re-scan from i
     }
     changed
+}
+
+/// Within `stmts` (typically an if-then body whose join label is `label`
+/// after the enclosing if), rewrite one skip-forward `goto label`:
+///
+/// ```text
+/// if D then
+///   ...
+///   goto label   -- skip rest
+/// end
+/// rest...
+/// ```
+/// →
+/// ```text
+/// if D then
+///   ...
+/// else
+///   rest...
+/// end
+/// ```
+///
+/// Also handles one nesting level used by real dumps:
+/// ```text
+/// if U then
+///   ...
+///   if D then B; goto label end
+/// end
+/// rest...
+/// ```
+/// → `if U then ...; if D then B else rest end else rest end`
+/// (rest is cloned into both else arms when U's false path must run rest).
+fn rewrite_one_skip_forward_to_label(stmts: &mut Vec<Statement>, label: &str) -> bool {
+    // Top-level: if D then ... goto L end; rest
+    for i in 0..stmts.len() {
+        let (else_empty, then_ends, then_len) = {
+            let Statement::If(r#if) = &stmts[i] else {
+                continue;
+            };
+            let then_b = r#if.then_block.lock();
+            let else_b = r#if.else_block.lock();
+            (
+                else_b.0.is_empty(),
+                ends_with_goto_named(&then_b.0, label),
+                then_b.0.len(),
+            )
+        };
+        if else_empty && then_ends && then_len >= 1 && i + 1 < stmts.len() {
+            let rest: Vec<Statement> = stmts.drain(i + 1..).collect();
+            if let Statement::If(r#if) = &mut stmts[i] {
+                strip_trailing_goto(&mut r#if.then_block.lock().0, label);
+                r#if.else_block.lock().0 = rest;
+            }
+            return true;
+        }
+    }
+
+    // Nested: if U then [..., if D then B; goto L end] end; rest
+    // where the inner if is the last stmt of U's then and ends with goto L.
+    for i in 0..stmts.len() {
+        let nested = {
+            let Statement::If(outer) = &stmts[i] else {
+                continue;
+            };
+            let else_b = outer.else_block.lock();
+            if !else_b.0.is_empty() {
+                continue;
+            }
+            let then_b = outer.then_block.lock();
+            if then_b.0.is_empty() {
+                continue;
+            }
+            let last = then_b.0.last().unwrap();
+            let Statement::If(inner) = last else {
+                continue;
+            };
+            let inner_then = inner.then_block.lock();
+            let inner_else = inner.else_block.lock();
+            let ok = inner_else.0.is_empty() && ends_with_goto_named(&inner_then.0, label);
+            ok
+        };
+        if !nested || i + 1 >= stmts.len() {
+            continue;
+        }
+        let rest: Vec<Statement> = stmts.drain(i + 1..).collect();
+        if let Statement::If(outer) = &mut stmts[i] {
+            // Outer false path must still run rest.
+            outer.else_block.lock().0 = rest.clone();
+            let mut then_b = outer.then_block.lock();
+            // Inner if is last in then: absorb rest into its else, strip goto.
+            if let Some(Statement::If(inner)) = then_b.0.last_mut() {
+                strip_trailing_goto(&mut inner.then_block.lock().0, label);
+                inner.else_block.lock().0 = rest;
+            }
+        }
+        return true;
+    }
+
+    // Recurse into nested if bodies for deeper skip-forward gotos.
+    for s in stmts.iter_mut() {
+        if let Statement::If(r#if) = s {
+            if rewrite_one_skip_forward_to_label(&mut r#if.then_block.lock().0, label) {
+                return true;
+            }
+            if rewrite_one_skip_forward_to_label(&mut r#if.else_block.lock().0, label) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Returns (label_name, label_index, pre_goto_before_label).
@@ -875,6 +990,62 @@ mod tests {
         assert!(!s.contains("goto"), "gotos remain: {s}");
         assert!(!s.contains("::l81::"), "label remains: {s}");
         assert!(s.contains("else"), "expected else arm for skipped rest: {s}");
+    }
+
+
+
+    #[test]
+    fn nested_skip_forward_before_join_not_double_run() {
+        // if C then
+        //   if U then
+        //     if D then B; goto L end
+        //   end
+        //   E
+        //   goto L
+        // end
+        // ::L::
+        // rest
+        //
+        // When U and D: only B must run (not E). Deleting goto without
+        // restructuring would run B then E (silent speed double-apply bug).
+        use crate::Assign;
+        let b = Statement::Assign(Assign::new(
+            vec![crate::LValue::Local(crate::RcLocal::default())],
+            vec![Literal::Number(1.0).into()],
+        ));
+        let e = Statement::Assign(Assign::new(
+            vec![crate::LValue::Local(crate::RcLocal::default())],
+            vec![Literal::Number(2.0).into()],
+        ));
+        let inner = If::new(
+            Literal::Boolean(true).into(), // D
+            Block(vec![b, Statement::Goto(Goto::new(Label("l81".into())))]),
+            Block::default(),
+        );
+        let ulted = If::new(
+            Literal::Boolean(true).into(), // U
+            Block(vec![Statement::If(inner)]),
+            Block::default(),
+        );
+        let mut body = Block(vec![
+            Statement::If(If::new(
+                lit_true(), // C
+                Block(vec![
+                    Statement::If(ulted),
+                    e,
+                    Statement::Goto(Goto::new(Label("l81".into()))),
+                ]),
+                Block::default(),
+            )),
+            Statement::Label(Label("l81".into())),
+            Statement::Return(crate::Return::new(vec![])),
+        ]);
+        inline_short_gotos(&mut body);
+        let s = body.to_string();
+        assert!(!s.contains("goto"), "gotos remain: {s}");
+        assert!(!s.contains("::l81::"), "label remains: {s}");
+        // Must have else so E is not unconditional after B
+        assert!(s.contains("else"), "expected else for skipped E: {s}");
     }
 
 }
