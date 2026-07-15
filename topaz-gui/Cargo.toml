@@ -40,6 +40,7 @@ build_targets = ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-lin
 min_sdk_version = 24
 target_sdk_version = 34
 compile_sdk_version = 34
+manifest_template = "android/src/main/AndroidManifest.xml"
 
 # --- Permissions ---
 [[package.metadata.android.uses_permission]]
@@ -61,6 +62,14 @@ name = "android.permission.POST_NOTIFICATIONS"
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.WAKE_LOCK"
+
+# Required for foreground service on Android 9+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.FOREGROUND_SERVICE"
+
+# Required for foreground service dataSync type on Android 14+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.FOREGROUND_SERVICE_DATA_SYNC"
 
 # --- Features ---
 [[package.metadata.android.uses_feature]]

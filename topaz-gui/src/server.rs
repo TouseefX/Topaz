@@ -16,6 +16,10 @@ use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
+// Android-specific wake lock imports
+#[cfg(target_os = "android")]
+use crate::android::{acquire_server_wake_lock, release_server_wake_lock};
+
 #[derive(Default, Debug)]
 pub struct ServerStats {
     pub luau_requests: AtomicU64,
@@ -153,16 +157,22 @@ impl ServerHandle {
             let _ = tx.send(());
         }
 
+        // Safety net: release wake lock on Android in case server thread already exited
+        #[cfg(target_os = "android")]
+        release_server_wake_lock();
+
         self.thread.take();
     }
 }
 
 impl Drop for ServerHandle {
     fn drop(&mut self) {
-
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
+        // Safety net: release wake lock on Android
+        #[cfg(target_os = "android")]
+        release_server_wake_lock();
         self.thread.take();
     }
 }
@@ -248,9 +258,19 @@ async fn run_server(
     });
     repaint();
 
-    axum::serve(listener, app)
+    // Acquire wake lock + show notification on Android to keep CPU alive while server runs
+    #[cfg(target_os = "android")]
+    acquire_server_wake_lock(cfg.port);
+
+    let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(wait_for_shutdown(shutdown_rx))
-        .await?;
+        .await;
+
+    // Release wake lock + hide notification on Android when server stops
+    #[cfg(target_os = "android")]
+    release_server_wake_lock();
+
+    serve_result?;
     Ok(())
 }
 

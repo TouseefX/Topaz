@@ -668,3 +668,239 @@ pub fn share_text(text: &str) -> bool {
 pub fn toast(msg: &str) {
     info!("Topaz notification: {msg}");
 }
+
+// --------------------------------------------------------------------
+// Wake Lock (keep CPU awake) + Foreground Service
+// --------------------------------------------------------------------
+// This module provides:
+// 1. PARTIAL_WAKE_LOCK - keeps CPU alive (essential for background work)
+// 2. Foreground Service via Kotlin TopazForegroundService - REQUIRED on Android 8+
+//    for true background survival. The service calls startForeground() internally.
+// --------------------------------------------------------------------
+
+use std::sync::{Arc, Mutex};
+
+/// Handle for an acquired wake lock. Drop to release.
+pub struct WakeLock {
+    wake_lock: jni::objects::GlobalRef,
+    vm: Arc<jni::JavaVM>,
+}
+
+impl Drop for WakeLock {
+    fn drop(&mut self) {
+        let _ = release_wake_lock_inner(&self.vm, &self.wake_lock);
+    }
+}
+
+/// Acquire a PARTIAL_WAKE_LOCK to keep the CPU running while the server is active.
+/// Returns None if acquisition fails.
+pub fn acquire_wake_lock() -> Option<WakeLock> {
+    use jni::objects::{JObject, JValue};
+
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.ok()?;
+    // Wrap vm in Arc so it can be shared between the closure and the WakeLock struct
+    let vm_arc = Arc::new(vm);
+    let vm_for_closure = Arc::clone(&vm_arc);
+    let mut env = vm_arc.attach_current_thread().ok()?;
+    let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
+
+    let result = (|| -> anyhow::Result<WakeLock> {
+        // Get PowerManager system service
+        let service = env.new_string("power")?;
+        let power_manager = env
+            .call_method(
+                &activity,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&service)],
+            )?
+            .l()?;
+        if power_manager.is_null() {
+            anyhow::bail!("PowerManager is unavailable");
+        }
+
+        // PARTIAL_WAKE_LOCK = 1 (keeps CPU on, screen/keyboard can turn off)
+        // Tag for debugging
+        let tag = env.new_string("Topaz::ServerWakeLock")?;
+        let wake_lock = env
+            .call_method(
+                &power_manager,
+                "newWakeLock",
+                "(ILjava/lang/String;)Landroid/os/PowerManager$WakeLock;",
+                &[JValue::Int(1), JValue::Object(&tag)], // PARTIAL_WAKE_LOCK = 1
+            )?
+            .l()?;
+        if wake_lock.is_null() {
+            anyhow::bail!("Failed to create wake lock");
+        }
+
+        // Acquire the wake lock
+        env.call_method(&wake_lock, "acquire", "()V", &[])?;
+
+        // Convert to GlobalRef so it survives across JNI attachments
+        let global_ref = env.new_global_ref(&wake_lock)?;
+
+        info!("Acquired Android PARTIAL_WAKE_LOCK for server");
+        Ok(WakeLock {
+            wake_lock: global_ref,
+            vm: vm_for_closure,
+        })
+    })();
+
+    match result {
+        Ok(wl) => Some(wl),
+        Err(e) => {
+            error!("Failed to acquire wake lock: {e:?}");
+            None
+        }
+    }
+}
+
+fn release_wake_lock_inner(vm: &jni::JavaVM, wake_lock: &jni::objects::GlobalRef) -> anyhow::Result<()> {
+    let mut env = vm.attach_current_thread()?;
+    let wake_lock_local = wake_lock.as_obj();
+    env.call_method(wake_lock_local, "release", "()V", &[])?;
+    // GlobalRef is dropped automatically when WakeLock struct is dropped
+    info!("Released Android wake lock");
+    Ok(())
+}
+
+/// Start the foreground service (TopazForegroundService) which will call
+/// startForeground() internally with a persistent notification.
+/// This is REQUIRED on Android 8+ (API 26+) for background survival.
+pub fn start_foreground_service(port: u16) {
+    use jni::objects::{JObject, JValue};
+
+    let ctx = ndk_context::android_context();
+    let Ok(vm) = (unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }) else {
+        return;
+    };
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return;
+    };
+    let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
+
+    let result = (|| -> anyhow::Result<()> {
+        let app_ctx = env
+            .call_method(&activity, "getApplicationContext", "()Landroid/content/Context;", &[])?
+            .l()?;
+
+        let service_class = env.find_class("com/exec/topaz/TopazForegroundService")?;
+        let service_intent = env.new_object(
+            "android/content/Intent",
+            "(Landroid/content/Context;Ljava/lang/Class;)V",
+            &[
+                JValue::Object(&app_ctx),
+                JValue::Object(&service_class),
+            ],
+        )?;
+
+        // Pass port to service so it can show in notification
+        let port_key = env.new_string("server_port")?.into();
+        env.call_method(
+            &service_intent,
+            "putExtra",
+            "(Ljava/lang/String;I)Landroid/content/Intent;",
+            &[JValue::Object(&port_key), JValue::Int(port as i32)],
+        )?;
+
+        // Start foreground service (API 26+) or regular service (older)
+        let sdk_int = android_sdk_int();
+        if sdk_int >= 26 {
+            env.call_method(
+                &app_ctx,
+                "startForegroundService",
+                "(Landroid/content/Intent;)Landroid/content/ComponentName;",
+                &[JValue::Object(&service_intent)],
+            )?;
+        } else {
+            env.call_method(
+                &app_ctx,
+                "startService",
+                "(Landroid/content/Intent;)Landroid/content/ComponentName;",
+                &[JValue::Object(&service_intent)],
+            )?;
+        }
+
+        info!("Started TopazForegroundService for port {}", port);
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        error!("Failed to start foreground service: {e:?}");
+    }
+}
+
+/// Stop the foreground service and remove its notification
+pub fn stop_foreground_service() {
+    use jni::objects::{JObject, JValue};
+
+    let ctx = ndk_context::android_context();
+    let Ok(vm) = (unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }) else {
+        return;
+    };
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return;
+    };
+    let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
+
+    let result = (|| -> anyhow::Result<()> {
+        let app_ctx = env
+            .call_method(&activity, "getApplicationContext", "()Landroid/content/Context;", &[])?
+            .l()?;
+
+        let service_class = env.find_class("com/exec/topaz/TopazForegroundService")?;
+        let service_intent = env.new_object(
+            "android/content/Intent",
+            "(Landroid/content/Context;Ljava/lang/Class;)V",
+            &[
+                JValue::Object(&app_ctx),
+                JValue::Object(&service_class),
+            ],
+        )?;
+
+        // Send stop action to service
+        let stop_action = env.new_string("com.exec.topaz.ACTION_STOP_SERVER")?.into();
+        env.call_method(
+            &service_intent,
+            "setAction",
+            "(Ljava/lang/String;)Landroid/content/Intent;",
+            &[JValue::Object(&stop_action)],
+        )?;
+
+        env.call_method(
+            &app_ctx,
+            "stopService",
+            "(Landroid/content/Intent;)Z",
+            &[JValue::Object(&service_intent)],
+        )?;
+
+        info!("Stopped TopazForegroundService");
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        error!("Failed to stop foreground service: {e:?}");
+    }
+}
+
+/// Global wake lock holder for the server
+static SERVER_WAKE_LOCK: OnceLock<Mutex<Option<WakeLock>>> = OnceLock::new();
+
+/// Acquire wake lock + start foreground service for server (Android only)
+pub fn acquire_server_wake_lock(port: u16) {
+    let wake_lock = acquire_wake_lock();
+    start_foreground_service(port);
+
+    let mut guard = SERVER_WAKE_LOCK.get_or_init(|| Mutex::new(None)).lock().unwrap();
+    *guard = wake_lock;
+}
+
+/// Release wake lock + stop foreground service for server (Android only)
+pub fn release_server_wake_lock() {
+    stop_foreground_service();
+
+    let mut guard = SERVER_WAKE_LOCK.get_or_init(|| Mutex::new(None)).lock().unwrap();
+    *guard = None; // Drop releases the wake lock
+}
