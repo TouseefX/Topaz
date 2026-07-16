@@ -183,4 +183,27 @@ jobs:
           grep -q "cancel_all_notifications" topaz-gui/src/lib.rs && echo "  ✅ Settings tab has cancel-all button"
 
           echo ""
-          echo "🎉 All wakelock & notification validations passed!"
+          echo "=== Verifying ongoing notification & keep-alive ==="
+          grep -q "pub fn show_ongoing_notification" topaz-gui/src/android.rs && echo "  ✅ show_ongoing_notification (non-swipeable)"
+          grep -q "pub fn enable_keepalive" topaz-gui/src/android.rs && echo "  ✅ enable_keepalive"
+          grep -q "pub fn disable_keepalive" topaz-gui/src/android.rs && echo "  ✅ disable_keepalive"
+          grep -q "show_ongoing_notification" topaz-gui/src/server.rs && echo "  ✅ server uses ongoing notification"
+
+          echo ""
+          echo "=== Verifying persistence module ==="
+          grep -q "pub mod persist" topaz-gui/src/lib.rs && echo "  ✅ persist module declared"
+          test -f topaz-gui/src/persist.rs && echo "  ✅ persist.rs exists"
+          grep -q "pub fn load" topaz-gui/src/persist.rs && echo "  ✅ persist::load()"
+          grep -q "pub fn save" topaz-gui/src/persist.rs && echo "  ✅ persist::save()"
+          grep -q "keep_alive" topaz-gui/src/persist.rs && echo "  ✅ keep_alive in saved state"
+          grep -q "save_state" topaz-gui/src/lib.rs && echo "  ✅ TopazApp::save_state()"
+
+          echo ""
+          echo "=== Verifying Cargo.toml ==="
+          grep -q "serde_json" topaz-gui/Cargo.toml && echo "  ✅ serde_json dependency"
+          grep -q "FOREGROUND_SERVICE" topaz-gui/Cargo.toml && echo "  ✅ FOREGROUND_SERVICE permission"
+          grep -q "FOREGROUND_SERVICE_DATA_SYNC" topaz-gui/Cargo.toml && echo "  ✅ FOREGROUND_SERVICE_DATA_SYNC permission"
+          grep -q "dirs" topaz-gui/Cargo.toml && echo "  ✅ dirs dependency (desktop config path)"
+
+          echo ""
+          echo "🎉 All validations passed!"

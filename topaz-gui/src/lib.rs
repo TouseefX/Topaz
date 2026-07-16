@@ -6,6 +6,7 @@ use std::time::Instant;
 use cfg::CfgSnapshot;
 
 pub mod cfg_view;
+pub mod persist;
 pub mod server;
 
 #[cfg(target_os = "android")]
@@ -191,6 +192,7 @@ pub struct TopazApp {
     android_manual_path: String,
 
     // --- Android enhancements ---
+    keep_alive: bool,
     #[cfg(target_os = "android")]
     file_browser_open: bool,
     #[cfg(target_os = "android")]
@@ -201,12 +203,26 @@ pub struct TopazApp {
 
 impl TopazApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        // Load persisted state
+        let saved = persist::load();
+        let saved_theme = match saved.theme.as_str() {
+            "Dark" => egui::ThemePreference::Dark,
+            "Light" => egui::ThemePreference::Light,
+            _ => egui::ThemePreference::System,
+        };
+
+        // If keep_alive was on, restore it now (before the app runs)
+        #[cfg(target_os = "android")]
+        if saved.keep_alive {
+            crate::android::enable_keepalive();
+        }
+
         Self {
             tab: Tab::Decompile,
             sub_tab: SubTab::Source,
             format: BytecodeFormat::Luau,
-            encode_key: 1,
-            encode_key_text: "1".to_string(),
+            encode_key: saved.encode_key,
+            encode_key_text: format!("{}", saved.encode_key),
             input_path: None,
             bytecode: None,
             raw_output: String::new(),
@@ -219,9 +235,9 @@ impl TopazApp {
             status_is_error: false,
             decompile_rx: None,
             decompile_started: None,
-            add_watermark: true,
-            show_upvalue_comments: true,
-            theme: egui::ThemePreference::System,
+            add_watermark: saved.add_watermark,
+            show_upvalue_comments: saved.show_upvalue_comments,
+            theme: saved_theme,
             last_applied_theme: None,
             cfgs: Vec::new(),
             selected_function: 0,
@@ -232,18 +248,19 @@ impl TopazApp {
             hex_jump_text: String::new(),
             hex_jump_to_row: None,
             server: ServerHandle::new(),
-            server_port_text: "3000".to_string(),
-            server_port: 3000,
-            server_luau: true,
-            server_lua51: false,
-            server_encode_key: 203,
-            server_encode_key_text: "203".to_string(),
+            server_port_text: format!("{}", saved.server_port),
+            server_port: saved.server_port,
+            server_luau: saved.server_luau,
+            server_lua51: saved.server_lua51,
+            server_encode_key: saved.server_encode_key,
+            server_encode_key_text: format!("{}", saved.server_encode_key),
             // Default Android paths that users often have
             android_manual_path: if cfg!(target_os = "android") {
                 "/sdcard/Download/sample.luac".to_string()
             } else {
                 String::new()
             },
+            keep_alive: saved.keep_alive,
             #[cfg(target_os = "android")]
             file_browser_open: false,
             #[cfg(target_os = "android")]
@@ -577,6 +594,26 @@ impl TopazApp {
             "Copied to clipboard.".into()
         }
     }
+
+    /// Persist current settings to disk so they survive close/reopen.
+    fn save_state(&self) {
+        let theme_str = match self.theme {
+            egui::ThemePreference::Dark => "Dark",
+            egui::ThemePreference::Light => "Light",
+            _ => "System",
+        };
+        persist::save(&persist::SavedState {
+            theme: theme_str.into(),
+            add_watermark: self.add_watermark,
+            show_upvalue_comments: self.show_upvalue_comments,
+            server_port: self.server_port,
+            server_luau: self.server_luau,
+            server_lua51: self.server_lua51,
+            server_encode_key: self.server_encode_key,
+            encode_key: self.encode_key,
+            keep_alive: self.keep_alive,
+        });
+    }
 }
 
 impl eframe::App for TopazApp {
@@ -584,6 +621,7 @@ impl eframe::App for TopazApp {
         if self.last_applied_theme != Some(self.theme) {
             ctx.set_theme(self.theme);
             self.last_applied_theme = Some(self.theme);
+            self.save_state();
         }
 
         self.poll_decompile();
@@ -1202,7 +1240,44 @@ impl TopazApp {
             ui.add_space(8.0);
 
             egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.label(egui::RichText::new("Android wakelock & notifications").strong());
+                ui.label(egui::RichText::new("Android keep-alive (like Termux)").strong());
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let mut ka = self.keep_alive;
+                    if ui.checkbox(&mut ka, "Keep alive in background").clicked() {
+                        self.keep_alive = ka;
+                        if ka {
+                            crate::android::enable_keepalive();
+                        } else {
+                            crate::android::disable_keepalive();
+                        }
+                        self.save_state();
+                        ui.ctx().request_repaint();
+                    }
+                });
+                ui.weak("Acquires a wakelock and shows a non-swipeable notification so the app stays alive after closing (like Termux). Settings are saved and restored on next launch.");
+                ui.add_space(4.0);
+                let wl_held = crate::android::is_wakelock_held();
+                ui.horizontal(|ui| {
+                    ui.monospace("Wakelock:");
+                    if wl_held {
+                        ui.colored_label(egui::Color32::from_rgb(90, 200, 120), "● held");
+                    } else {
+                        ui.colored_label(egui::Color32::from_rgb(180, 180, 180), "○ released");
+                    }
+                    ui.monospace("  Notification:");
+                    if self.keep_alive {
+                        ui.colored_label(egui::Color32::from_rgb(90, 200, 120), "● ongoing (non-swipeable)");
+                    } else {
+                        ui.colored_label(egui::Color32::from_rgb(180, 180, 180), "○ none");
+                    }
+                });
+            });
+
+            ui.add_space(8.0);
+
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.label(egui::RichText::new("Android test controls").strong());
                 ui.add_space(4.0);
 
                 let wl_held = crate::android::is_wakelock_held();
@@ -1269,6 +1344,7 @@ impl TopazApp {
 
         if output_changed {
             self.apply_output_settings();
+            self.save_state();
         }
     }
 
@@ -1321,6 +1397,7 @@ impl TopazApp {
                     {
                         if let Ok(v) = self.server_port_text.parse::<u16>() {
                             self.server_port = v;
+                            self.save_state();
                         }
                     }
                     ui.weak(port_hint(self.server_port));
@@ -1328,8 +1405,13 @@ impl TopazApp {
 
                     ui.label("Routes");
                     ui.horizontal(|ui| {
+                        let old_luau = self.server_luau;
+                        let old_lua51 = self.server_lua51;
                         ui.checkbox(&mut self.server_luau, "Luau (/luau/decompile)");
                         ui.checkbox(&mut self.server_lua51, "Lua 5.1 (/lua51/decompile)");
+                        if self.server_luau != old_luau || self.server_lua51 != old_lua51 {
+                            self.save_state();
+                        }
                     });
                     ui.label("");
                     ui.end_row();
@@ -1346,6 +1428,7 @@ impl TopazApp {
                     {
                         if let Ok(v) = self.server_encode_key_text.parse::<u8>() {
                             self.server_encode_key = v;
+                            self.save_state();
                         }
                     }
                     ui.weak("Used when ?encode_key=… is not in the URL.")

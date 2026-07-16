@@ -121,8 +121,8 @@ impl ServerHandle {
                         "Server Status",
                         crate::android::notification_importance::LOW,
                     );
-                    // Show a notification indicating the server is starting
-                    crate::android::show_notification(
+                    // Show a persistent ongoing notification (cannot be swiped)
+                    crate::android::show_ongoing_notification(
                         "topaz_server",
                         "Topaz Server",
                         &format!("Starting on port {}…", cfg.port),
@@ -275,7 +275,7 @@ async fn run_server(
     // ── Android: update notification with running address ──
     #[cfg(target_os = "android")]
     {
-        crate::android::show_notification(
+        crate::android::show_ongoing_notification(
             "topaz_server",
             "Topaz Server",
             &format!("Running at http://{addr}"),

@@ -1188,6 +1188,152 @@ pub fn cancel_notification(notif_id: i32) -> bool {
     }
 }
 
+/// Show a persistent notification that **cannot be swiped away** (ongoing=true).
+pub fn show_ongoing_notification(channel_id: &str, title: &str, text: &str, notif_id: i32) -> bool {
+    let result = with_jni(|env, activity| {
+        let service_str = env
+            .new_string("notification")
+            .map_err(|e| format!("new_string(notification): {e:?}"))?;
+        let notification_manager = env
+            .call_method(
+                activity,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&service_str)],
+            )
+            .map_err(|e| format!("getSystemService(notification): {e:?}"))?
+            .l()
+            .map_err(|e| format!("getSystemService.l(): {e:?}"))?;
+
+        if notification_manager.is_null() {
+            return Err("NotificationManager is null".into());
+        }
+
+        let sdk = android_sdk_int();
+        let sdk_26 = sdk >= 26;
+
+        if sdk_26 {
+            let channel_id_obj = env
+                .new_string(channel_id)
+                .map_err(|e| format!("new_string(channel_id): {e:?}"))?;
+
+            let builder = env
+                .new_object(
+                    "android/app/Notification$Builder",
+                    "(Landroid/content/Context;Ljava/lang/String;)V",
+                    &[JValue::Object(activity), JValue::Object(&channel_id_obj)],
+                )
+                .map_err(|e| format!("new Notification.Builder: {e:?}"))?;
+
+            let title_obj = env
+                .new_string(title)
+                .map_err(|e| format!("new_string(title): {e:?}"))?;
+            let text_obj = env
+                .new_string(text)
+                .map_err(|e| format!("new_string(text): {e:?}"))?;
+
+            env.call_method(&builder, "setContentTitle", "(Ljava/lang/CharSequence;)Landroid/app/Notification$Builder;", &[JValue::Object(&title_obj)])
+                .map_err(|e| format!("setContentTitle: {e:?}"))?;
+            env.call_method(&builder, "setContentText", "(Ljava/lang/CharSequence;)Landroid/app/Notification$Builder;", &[JValue::Object(&text_obj)])
+                .map_err(|e| format!("setContentText: {e:?}"))?;
+            env.call_method(&builder, "setSmallIcon", "(I)Landroid/app/Notification$Builder;", &[JValue::Int(17301655)])
+                .map_err(|e| format!("setSmallIcon: {e:?}"))?;
+            // Ongoing = true → user cannot swipe it away (like Termux foreground service)
+            env.call_method(&builder, "setOngoing", "(Z)Landroid/app/Notification$Builder;", &[JValue::Bool(1)])
+                .map_err(|e| format!("setOngoing: {e:?}"))?;
+            // AutoCancel = false → tapping does NOT dismiss it
+            env.call_method(&builder, "setAutoCancel", "(Z)Landroid/app/Notification$Builder;", &[JValue::Bool(0)])
+                .map_err(|e| format!("setAutoCancel: {e:?}"))?;
+
+            let notification = env
+                .call_method(&builder, "build", "()Landroid/app/Notification;", &[])
+                .map_err(|e| format!("build(): {e:?}"))?
+                .l()
+                .map_err(|e| format!("build().l(): {e:?}"))?;
+
+            env.call_method(&notification_manager, "notify", "(ILandroid/app/Notification;)V", &[JValue::Int(notif_id), JValue::Object(&notification)])
+                .map_err(|e| format!("notify(): {e:?}"))?;
+        } else {
+            let builder = env
+                .new_object("android/app/Notification$Builder", "(Landroid/content/Context;)V", &[JValue::Object(activity)])
+                .map_err(|e| format!("new Notification.Builder (legacy): {e:?}"))?;
+
+            let title_obj = env.new_string(title).map_err(|e| format!("new_string(title): {e:?}"))?;
+            let text_obj = env.new_string(text).map_err(|e| format!("new_string(text): {e:?}"))?;
+
+            env.call_method(&builder, "setContentTitle", "(Ljava/lang/CharSequence;)Landroid/app/Notification$Builder;", &[JValue::Object(&title_obj)])
+                .map_err(|e| format!("setContentTitle (legacy): {e:?}"))?;
+            env.call_method(&builder, "setContentText", "(Ljava/lang/CharSequence;)Landroid/app/Notification$Builder;", &[JValue::Object(&text_obj)])
+                .map_err(|e| format!("setContentText (legacy): {e:?}"))?;
+            env.call_method(&builder, "setSmallIcon", "(I)Landroid/app/Notification$Builder;", &[JValue::Int(17301655)])
+                .map_err(|e| format!("setSmallIcon (legacy): {e:?}"))?;
+            env.call_method(&builder, "setOngoing", "(Z)Landroid/app/Notification$Builder;", &[JValue::Bool(1)])
+                .map_err(|e| format!("setOngoing (legacy): {e:?}"))?;
+            env.call_method(&builder, "setAutoCancel", "(Z)Landroid/app/Notification$Builder;", &[JValue::Bool(0)])
+                .map_err(|e| format!("setAutoCancel (legacy): {e:?}"))?;
+
+            let notification = env
+                .call_method(&builder, "build", "()Landroid/app/Notification;", &[])
+                .map_err(|e| format!("build() (legacy): {e:?}"))?
+                .l()
+                .map_err(|e| format!("build().l() (legacy): {e:?}"))?;
+
+            env.call_method(&notification_manager, "notify", "(ILandroid/app/Notification;)V", &[JValue::Int(notif_id), JValue::Object(&notification)])
+                .map_err(|e| format!("notify() (legacy): {e:?}"))?;
+        }
+
+        info!("Ongoing notification shown: id={notif_id}, channel=\"{channel_id}\", title=\"{title}\"");
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            error!("show_ongoing_notification failed: {e}");
+            false
+        }
+    }
+}
+
+// ── Keep-alive: wakelock + ongoing notification ──
+
+static KEEPALIVE_NOTIF_ID: i32 = 9001;
+
+/// Enable keepalive mode: acquire a partial wakelock + show a non-swipeable notification.
+/// When the user opens the app again, this persists (state is saved), so it re-activates on boot.
+pub fn enable_keepalive() -> bool {
+    create_notification_channel("topaz_keepalive", "Topaz Keep-Alive", notification_importance::LOW);
+    let wl = acquire_partial_wakelock("TopazKeepAlive");
+    let notif = show_ongoing_notification(
+        "topaz_keepalive",
+        "Topaz",
+        "Tap to open — Topaz is running in the background.",
+        KEEPALIVE_NOTIF_ID,
+    );
+    if wl && notif {
+        info!("Keepalive enabled: wakelock + ongoing notification");
+    } else if wl {
+        warn!("Keepalive: wakelock OK but notification failed");
+    } else if notif {
+        warn!("Keepalive: notification OK but wakelock failed");
+    } else {
+        error!("Keepalive: both wakelock and notification failed");
+    }
+    wl || notif
+}
+
+/// Disable keepalive mode: release wakelock + remove notification.
+pub fn disable_keepalive() -> bool {
+    let wl = release_wakelock();
+    let notif = cancel_notification(KEEPALIVE_NOTIF_ID);
+    if wl || notif {
+        info!("Keepalive disabled");
+        true
+    } else {
+        false
+    }
+}
+
 /// Cancel all notifications from this app.
 pub fn cancel_all_notifications() -> bool {
     let result = with_jni(|env, activity| {

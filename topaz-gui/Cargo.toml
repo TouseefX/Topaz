@@ -15,6 +15,7 @@ luau-lifter = { path = "../luau-lifter" }
 axum = "0.8"
 base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 tokio = { version = "1.42", features = ["rt", "rt-multi-thread", "net", "sync", "macros"] }
 
 eframe = { version = "0.31", default-features = false, features = ["glow", "wayland", "default_fonts", "x11", "web_screen_reader"] }
@@ -22,6 +23,7 @@ eframe = { version = "0.31", default-features = false, features = ["glow", "wayl
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = "0.15"
 eframe = { version = "0.31", features = ["accesskit"] }
+dirs = "5.0"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.13"
@@ -61,6 +63,12 @@ name = "android.permission.POST_NOTIFICATIONS"
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.WAKE_LOCK"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.FOREGROUND_SERVICE"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.FOREGROUND_SERVICE_DATA_SYNC"
 
 # --- Features ---
 [[package.metadata.android.uses_feature]]
