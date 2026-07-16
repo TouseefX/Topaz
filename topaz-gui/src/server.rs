@@ -1,5 +1,3 @@
-
-
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -112,6 +110,26 @@ impl ServerHandle {
         let thread = std::thread::Builder::new()
             .name("topaz-server".to_string())
             .spawn(move || {
+                // ── Android: acquire wakelock & show notification ──
+                #[cfg(target_os = "android")]
+                {
+                    // Acquire partial wakelock to keep CPU alive during serving
+                    crate::android::acquire_partial_wakelock("TopazServer");
+                    // Create a notification channel for server status
+                    crate::android::create_notification_channel(
+                        "topaz_server",
+                        "Server Status",
+                        crate::android::notification_importance::LOW,
+                    );
+                    // Show a notification indicating the server is starting
+                    crate::android::show_notification(
+                        "topaz_server",
+                        "Topaz Server",
+                        &format!("Starting on port {}…", cfg.port),
+                        1000,
+                    );
+                }
+
                 let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -141,6 +159,13 @@ impl ServerHandle {
                         repaint();
                     }
                 });
+
+                // ── Android: release wakelock & cancel notification ──
+                #[cfg(target_os = "android")]
+                {
+                    crate::android::release_wakelock();
+                    crate::android::cancel_notification(1000);
+                }
             })
             .expect("failed to spawn server thread");
 
@@ -246,6 +271,18 @@ async fn run_server(
         addr: addr.clone(),
         started_at: std::time::SystemTime::now(),
     });
+
+    // ── Android: update notification with running address ──
+    #[cfg(target_os = "android")]
+    {
+        crate::android::show_notification(
+            "topaz_server",
+            "Topaz Server",
+            &format!("Running at http://{addr}"),
+            1000,
+        );
+    }
+
     repaint();
 
     axum::serve(listener, app)

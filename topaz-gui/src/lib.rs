@@ -1176,27 +1176,84 @@ impl TopazApp {
         ui.add_space(8.0);
 
         #[cfg(target_os = "android")]
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.label(egui::RichText::new("Android permissions").strong());
-            ui.add_space(4.0);
-            let p = crate::android::permission_status();
-            ui.monospace(format!(
-                "READ_EXTERNAL_STORAGE: {}\nREAD_MEDIA_IMAGES: {}\nREAD_MEDIA_VIDEO: {}\nREAD_MEDIA_AUDIO: {}\nMANAGE_EXTERNAL: {}",
-                p.storage_granted, p.media_images, p.media_video, p.media_audio, p.manage_external
-            ));
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if ui.button("Request again").clicked() {
-                    crate::android::request_storage_permissions_async();
-                }
-                if ui.button("Open All-files Settings").clicked() {
-                    crate::android::open_app_settings();
-                }
+        {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.label(egui::RichText::new("Android permissions").strong());
+                ui.add_space(4.0);
+                let p = crate::android::permission_status();
+                ui.monospace(format!(
+                    "READ_EXTERNAL_STORAGE: {}\nREAD_MEDIA_IMAGES: {}\nREAD_MEDIA_VIDEO: {}\nREAD_MEDIA_AUDIO: {}\nMANAGE_EXTERNAL: {}",
+                    p.storage_granted, p.media_images, p.media_video, p.media_audio, p.manage_external
+                ));
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Request again").clicked() {
+                        crate::android::request_storage_permissions_async();
+                    }
+                    if ui.button("Open All-files Settings").clicked() {
+                        crate::android::open_app_settings();
+                    }
+                });
+                ui.weak(&p.last_message);
+                ui.add_space(4.0);
+                ui.weak("Android 11+: direct-path mode needs Special app access → All files access. Photo/video/audio permissions do not cover Lua or bytecode files.");
             });
-            ui.weak(&p.last_message);
-            ui.add_space(4.0);
-            ui.weak("Android 11+: direct-path mode needs Special app access → All files access. Photo/video/audio permissions do not cover Lua or bytecode files.");
-        });
+
+            ui.add_space(8.0);
+
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.label(egui::RichText::new("Android wakelock & notifications").strong());
+                ui.add_space(4.0);
+
+                let wl_held = crate::android::is_wakelock_held();
+                ui.horizontal(|ui| {
+                    ui.label("Wakelock:");
+                    if wl_held {
+                        ui.colored_label(egui::Color32::from_rgb(90, 200, 120), "● held");
+                    } else {
+                        ui.colored_label(egui::Color32::from_rgb(180, 180, 180), "○ released");
+                    }
+                });
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("🔒 Acquire test wakelock").clicked() {
+                        crate::android::acquire_partial_wakelock("TopazTest");
+                        ui.ctx().request_repaint();
+                    }
+                    if ui.button("🔓 Release wakelock").clicked() {
+                        crate::android::release_wakelock();
+                        ui.ctx().request_repaint();
+                    }
+                });
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("🔔 Test notification").clicked() {
+                        crate::android::create_notification_channel(
+                            "topaz_test",
+                            "Test Channel",
+                            crate::android::notification_importance::DEFAULT,
+                        );
+                        crate::android::show_notification(
+                            "topaz_test",
+                            "Topaz Test",
+                            "This is a test notification from Topaz.",
+                            42,
+                        );
+                    }
+                    if ui.button("🔕 Cancel test notification").clicked() {
+                        crate::android::cancel_notification(42);
+                    }
+                    if ui.button("Cancel all").clicked() {
+                        crate::android::cancel_all_notifications();
+                    }
+                });
+
+                ui.add_space(4.0);
+                ui.weak("The server tab automatically acquires a wakelock and shows a notification when the server is running.");
+            });
+        }
 
         ui.add_space(8.0);
 

@@ -3,6 +3,8 @@
 // - runtime storage permissions (android-permissions)
 // - in-app file browser
 // - SAF file picker fallback
+// - wakelock (PowerManager via JNI)
+// - notification (NotificationManager via JNI)
 #![cfg(target_os = "android")]
 
 use std::path::{Path, PathBuf};
@@ -10,6 +12,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use jni::objects::JValue;
 use log::{error, info, warn};
 use winit::platform::android::activity::AndroidApp;
 
@@ -25,17 +28,39 @@ pub fn android_app() -> Option<AndroidApp> {
 }
 
 // --------------------------------------------------------------------
-// Clipboard
+// JNI helper — clear any pending Java exception so we don't SIGABRT
 // --------------------------------------------------------------------
 
 fn clear_pending_java_exception(env: &mut jni::JNIEnv<'_>) {
     if matches!(env.exception_check(), Ok(true)) {
-        // A pending Java exception must not escape back through NativeActivity;
-        // doing so aborts the process with SIGABRT.
         let _ = env.exception_describe();
         let _ = env.exception_clear();
     }
 }
+
+/// Attach to the JVM from the ndk_context, call the closure,
+/// and clear any Java exception on failure.
+fn with_jni<F, T>(f: F) -> Result<T, String>
+where
+    F: FnOnce(&mut jni::JNIEnv<'_>, &jni::objects::JObject<'_>) -> Result<T, String>,
+{
+    let ctx = ndk_context::android_context();
+    let vm = (unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) })
+        .map_err(|e| format!("JavaVM::from_raw: {e:?}"))?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|e| format!("attach_current_thread: {e:?}"))?;
+    let activity = unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) };
+    let result = f(&mut env, &activity);
+    if result.is_err() {
+        clear_pending_java_exception(&mut env);
+    }
+    result
+}
+
+// --------------------------------------------------------------------
+// Clipboard
+// --------------------------------------------------------------------
 
 pub fn copy_to_clipboard(text: &str) -> bool {
     use jni::objects::{JObject, JValue};
@@ -114,7 +139,9 @@ pub fn paste_from_clipboard() -> Option<String> {
             )?
             .l()?;
         if manager.is_null()
-            || !env.call_method(&manager, "hasPrimaryClip", "()Z", &[])?.z()?
+            || !env
+                .call_method(&manager, "hasPrimaryClip", "()Z", &[])?
+                .z()?
         {
             return Ok(None);
         }
@@ -140,8 +167,6 @@ pub fn paste_from_clipboard() -> Option<String> {
             )?
             .l()?;
 
-        // getText() may legally return null for URI/Intent/rich clipboard
-        // entries. coerceToText() is the Android-supported conversion API.
         let chars = env
             .call_method(
                 item,
@@ -220,9 +245,6 @@ fn set_permission_status(status: PermissionStatus) {
 pub fn request_storage_permissions_async() {
     let sdk = android_sdk_int();
 
-    // Android 11+ uses scoped storage. READ_EXTERNAL_STORAGE and READ_MEDIA_*
-    // cannot grant access to arbitrary .lua/.luac/.bin files. Direct-path mode
-    // needs the special MANAGE_EXTERNAL_STORAGE settings switch instead.
     if sdk >= 30 {
         let granted = is_manage_external_storage_granted();
         set_permission_status(PermissionStatus {
@@ -231,7 +253,7 @@ pub fn request_storage_permissions_async() {
             last_message: if granted {
                 "All-files access is enabled.".into()
             } else {
-                "Enable “Allow access to manage all files” for direct-path mode.".into()
+                "Enable 'Allow access to manage all files' for direct-path mode.".into()
             },
             ..Default::default()
         });
@@ -241,8 +263,6 @@ pub fn request_storage_permissions_async() {
         return;
     }
 
-    // Android 6-10 legacy fallback. No callback is required here; Android will
-    // show the dialog and the next file operation can check the result.
     use jni::objects::{JObject, JValue};
     let ctx = ndk_context::android_context();
     let Ok(vm) = (unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }) else {
@@ -290,9 +310,7 @@ fn android_sdk_int() -> i32 {
     .unwrap_or(0)
 }
 
-// Best-effort check for MANAGE_EXTERNAL_STORAGE via Environment.isExternalStorageManager()
 fn is_manage_external_storage_granted() -> bool {
-    // Do a tiny JNI call – if anything fails, return false
     (|| -> anyhow::Result<bool> {
         let ctx = ndk_context::android_context();
         let vm = unsafe { jni::JavaVM::from_raw(ctx.vm() as *mut _) }?;
@@ -303,19 +321,15 @@ fn is_manage_external_storage_granted() -> bool {
             return Ok(false);
         }
         let env_class = env.find_class("android/os/Environment")?;
-        let is_mgr: bool = env.call_static_method(
-            env_class,
-            "isExternalStorageManager",
-            "()Z",
-            &[],
-        )?.z()?;
+        let is_mgr: bool = env
+            .call_static_method(env_class, "isExternalStorageManager", "()Z", &[])?
+            .z()?;
         Ok(is_mgr)
-    })().unwrap_or(false)
+    })()
+    .unwrap_or(false)
 }
 
 pub fn open_app_settings() {
-    // Android 11+: open the app-specific "Manage all files" special-access
-    // screen. This is not part of the normal runtime permission dialog.
     use jni::objects::{JObject, JValue};
 
     let ctx = ndk_context::android_context();
@@ -394,7 +408,14 @@ impl FileBrowser {
             entries: Vec::new(),
             error: None,
             show_hidden: false,
-            filter_ext: vec!["luac".into(), "lua".into(), "bin".into(), "txt".into(), "luau".into(), "dat".into()],
+            filter_ext: vec![
+                "luac".into(),
+                "lua".into(),
+                "bin".into(),
+                "txt".into(),
+                "luau".into(),
+                "dat".into(),
+            ],
             selected: None,
             last_refresh: Instant::now() - Duration::from_secs(10),
         };
@@ -422,21 +443,33 @@ impl FileBrowser {
                     let meta = e.metadata().ok();
                     let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
                     let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                    let entry = Entry { name, path, is_dir, size };
+                    let entry = Entry {
+                        name,
+                        path,
+                        is_dir,
+                        size,
+                    };
                     if is_dir {
                         dirs.push(entry);
                     } else {
-                        // filter
-                        if self.filter_ext.is_empty() || entry.name.rsplit('.').next().map(|ext| self.filter_ext.iter().any(|f| f.eq_ignore_ascii_case(ext))).unwrap_or(false) {
+                        if self.filter_ext.is_empty()
+                            || entry
+                                .name
+                                .rsplit('.')
+                                .next()
+                                .map(|ext| {
+                                    self.filter_ext.iter().any(|f| f.eq_ignore_ascii_case(ext))
+                                })
+                                .unwrap_or(false)
+                        {
                             files.push(entry);
                         } else {
-                            // still include if no extension filter hit? include all to avoid confusion
                             files.push(entry);
                         }
                     }
                 }
-                dirs.sort_by(|a,b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                files.sort_by(|a,b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
                 self.entries.extend(dirs);
                 self.entries.extend(files);
             }
@@ -463,11 +496,14 @@ impl FileBrowser {
         let mut picked = None;
 
         ui.horizontal_wrapped(|ui| {
-            if ui.button("⬆ Up").clicked() { self.go_up(); }
-            if ui.button("⟳ Refresh").clicked() { self.refresh(); }
+            if ui.button("⬆ Up").clicked() {
+                self.go_up();
+            }
+            if ui.button("⟳ Refresh").clicked() {
+                self.refresh();
+            }
             ui.checkbox(&mut self.show_hidden, "hidden");
             ui.separator();
-            // Quick bookmarks
             for (label, path) in [
                 ("sdcard", "/sdcard"),
                 ("Download", "/sdcard/Download"),
@@ -491,40 +527,50 @@ impl FileBrowser {
         });
         ui.separator();
 
-        egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
-            if self.entries.is_empty() {
-                ui.weak("(empty — check permissions)");
-                return;
-            }
-            egui::Grid::new("fb_grid").num_columns(3).spacing([8.0, 4.0]).striped(true).show(ui, |ui| {
-                for entry in self.entries.clone() {
-                    let icon = if entry.is_dir { "📁" } else { "📄" };
-                    ui.label(icon);
-                    if ui.link(&entry.name).clicked() {
-                        if entry.is_dir {
-                            self.go_to(entry.path);
-                            break;
-                        } else {
-                            picked = Some(entry.path.clone());
-                            self.selected = picked.clone();
-                        }
-                    }
-                    if entry.is_dir {
-                        ui.weak("dir");
-                    } else {
-                        ui.weak(format!("{} B", entry.size));
-                    }
-                    ui.end_row();
+        egui::ScrollArea::vertical()
+            .max_height(380.0)
+            .show(ui, |ui| {
+                if self.entries.is_empty() {
+                    ui.weak("(empty — check permissions)");
+                    return;
                 }
+                egui::Grid::new("fb_grid")
+                    .num_columns(3)
+                    .spacing([8.0, 4.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for entry in self.entries.clone() {
+                            let icon = if entry.is_dir { "📁" } else { "📄" };
+                            ui.label(icon);
+                            if ui.link(&entry.name).clicked() {
+                                if entry.is_dir {
+                                    self.go_to(entry.path);
+                                    break;
+                                } else {
+                                    picked = Some(entry.path.clone());
+                                    self.selected = picked.clone();
+                                }
+                            }
+                            if entry.is_dir {
+                                ui.weak("dir");
+                            } else {
+                                ui.weak(format!("{} B", entry.size));
+                            }
+                            ui.end_row();
+                        }
+                    });
             });
-        });
 
         ui.separator();
         ui.horizontal(|ui| {
             ui.label("Filter ext:");
             let mut filter_str = self.filter_ext.join(",");
             if ui.text_edit_singleline(&mut filter_str).changed() {
-                self.filter_ext = filter_str.split(',').map(|s| s.trim().trim_start_matches('.').to_lowercase()).filter(|s| !s.is_empty()).collect();
+                self.filter_ext = filter_str
+                    .split(',')
+                    .map(|s| s.trim().trim_start_matches('.').to_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect();
                 self.refresh();
             }
             if ui.small_button("clear").clicked() {
@@ -539,10 +585,7 @@ impl FileBrowser {
 }
 
 // --------------------------------------------------------------------
-// SAF picker (best-effort, fire-and-forget — copies result to /sdcard/Download/topaz_picked_* )
-// For a full SAF implementation you’d need onActivityResult plumbing.
-// Here we provide a simple “Open system picker” button that launches the intent.
-// User must manually copy file path back — so we primarily rely on FileBrowser.
+// SAF picker
 // --------------------------------------------------------------------
 pub fn launch_saf_open_document(mime: &str) {
     use jni::objects::{JObject, JValue};
@@ -577,9 +620,6 @@ pub fn launch_saf_open_document(mime: &str) {
             "(Ljava/lang/String;)Landroid/content/Intent;",
             &[JValue::Object(&category)],
         )?;
-
-        // This only opens the picker. Receiving its content:// result requires
-        // an Activity callback and is intentionally not claimed as a loaded file.
         env.call_method(
             activity,
             "startActivity",
@@ -661,10 +701,526 @@ pub fn share_text(text: &str) -> bool {
     }
 }
 
-// Toast.makeText() was previously called from android_main, which is not the
-// Java UI/Looper thread. Some Android versions abort the native process in that
-// situation. Keep UI feedback in the egui status bar until a Java UI-thread
-// bridge is added.
+// Legacy toast — kept as log-only since NativeActivity doesn't have a UI thread bridge
 pub fn toast(msg: &str) {
     info!("Topaz notification: {msg}");
+}
+
+// ====================================================================
+// Wakelock — PowerManager JNI
+// ====================================================================
+
+// Wakelock level constants matching android.os.PowerManager
+pub mod wake_lock_level {
+    /// Partial wakelock: CPU stays on, screen may be off.
+    pub const PARTIAL: i32 = 0x00000001;
+    /// Full wakelock: CPU + screen bright.
+    pub const FULL: i32 = 0x0000001a;
+    /// Screen dim wakelock: CPU + screen dim.
+    pub const SCREEN_DIM: i32 = 0x00000006;
+    /// Screen bright wakelock: CPU + screen bright.
+    pub const SCREEN_BRIGHT: i32 = 0x0000000a;
+    /// Proximity screen off (API 21+).
+    pub const PROXIMITY_SCREEN_OFF: i32 = 0x00000020;
+}
+
+/// Wakelock handle that automatically releases on drop.
+pub struct Wakelock {
+    // We store a GlobalRef so the Java object survives across JNI calls.
+    inner: Option<jni::objects::GlobalRef>,
+    #[allow(dead_code)]
+    tag: String,
+}
+
+// Static lock for the global wakelock reference
+static WAKELOCK: OnceLock<std::sync::Mutex<Option<Wakelock>>> = OnceLock::new();
+
+fn wakelock_mutex() -> &'static std::sync::Mutex<Option<Wakelock>> {
+    WAKELOCK.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Acquire a wakelock with the given level.
+///
+/// `level` should be one of the `wake_lock_level::*` constants.
+/// `tag` is a debug label for the wakelock (shown in dumpsys).
+///
+/// If a wakelock is already held, it is released first.
+pub fn acquire_wakelock(level: i32, tag: &str) -> bool {
+    // First release any existing wakelock
+    release_wakelock();
+
+    let result = with_jni(|env, activity| {
+        // Get PowerManager system service
+        let service_str = env
+            .new_string("power")
+            .map_err(|e| format!("new_string: {e:?}"))?;
+        let power_manager = env
+            .call_method(
+                activity,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&service_str)],
+            )
+            .map_err(|e| format!("getSystemService: {e:?}"))?
+            .l()
+            .map_err(|e| format!("getSystemService.l(): {e:?}"))?;
+
+        if power_manager.is_null() {
+            return Err("PowerManager is null".into());
+        }
+
+        let tag_obj = env
+            .new_string(tag)
+            .map_err(|e| format!("new_string(tag): {e:?}"))?;
+
+        // PowerManager.newWakeLock(int level, String tag)
+        let wakelock_obj = env
+            .call_method(
+                &power_manager,
+                "newWakeLock",
+                "(ILjava/lang/String;)Landroid/os/PowerManager$WakeLock;",
+                &[JValue::Int(level), JValue::Object(&tag_obj)],
+            )
+            .map_err(|e| format!("newWakeLock: {e:?}"))?
+            .l()
+            .map_err(|e| format!("newWakeLock.l(): {e:?}"))?;
+
+        if wakelock_obj.is_null() {
+            return Err("newWakeLock returned null".into());
+        }
+
+        // Acquire the wakelock
+        env.call_method(&wakelock_obj, "acquire", "()V", &[])
+            .map_err(|e| format!("wakelock.acquire(): {e:?}"))?;
+
+        // Store as a global reference
+        let global_ref = env
+            .new_global_ref(wakelock_obj)
+            .map_err(|e| format!("new_global_ref: {e:?}"))?;
+
+        // Store in our static
+        let mut guard = wakelock_mutex().lock().unwrap();
+        *guard = Some(Wakelock {
+            inner: Some(global_ref),
+            tag: tag.to_string(),
+        });
+
+        info!("Wakelock acquired: level=0x{level:08x}, tag=\"{tag}\"");
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            error!("acquire_wakelock failed: {e}");
+            false
+        }
+    }
+}
+
+/// Acquire a partial wakelock (CPU on, screen may be off).
+/// This is the most common type for background server work.
+pub fn acquire_partial_wakelock(tag: &str) -> bool {
+    acquire_wakelock(wake_lock_level::PARTIAL, tag)
+}
+
+/// Release any currently held wakelock.
+pub fn release_wakelock() -> bool {
+    let mut guard = wakelock_mutex().lock().unwrap();
+    if let Some(wl) = guard.take() {
+        // Drop the Wakelock — its Drop impl calls PowerManager.WakeLock.release()
+        drop(wl);
+        info!("Wakelock released");
+        true
+    } else {
+        false // no wakelock was held
+    }
+}
+
+impl Wakelock {
+    fn release_inner(&mut self) {
+        let Some(ref global_ref) = self.inner else {
+            return;
+        };
+        let result = with_jni(|env, _activity| {
+            let wakelock_obj = global_ref.as_obj();
+            env.call_method(wakelock_obj, "release", "()V", &[])
+                .map_err(|e| format!("wakelock.release(): {e:?}"))?;
+            Ok(())
+        });
+        if let Err(e) = result {
+            error!("release_wakelock (inner) failed: {e}");
+        }
+        self.inner = None;
+    }
+}
+
+impl Drop for Wakelock {
+    fn drop(&mut self) {
+        self.release_inner();
+    }
+}
+
+/// Check whether a wakelock is currently held.
+pub fn is_wakelock_held() -> bool {
+    wakelock_mutex().lock().unwrap().is_some()
+}
+
+// ====================================================================
+// Notification — NotificationManager JNI
+// ====================================================================
+
+/// Notification importance constants matching android.app.NotificationManager
+pub mod notification_importance {
+    /// Default importance — makes a sound and appears in the shade.
+    pub const DEFAULT: i32 = 3;
+    /// High importance — heads-up display.
+    pub const HIGH: i32 = 4;
+    /// Low importance — no sound.
+    pub const LOW: i32 = 2;
+    /// Min importance — no sound, no status bar ticker.
+    pub const MIN: i32 = 1;
+    /// None — no UX interruption.
+    pub const NONE: i32 = 0;
+}
+
+/// Create a notification channel (required on Android 8.0+ / API 26+).
+///
+/// API 25 and below will silently ignore this call since NotificationChannel
+/// does not exist — notifications will still be delivered via the legacy path.
+///
+/// `id` — the channel ID (e.g. "server_status").
+/// `name` — human-readable channel name shown in system Settings.
+/// `importance` — one of `notification_importance::*`.
+pub fn create_notification_channel(id: &str, name: &str, importance: i32) -> bool {
+    let sdk = android_sdk_int();
+    if sdk < 26 {
+        // NotificationChannel is API 26+
+        warn!("NotificationChannel requires API 26+ (current SDK: {sdk}), skipping");
+        return false;
+    }
+
+    let result = with_jni(|env, activity| {
+        let service_str = env
+            .new_string("notification")
+            .map_err(|e| format!("new_string(notification): {e:?}"))?;
+        let notification_manager = env
+            .call_method(
+                activity,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&service_str)],
+            )
+            .map_err(|e| format!("getSystemService(notification): {e:?}"))?
+            .l()
+            .map_err(|e| format!("getSystemService.l(): {e:?}"))?;
+
+        if notification_manager.is_null() {
+            return Err("NotificationManager is null".into());
+        }
+
+        let channel_id = env
+            .new_string(id)
+            .map_err(|e| format!("new_string(channel_id): {e:?}"))?;
+        let channel_name = env
+            .new_string(name)
+            .map_err(|e| format!("new_string(channel_name): {e:?}"))?;
+
+        // NotificationChannel(String id, CharSequence name, int importance)
+        let channel = env
+            .new_object(
+                "android/app/NotificationChannel",
+                "(Ljava/lang/String;Ljava/lang/CharSequence;I)V",
+                &[
+                    JValue::Object(&channel_id),
+                    JValue::Object(&channel_name),
+                    JValue::Int(importance),
+                ],
+            )
+            .map_err(|e| format!("new NotificationChannel: {e:?}"))?;
+
+        // NotificationManager.createNotificationChannel(NotificationChannel)
+        env.call_method(
+            &notification_manager,
+            "createNotificationChannel",
+            "(Landroid/app/NotificationChannel;)V",
+            &[JValue::Object(&channel)],
+        )
+        .map_err(|e| format!("createNotificationChannel: {e:?}"))?;
+
+        info!(
+            "Notification channel created: id=\"{id}\", name=\"{name}\", importance={importance}"
+        );
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            error!("create_notification_channel failed: {e}");
+            false
+        }
+    }
+}
+
+/// Show a persistent notification.
+///
+/// On API 26+ the channel must have been created first via
+/// `create_notification_channel()`.
+///
+/// `channel_id` — must match a channel created via `create_notification_channel`.
+/// `title` — notification title.
+/// `text` — notification body text.
+/// `notif_id` — unique int identifier for this notification (used with `cancel_notification`).
+pub fn show_notification(channel_id: &str, title: &str, text: &str, notif_id: i32) -> bool {
+    let result = with_jni(|env, activity| {
+        let service_str = env
+            .new_string("notification")
+            .map_err(|e| format!("new_string(notification): {e:?}"))?;
+        let notification_manager = env
+            .call_method(
+                activity,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&service_str)],
+            )
+            .map_err(|e| format!("getSystemService(notification): {e:?}"))?
+            .l()
+            .map_err(|e| format!("getSystemService.l(): {e:?}"))?;
+
+        if notification_manager.is_null() {
+            return Err("NotificationManager is null".into());
+        }
+
+        let sdk = android_sdk_int();
+        let sdk_26 = sdk >= 26;
+
+        if sdk_26 {
+            // --- API 26+ path: Notification.Builder ---
+            let channel_id_obj = env
+                .new_string(channel_id)
+                .map_err(|e| format!("new_string(channel_id): {e:?}"))?;
+
+            // new Notification.Builder(Context, String channelId)
+            let builder = env
+                .new_object(
+                    "android/app/Notification$Builder",
+                    "(Landroid/content/Context;Ljava/lang/String;)V",
+                    &[JValue::Object(activity), JValue::Object(&channel_id_obj)],
+                )
+                .map_err(|e| format!("new Notification.Builder: {e:?}"))?;
+
+            let title_obj = env
+                .new_string(title)
+                .map_err(|e| format!("new_string(title): {e:?}"))?;
+            let text_obj = env
+                .new_string(text)
+                .map_err(|e| format!("new_string(text): {e:?}"))?;
+
+            // .setContentTitle(CharSequence)
+            env.call_method(
+                &builder,
+                "setContentTitle",
+                "(Ljava/lang/CharSequence;)Landroid/app/Notification$Builder;",
+                &[JValue::Object(&title_obj)],
+            )
+            .map_err(|e| format!("setContentTitle: {e:?}"))?;
+
+            // .setContentText(CharSequence)
+            env.call_method(
+                &builder,
+                "setContentText",
+                "(Ljava/lang/CharSequence;)Landroid/app/Notification$Builder;",
+                &[JValue::Object(&text_obj)],
+            )
+            .map_err(|e| format!("setContentText: {e:?}"))?;
+
+            // .setSmallIcon(...) — use android.R.drawable.ic_dialog_info (17301655)
+            // We use a built-in system icon to avoid needing custom resources.
+            env.call_method(
+                &builder,
+                "setSmallIcon",
+                "(I)Landroid/app/Notification$Builder;",
+                &[JValue::Int(17301655)], // android.R.drawable.ic_dialog_info
+            )
+            .map_err(|e| format!("setSmallIcon: {e:?}"))?;
+
+            // .setAutoCancel(true) — dismiss when tapped
+            env.call_method(
+                &builder,
+                "setAutoCancel",
+                "(Z)Landroid/app/Notification$Builder;",
+                &[JValue::Bool(1)],
+            )
+            .map_err(|e| format!("setAutoCancel: {e:?}"))?;
+
+            // Build the notification
+            let notification = env
+                .call_method(&builder, "build", "()Landroid/app/Notification;", &[])
+                .map_err(|e| format!("build(): {e:?}"))?
+                .l()
+                .map_err(|e| format!("build().l(): {e:?}"))?;
+
+            // NotificationManager.notify(int id, Notification notification)
+            env.call_method(
+                &notification_manager,
+                "notify",
+                "(ILandroid/app/Notification;)V",
+                &[JValue::Int(notif_id), JValue::Object(&notification)],
+            )
+            .map_err(|e| format!("notify(): {e:?}"))?;
+        } else {
+            // --- Pre-API 26 legacy path: Notification.Builder (without channel) ---
+            let builder = env
+                .new_object(
+                    "android/app/Notification$Builder",
+                    "(Landroid/content/Context;)V",
+                    &[JValue::Object(activity)],
+                )
+                .map_err(|e| format!("new Notification.Builder (legacy): {e:?}"))?;
+
+            let title_obj = env
+                .new_string(title)
+                .map_err(|e| format!("new_string(title): {e:?}"))?;
+            let text_obj = env
+                .new_string(text)
+                .map_err(|e| format!("new_string(text): {e:?}"))?;
+
+            env.call_method(
+                &builder,
+                "setContentTitle",
+                "(Ljava/lang/CharSequence;)Landroid/app/Notification$Builder;",
+                &[JValue::Object(&title_obj)],
+            )
+            .map_err(|e| format!("setContentTitle (legacy): {e:?}"))?;
+
+            env.call_method(
+                &builder,
+                "setContentText",
+                "(Ljava/lang/CharSequence;)Landroid/app/Notification$Builder;",
+                &[JValue::Object(&text_obj)],
+            )
+            .map_err(|e| format!("setContentText (legacy): {e:?}"))?;
+
+            env.call_method(
+                &builder,
+                "setSmallIcon",
+                "(I)Landroid/app/Notification$Builder;",
+                &[JValue::Int(17301655)],
+            )
+            .map_err(|e| format!("setSmallIcon (legacy): {e:?}"))?;
+
+            env.call_method(
+                &builder,
+                "setAutoCancel",
+                "(Z)Landroid/app/Notification$Builder;",
+                &[JValue::Bool(1)],
+            )
+            .map_err(|e| format!("setAutoCancel (legacy): {e:?}"))?;
+
+            let notification = env
+                .call_method(&builder, "build", "()Landroid/app/Notification;", &[])
+                .map_err(|e| format!("build() (legacy): {e:?}"))?
+                .l()
+                .map_err(|e| format!("build().l() (legacy): {e:?}"))?;
+
+            env.call_method(
+                &notification_manager,
+                "notify",
+                "(ILandroid/app/Notification;)V",
+                &[JValue::Int(notif_id), JValue::Object(&notification)],
+            )
+            .map_err(|e| format!("notify() (legacy): {e:?}"))?;
+        }
+
+        info!("Notification shown: id={notif_id}, channel=\"{channel_id}\", title=\"{title}\"");
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            error!("show_notification failed: {e}");
+            false
+        }
+    }
+}
+
+/// Cancel a notification previously shown with `show_notification`.
+pub fn cancel_notification(notif_id: i32) -> bool {
+    let result = with_jni(|env, activity| {
+        let service_str = env
+            .new_string("notification")
+            .map_err(|e| format!("new_string(notification): {e:?}"))?;
+        let notification_manager = env
+            .call_method(
+                activity,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&service_str)],
+            )
+            .map_err(|e| format!("getSystemService(notification): {e:?}"))?
+            .l()
+            .map_err(|e| format!("getSystemService.l(): {e:?}"))?;
+
+        if notification_manager.is_null() {
+            return Err("NotificationManager is null".into());
+        }
+
+        env.call_method(
+            &notification_manager,
+            "cancel",
+            "(I)V",
+            &[JValue::Int(notif_id)],
+        )
+        .map_err(|e| format!("cancel(): {e:?}"))?;
+
+        info!("Notification cancelled: id={notif_id}");
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            error!("cancel_notification failed: {e}");
+            false
+        }
+    }
+}
+
+/// Cancel all notifications from this app.
+pub fn cancel_all_notifications() -> bool {
+    let result = with_jni(|env, activity| {
+        let service_str = env
+            .new_string("notification")
+            .map_err(|e| format!("new_string(notification): {e:?}"))?;
+        let notification_manager = env
+            .call_method(
+                activity,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&service_str)],
+            )
+            .map_err(|e| format!("getSystemService(notification): {e:?}"))?
+            .l()
+            .map_err(|e| format!("getSystemService.l(): {e:?}"))?;
+
+        if notification_manager.is_null() {
+            return Err("NotificationManager is null".into());
+        }
+
+        env.call_method(&notification_manager, "cancelAll", "()V", &[])
+            .map_err(|e| format!("cancelAll(): {e:?}"))?;
+
+        info!("All notifications cancelled");
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            error!("cancel_all_notifications failed: {e}");
+            false
+        }
+    }
 }

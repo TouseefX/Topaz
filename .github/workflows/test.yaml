@@ -143,5 +143,44 @@ jobs:
       - name: Validate Android metadata exists
         run: |
           test -f topaz-gui/Cargo.toml
-          grep -q "package.metadata.android" topaz-gui/Cargo.toml && echo "Android metadata present"
+          grep -q "package.metadata.android" topaz-gui/Cargo.toml && echo "✅ Android metadata present"
           ls -lh topaz-gui/src/lib.rs
+
+      - name: Validate wakelock & notification JNI functions compile
+        run: |
+          echo "=== Verifying wakelock functions ==="
+          grep -q "pub fn acquire_wakelock" topaz-gui/src/android.rs && echo "  ✅ acquire_wakelock"
+          grep -q "pub fn acquire_partial_wakelock" topaz-gui/src/android.rs && echo "  ✅ acquire_partial_wakelock"
+          grep -q "pub fn release_wakelock" topaz-gui/src/android.rs && echo "  ✅ release_wakelock"
+          grep -q "pub fn is_wakelock_held" topaz-gui/src/android.rs && echo "  ✅ is_wakelock_held"
+          grep -q "wake_lock_level" topaz-gui/src/android.rs && echo "  ✅ wake_lock_level constants"
+
+          echo ""
+          echo "=== Verifying notification functions ==="
+          grep -q "pub fn create_notification_channel" topaz-gui/src/android.rs && echo "  ✅ create_notification_channel"
+          grep -q "pub fn show_notification" topaz-gui/src/android.rs && echo "  ✅ show_notification"
+          grep -q "pub fn cancel_notification" topaz-gui/src/android.rs && echo "  ✅ cancel_notification"
+          grep -q "pub fn cancel_all_notifications" topaz-gui/src/android.rs && echo "  ✅ cancel_all_notifications"
+          grep -q "notification_importance" topaz-gui/src/android.rs && echo "  ✅ notification_importance constants"
+
+          echo ""
+          echo "=== Verifying server integration ==="
+          grep -q "acquire_partial_wakelock" topaz-gui/src/server.rs && echo "  ✅ server uses acquire_partial_wakelock"
+          grep -q "release_wakelock" topaz-gui/src/server.rs && echo "  ✅ server uses release_wakelock"
+          grep -q "show_notification" topaz-gui/src/server.rs && echo "  ✅ server uses show_notification"
+          grep -q "cancel_notification" topaz-gui/src/server.rs && echo "  ✅ server uses cancel_notification"
+          grep -q "create_notification_channel" topaz-gui/src/server.rs && echo "  ✅ server uses create_notification_channel"
+
+          echo ""
+          echo "=== Verifying Cargo.toml permissions ==="
+          grep -q "WAKE_LOCK" topaz-gui/Cargo.toml && echo "  ✅ WAKE_LOCK permission declared"
+          grep -q "POST_NOTIFICATIONS" topaz-gui/Cargo.toml && echo "  ✅ POST_NOTIFICATIONS permission declared"
+
+          echo ""
+          echo "=== Verifying Settings tab UI ==="
+          grep -q "acquire_partial_wakelock" topaz-gui/src/lib.rs && echo "  ✅ Settings tab has wakelock controls"
+          grep -q "show_notification" topaz-gui/src/lib.rs && echo "  ✅ Settings tab has notification controls"
+          grep -q "cancel_all_notifications" topaz-gui/src/lib.rs && echo "  ✅ Settings tab has cancel-all button"
+
+          echo ""
+          echo "🎉 All wakelock & notification validations passed!"
