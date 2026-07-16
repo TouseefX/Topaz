@@ -58,6 +58,23 @@ where
     result
 }
 
+fn app_package_name(
+    env: &mut jni::JNIEnv<'_>,
+    activity: &jni::objects::JObject<'_>,
+) -> Result<String, String> {
+    let name_obj = env
+        .call_method(activity, "getPackageName", "()Ljava/lang/String;", &[])
+        .map_err(|e| format!("getPackageName(): {e:?}"))?
+        .l()
+        .map_err(|e| format!("getPackageName().l(): {e:?}"))?;
+    let jstr = jni::objects::JString::from(name_obj);
+    let s: String = env
+        .get_string(&jstr)
+        .map_err(|e| format!("get_string(package_name): {e:?}"))?
+        .into();
+    Ok(s)
+}
+
 // --------------------------------------------------------------------
 // Clipboard
 // --------------------------------------------------------------------
@@ -1295,38 +1312,156 @@ pub fn show_ongoing_notification(channel_id: &str, title: &str, text: &str, noti
     }
 }
 
-// ── Keep-alive: wakelock + ongoing notification ──
+// ── Keep-alive: wakelock + real foreground-service notification ──
 
-static KEEPALIVE_NOTIF_ID: i32 = 9001;
+/// Build an explicit Intent targeting `<pkg>.KeepAliveService` and run `f` with it.
+fn with_keepalive_intent<F>(f: F) -> Result<(), String>
+where
+    F: FnOnce(&mut jni::JNIEnv<'_>, &jni::objects::JObject<'_>, &jni::objects::JObject<'_>) -> Result<(), String>,
+{
+    with_jni(|env, activity| {
+        let pkg = app_package_name(env, activity)?;
+        let service_class = format!("{pkg}.KeepAliveService");
 
-/// Enable keepalive mode: acquire a partial wakelock + show a non-swipeable notification.
-/// When the user opens the app again, this persists (state is saved), so it re-activates on boot.
-pub fn enable_keepalive() -> bool {
-    create_notification_channel("topaz_keepalive", "Topaz Keep-Alive", notification_importance::LOW);
-    let wl = acquire_partial_wakelock("TopazKeepAlive");
-    let notif = show_ongoing_notification(
-        "topaz_keepalive",
-        "Topaz",
-        "Tap to open — Topaz is running in the background.",
-        KEEPALIVE_NOTIF_ID,
-    );
-    if wl && notif {
-        info!("Keepalive enabled: wakelock + ongoing notification");
-    } else if wl {
-        warn!("Keepalive: wakelock OK but notification failed");
-    } else if notif {
-        warn!("Keepalive: notification OK but wakelock failed");
-    } else {
-        error!("Keepalive: both wakelock and notification failed");
-    }
-    wl || notif
+        let intent = env
+            .new_object("android/content/Intent", "()V", &[])
+            .map_err(|e| format!("new Intent: {e:?}"))?;
+        let pkg_str = env
+            .new_string(&pkg)
+            .map_err(|e| format!("new_string(pkg): {e:?}"))?;
+        let cls_str = env
+            .new_string(&service_class)
+            .map_err(|e| format!("new_string(cls): {e:?}"))?;
+        env.call_method(
+            &intent,
+            "setClassName",
+            "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
+            &[JValue::Object(&pkg_str), JValue::Object(&cls_str)],
+        )
+        .map_err(|e| format!("setClassName: {e:?}"))?;
+
+        f(env, activity, &intent)
+    })
 }
 
-/// Disable keepalive mode: release wakelock + remove notification.
+// Both the "Persistent" toggle and the running HTTP server want the service alive at
+// the same time in some cases. Ref-count so whichever one calls stop() first doesn't
+// pull the notification out from under the other.
+static KEEPALIVE_REFS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Start (or update the text of) the KeepAliveService — a genuine Android foreground
+/// service. This is what actually prevents the notification from being swiped away;
+/// see `KeepAliveService.java`. Safe to call repeatedly (e.g. to refresh the notification
+/// text); each call registers one "owner" that must later call `stop_keepalive_service`.
+pub fn start_keepalive_service(text: &str) -> bool {
+    KEEPALIVE_REFS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    jni_start_keepalive_service(text)
+}
+
+fn jni_start_keepalive_service(text: &str) -> bool {
+    let result = with_keepalive_intent(|env, activity, intent| {
+        let key = env
+            .new_string("text")
+            .map_err(|e| format!("new_string(key): {e:?}"))?;
+        let value = env
+            .new_string(text)
+            .map_err(|e| format!("new_string(value): {e:?}"))?;
+        env.call_method(
+            intent,
+            "putExtra",
+            "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
+            &[JValue::Object(&key), JValue::Object(&value)],
+        )
+        .map_err(|e| format!("putExtra: {e:?}"))?;
+
+        let sdk = android_sdk_int();
+        let method = if sdk >= 26 {
+            "startForegroundService"
+        } else {
+            "startService"
+        };
+        env.call_method(
+            activity,
+            method,
+            "(Landroid/content/Intent;)Landroid/content/ComponentName;",
+            &[JValue::Object(intent)],
+        )
+        .map_err(|e| format!("{method}: {e:?}"))?;
+
+        info!("KeepAliveService started via {method} (\"{text}\")");
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            error!("start_keepalive_service failed: {e}");
+            false
+        }
+    }
+}
+
+/// Release one "owner" of the KeepAliveService. Only actually stops the service (and its
+/// notification) once every caller that started it has also called this.
+pub fn stop_keepalive_service() -> bool {
+    use std::sync::atomic::Ordering;
+    let prev = KEEPALIVE_REFS
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some(v.saturating_sub(1)))
+        .unwrap_or(0);
+    if prev > 1 {
+        info!(
+            "stop_keepalive_service: {} other owner(s) still active, leaving service running",
+            prev - 1
+        );
+        return true;
+    }
+    jni_stop_keepalive_service()
+}
+
+fn jni_stop_keepalive_service() -> bool {
+    let result = with_keepalive_intent(|env, activity, intent| {
+        env.call_method(
+            activity,
+            "stopService",
+            "(Landroid/content/Intent;)Z",
+            &[JValue::Object(intent)],
+        )
+        .map_err(|e| format!("stopService: {e:?}"))?;
+        info!("KeepAliveService stopped");
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            error!("stop_keepalive_service failed: {e}");
+            false
+        }
+    }
+}
+
+/// Enable keepalive mode: acquire a partial wakelock + start the real foreground service.
+/// When the user opens the app again, this persists (state is saved), so it re-activates on boot.
+pub fn enable_keepalive() -> bool {
+    let wl = acquire_partial_wakelock("TopazKeepAlive");
+    let svc = start_keepalive_service("Tap to open — Topaz is running in the background.");
+    if wl && svc {
+        info!("Keepalive enabled: wakelock + foreground service");
+    } else if wl {
+        warn!("Keepalive: wakelock OK but foreground service failed to start");
+    } else if svc {
+        warn!("Keepalive: foreground service OK but wakelock failed");
+    } else {
+        error!("Keepalive: both wakelock and foreground service failed");
+    }
+    wl || svc
+}
+
+/// Disable keepalive mode: release wakelock + stop the foreground service.
 pub fn disable_keepalive() -> bool {
     let wl = release_wakelock();
-    let notif = cancel_notification(KEEPALIVE_NOTIF_ID);
-    if wl || notif {
+    let svc = stop_keepalive_service();
+    if wl || svc {
         info!("Keepalive disabled");
         true
     } else {

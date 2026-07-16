@@ -115,19 +115,11 @@ impl ServerHandle {
                 {
                     // Acquire partial wakelock to keep CPU alive during serving
                     crate::android::acquire_partial_wakelock("TopazServer");
-                    // Create a notification channel for server status
-                    crate::android::create_notification_channel(
-                        "topaz_server",
-                        "Server Status",
-                        crate::android::notification_importance::LOW,
-                    );
-                    // Show a persistent ongoing notification (cannot be swiped)
-                    crate::android::show_ongoing_notification(
-                        "topaz_server",
-                        "Topaz Server",
-                        &format!("Starting on port {}…", cfg.port),
-                        1000,
-                    );
+                    // Real foreground service — genuinely non-swipeable, unlike a bare notify()
+                    crate::android::start_keepalive_service(&format!(
+                        "Starting on port {}…",
+                        cfg.port
+                    ));
                 }
 
                 let rt = match tokio::runtime::Builder::new_current_thread()
@@ -164,7 +156,7 @@ impl ServerHandle {
                 #[cfg(target_os = "android")]
                 {
                     crate::android::release_wakelock();
-                    crate::android::cancel_notification(1000);
+                    crate::android::stop_keepalive_service();
                 }
             })
             .expect("failed to spawn server thread");
@@ -275,12 +267,7 @@ async fn run_server(
     // ── Android: update notification with running address ──
     #[cfg(target_os = "android")]
     {
-        crate::android::show_ongoing_notification(
-            "topaz_server",
-            "Topaz Server",
-            &format!("Running at http://{addr}"),
-            1000,
-        );
+        crate::android::start_keepalive_service(&format!("Running at http://{addr}"));
     }
 
     repaint();

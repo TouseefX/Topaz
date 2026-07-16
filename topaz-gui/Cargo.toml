@@ -43,6 +43,11 @@ min_sdk_version = 24
 target_sdk_version = 34
 compile_sdk_version = 34
 
+# Compiled with javac and dexed into the APK by cargo-apk2. This is what lets
+# KeepAliveService actually exist as a real Android component (see below) —
+# without it there is no class for the <service> entry to point to.
+java_sources = "java"
+
 # --- Permissions ---
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"
@@ -103,3 +108,9 @@ value = "true"
 actions = ["android.intent.action.VIEW", "android.intent.action.EDIT", "android.intent.action.SEND"]
 categories = ["android.intent.category.DEFAULT", "android.intent.category.BROWSABLE"]
 data_mime_type = ["*/*"]
+
+# --- Foreground service (real, non-swipeable notification) ---
+[[package.metadata.android.application.service]]
+name = "com.exec.topaz.KeepAliveService"
+exported = false
+foreground_service_type = "dataSync"
