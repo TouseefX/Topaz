@@ -274,7 +274,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          APK=$(find target -name "*.apk" -type f | head -n 1)
+          APK=$(find target -name "Topaz.apk" -type f | head -n 1)
           [ -z "$APK" ] && { echo "APK not found!"; exit 1; }
           cp "$APK" Topaz-debug.apk
           ls -lh Topaz-debug.apk
