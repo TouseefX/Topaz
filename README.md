@@ -57,6 +57,13 @@ If you are using an emulator, `localhost` will not work since that will refer to
 Instead, we must use `10.0.2.2` instead.
 To test if everything is working, on your actual machine [http://localhost:3000/] should load fine, and on the emulator's browser, [http://10.0.2.2:3000/] should load. If your emulator is giving you HTTP connection fail errors, then you can try [ngrok](https://ngrok.com/) instead.
 
+### Native Android
+
+> [!NOTE]
+> 
+> - If you're using a android, its not possible to use localhost
+> - you may have to reverse proxy your localhost and use that link Instand
+
 ```lua
 getgenv().decompile = function(script_instance)
   local bytecode = getscriptbytecode(script_instance)
