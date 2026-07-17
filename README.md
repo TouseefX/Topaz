@@ -44,6 +44,13 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/Infinity-Networking/T
 })
 ```
 
+### Native Android
+
+> [!NOTE]
+> 
+> - If you're using a android, its not possible to use localhost
+> - you may have to reverse proxy your localhost and use that link Instand
+
 ### Android Emulator
 
 > [!NOTE]
@@ -56,13 +63,6 @@ Run the web-server on your actual machine.
 If you are using an emulator, `localhost` will not work since that will refer to the emulator's device.
 Instead, we must use `10.0.2.2` instead.
 To test if everything is working, on your actual machine [http://localhost:3000/] should load fine, and on the emulator's browser, [http://10.0.2.2:3000/] should load. If your emulator is giving you HTTP connection fail errors, then you can try [ngrok](https://ngrok.com/) instead.
-
-### Native Android
-
-> [!NOTE]
-> 
-> - If you're using a android, its not possible to use localhost
-> - you may have to reverse proxy your localhost and use that link Instand
 
 ```lua
 getgenv().decompile = function(script_instance)
@@ -94,4 +94,4 @@ All credits to the medal project goes to in honor and memory of
 - Jujhar Singh (KowalskiFX)
 - Mathias Pedersen (Customality)
 
-Keep the Singh and Pedersen family in your guys' prayers, we love you both.
+Keep the Singh and Pedersen family in your guys' prayers, we love you boh.
