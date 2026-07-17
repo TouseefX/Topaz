@@ -114,3 +114,4 @@ data_mime_type = ["*/*"]
 name = "com.exec.topaz.KeepAliveService"
 exported = false
 foreground_service_type = "dataSync"
+process = ":service"

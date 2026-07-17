@@ -90,6 +90,11 @@ public class KeepAliveService extends Service {
     }
 
     @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        super.onTaskRemoved(rootIntent);
+    }
+
+    @Override
     public void onDestroy() {
         stopForeground(true);
         super.onDestroy();
