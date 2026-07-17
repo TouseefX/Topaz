@@ -94,4 +94,4 @@ All credits to the medal project goes to in honor and memory of
 - Jujhar Singh (KowalskiFX)
 - Mathias Pedersen (Customality)
 
-Keep the Singh and Pedersen family in your guys' prayers, we love you boh.
+Keep the Singh and Pedersen family in your guys' prayers, we love you both.
