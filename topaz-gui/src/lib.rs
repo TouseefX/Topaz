@@ -95,6 +95,23 @@ pub fn run_desktop() -> eframe::Result {
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
+    // android_main can be invoked more than once in the same process: if our
+    // foreground service (KeepAliveService, now in its own :service process —
+    // see ipc_stats.rs / service_entry.rs) kept this process alive after the
+    // Activity was destroyed (e.g. swiped from Recents), reopening the app
+    // creates a new Activity and the system calls android_main again here.
+    // winit can only ever create one EventLoop per process. In practice a
+    // second attempt doesn't cleanly return an Err we can catch (see the
+    // run_native error branch below) — it hangs indefinitely before logging
+    // anything, and the framework eventually gives up waiting on the new
+    // Activity's window ("top resumed state loss timeout" in logcat), with
+    // nothing ever reaching logcat from our side. So: bail out immediately,
+    // before calling into winit at all, rather than hoping run_native errors.
+    static ALREADY_RAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if ALREADY_RAN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        std::process::exit(1);
+    }
+
     // Setup Android logger so `log` macros and `println!` go to logcat
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
