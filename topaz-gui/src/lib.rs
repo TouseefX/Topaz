@@ -124,10 +124,12 @@ fn android_main(app: AndroidApp) {
         // We are being relaunched while a service process may still be alive.
         // Force a clean process restart so winit gets a fresh EventLoop.
         log::warn!("android_main called again while keep-alive may be active — restarting process to avoid splash hang");
-        let _ = std::process::Command::new(std::env::current_exe().unwrap_or_else(|| std::path::PathBuf::from("/system/bin/app_process")))
-            .args(std::env::args_os().skip(1))
-            .env_remove("TOPAZ_RESTARTED")
-            .spawn();
+        let _ = std::process::Command::new(
+            std::env::current_exe()
+                .unwrap_or_else(|_| std::path::PathBuf::from("/system/bin/app_process")),
+        )
+        .args(std::env::args_os().skip(1))
+        .spawn();
         std::process::exit(0);
     }
 
