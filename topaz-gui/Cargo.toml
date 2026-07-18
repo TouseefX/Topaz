@@ -91,6 +91,7 @@ label = "Topaz"
 name = "android.app.NativeActivity"
 config_changes = "orientation|keyboardHidden|screenSize|screenLayout|smallestScreenSize|uiMode|density"
 exported = true
+launch_mode = "singleTask"
 
 [[package.metadata.android.application.activity.intent_filter]]
 actions = ["android.intent.action.MAIN"]
