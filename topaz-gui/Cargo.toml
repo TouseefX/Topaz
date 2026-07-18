@@ -91,12 +91,7 @@ label = "Topaz"
 name = "android.app.NativeActivity"
 config_changes = "orientation|keyboardHidden|screenSize|screenLayout|smallestScreenSize|uiMode|density"
 exported = true
-# A NativeActivity must not be singleTask while a foreground service keeps the
-# package alive.  After the user dismisses the task, Android can route the next
-# launcher intent to a stale native activity and leave its starting splash up.
-# singleTop still prevents a duplicate when the activity is already foreground,
-# but allows Android to create a clean activity after the task was dismissed.
-launch_mode = "singleTop"
+launch_mode = "standard"
 
 [[package.metadata.android.application.activity.intent_filter]]
 actions = ["android.intent.action.MAIN"]
