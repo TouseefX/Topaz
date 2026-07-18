@@ -59,7 +59,14 @@ public class KeepAliveService extends Service {
         PendingIntent contentIntent = null;
         Intent launchIntent = getPackageManager().getLaunchIntentForPackage(getPackageName());
         if (launchIntent != null) {
-            launchIntent.setFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+            // REORDER_TO_FRONT can revive a NativeActivity whose window/event
+            // loop was disposed when its task was dismissed.  That is the
+            // splash/logo hang: Android waits for that stale activity to draw.
+            // Start a clean task instead, reusing only an already-top instance.
+            launchIntent.setFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK
+                            | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                            | Intent.FLAG_ACTIVITY_SINGLE_TOP);
             int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 piFlags |= PendingIntent.FLAG_IMMUTABLE;
