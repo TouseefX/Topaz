@@ -88,7 +88,7 @@ label = "Topaz"
 
 # --- Main Activity ---
 [[package.metadata.android.application.activity]]
-name = "android.app.NativeActivity"
+name = "com.exec.topaz.TopazActivity"
 config_changes = "orientation|keyboardHidden|screenSize|screenLayout|smallestScreenSize|uiMode|density"
 exported = true
 launch_mode = "standard"
@@ -100,6 +100,11 @@ categories = ["android.intent.category.LAUNCHER"]
 [[package.metadata.android.application.activity.meta_data]]
 name = "android.app.lib_name"
 value = "topaz_gui"
+
+# Also tell Android the fully-qualified name of our custom activity
+[[package.metadata.android.application.activity.meta_data]]
+name = "android.app.activity_name"
+value = "com.exec.topaz.TopazActivity"
 
 [[package.metadata.android.application.activity.meta_data]]
 name = "android.requestLegacyExternalStorage"
