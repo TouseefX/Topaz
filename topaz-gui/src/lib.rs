@@ -677,16 +677,18 @@ impl TopazApp {
         };
 
         if let Some(status) = ipc_stats::read_status(&path) {
-            // Detect stale status (server was force-killed)
+            // Detect stale status (server was force-killed or service died)
             let now_ms = ipc_stats::now_ms();
-            if now_ms.saturating_sub(status.updated_ms) > 5000 {
-                // Stale for >5s — treat as stopped
+            let is_stale = now_ms.saturating_sub(status.updated_ms) > 5000;
+
+            if is_stale {
+                // Completely clear any old Running state so uptime doesn't keep counting
                 self.android_server_status = ipc_stats::SharedServerStatus::default();
             } else {
                 self.android_server_status = status;
             }
         } else {
-            // No file at all — definitely stopped
+            // No status file at all — server is definitely stopped
             self.android_server_status = ipc_stats::SharedServerStatus::default();
         }
     }
