@@ -6,11 +6,14 @@ use std::time::Instant;
 use cfg::CfgSnapshot;
 
 pub mod cfg_view;
+pub mod ipc_stats;
 pub mod persist;
 pub mod server;
 
 #[cfg(target_os = "android")]
 pub mod android;
+#[cfg(target_os = "android")]
+pub mod service_entry;
 
 use cfg_view::CfgViewState;
 use server::{ServerConfig, ServerHandle, ServerState};
@@ -124,7 +127,16 @@ fn android_main(app: AndroidApp) {
             Ok(Box::new(TopazApp::new(cc)))
         }),
     ) {
-        log::error!("eframe run_native error: {e:?}");
+        // winit can only ever create one EventLoop per process (see
+        // https://github.com/rust-windowing/winit/issues/3325). If our
+        // foreground service kept this process alive after the Activity was
+        // destroyed (e.g. swiped from Recents) and the user reopens the app,
+        // android_main runs again and this second run_native() call fails
+        // with "RecreationAttempt" — nothing gets drawn and the OS splash
+        // hangs forever. Self-terminate so the next launch gets a clean
+        // process instead of requiring a manual force-stop.
+        log::error!("eframe run_native error: {e:?} — restarting process");
+        std::process::exit(1);
     }
 }
 
@@ -180,7 +192,19 @@ pub struct TopazApp {
     hex_jump_text: String,
     hex_jump_to_row: Option<usize>,
 
+    #[cfg(not(target_os = "android"))]
     server: ServerHandle,
+    // On Android the server actually runs in KeepAliveService's separate
+    // `:service` process (see service_entry.rs) so the UI process can freely
+    // die/restart without taking it down. We control it via Intents and
+    // read its state by polling the small JSON file it writes instead of
+    // holding a live Arc to it.
+    #[cfg(target_os = "android")]
+    android_server_status: ipc_stats::SharedServerStatus,
+    #[cfg(target_os = "android")]
+    android_stats_path: Option<PathBuf>,
+    #[cfg(target_os = "android")]
+    android_last_poll: Option<Instant>,
     server_port_text: String,
     server_port: u16,
     server_luau: bool,
@@ -247,7 +271,14 @@ impl TopazApp {
             search_context: 0,
             hex_jump_text: String::new(),
             hex_jump_to_row: None,
+            #[cfg(not(target_os = "android"))]
             server: ServerHandle::new(),
+            #[cfg(target_os = "android")]
+            android_server_status: ipc_stats::SharedServerStatus::default(),
+            #[cfg(target_os = "android")]
+            android_stats_path: None,
+            #[cfg(target_os = "android")]
+            android_last_poll: None,
             server_port_text: format!("{}", saved.server_port),
             server_port: saved.server_port,
             server_luau: saved.server_luau,
@@ -568,12 +599,61 @@ impl TopazApp {
         }
     }
 
+    #[cfg(not(target_os = "android"))]
     fn current_server_state(&self) -> ServerState {
         self.server
             .state
             .lock()
             .map(|s| s.clone())
             .unwrap_or(ServerState::Stopped)
+    }
+
+    #[cfg(target_os = "android")]
+    fn current_server_state(&self) -> ServerState {
+        match &self.android_server_status.state {
+            ipc_stats::SharedState::Stopped => ServerState::Stopped,
+            ipc_stats::SharedState::Starting { port } => ServerState::Starting { port: *port },
+            ipc_stats::SharedState::Running { addr, started_at_ms } => ServerState::Running {
+                addr: addr.clone(),
+                started_at: std::time::UNIX_EPOCH
+                    + std::time::Duration::from_millis(*started_at_ms),
+            },
+            ipc_stats::SharedState::Stopping => ServerState::Stopping,
+            ipc_stats::SharedState::Failed { message } => {
+                ServerState::Failed { message: message.clone() }
+            }
+        }
+    }
+
+    /// Android only: re-read the status file KeepAliveService's `:service`
+    /// process writes roughly once a second. Cheap enough to call every
+    /// frame; throttled anyway so it's at most a few reads/sec while the
+    /// Server tab is open and repainting.
+    #[cfg(target_os = "android")]
+    fn poll_android_server_status(&mut self) {
+        let now = Instant::now();
+        if let Some(last) = self.android_last_poll {
+            if now.duration_since(last) < std::time::Duration::from_millis(400) {
+                return;
+            }
+        }
+        self.android_last_poll = Some(now);
+
+        let path = match &self.android_stats_path {
+            Some(p) => p.clone(),
+            None => match crate::android::files_dir() {
+                Some(dir) => {
+                    let p = ipc_stats::stats_path(&dir);
+                    self.android_stats_path = Some(p.clone());
+                    p
+                }
+                None => return,
+            },
+        };
+
+        if let Some(status) = ipc_stats::read_status(&path) {
+            self.android_server_status = status;
+        }
     }
 
     // Unified clipboard copy that works on desktop + Android
@@ -1349,10 +1429,19 @@ impl TopazApp {
     }
 
     fn show_server_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        #[cfg(target_os = "android")]
+        self.poll_android_server_status();
+
         let state = self.current_server_state();
         let running = state.is_running();
         let transitional = state.is_transitional();
         let inputs_enabled = !running && !transitional;
+
+        // Status changes on Android arrive via polling, not a repaint callback
+        // (there's no live callback across the process boundary), so keep the
+        // UI refreshing while this tab is open.
+        #[cfg(target_os = "android")]
+        ctx.request_repaint_after(std::time::Duration::from_millis(400));
 
         ui.add_space(4.0);
         ui.label(
@@ -1447,21 +1536,36 @@ impl TopazApp {
                 .add_enabled(can_start, egui::Button::new(start_label).min_size(egui::vec2(140.0, 28.0)))
                 .clicked()
             {
-                let ctx = ctx.clone();
-                let cfg = ServerConfig {
-                    port: self.server_port,
-                    luau: self.server_luau,
-                    lua51: self.server_lua51,
-                    encode_key: self.server_encode_key,
-                };
-                self.server.start(cfg, move || ctx.request_repaint());
+                #[cfg(not(target_os = "android"))]
+                {
+                    let ctx = ctx.clone();
+                    let cfg = ServerConfig {
+                        port: self.server_port,
+                        luau: self.server_luau,
+                        lua51: self.server_lua51,
+                        encode_key: self.server_encode_key,
+                    };
+                    self.server.start(cfg, move || ctx.request_repaint());
+                }
+                #[cfg(target_os = "android")]
+                {
+                    crate::android::start_remote_server(crate::android::RemoteServerConfig {
+                        port: self.server_port,
+                        luau: self.server_luau,
+                        lua51: self.server_lua51,
+                        encode_key: self.server_encode_key,
+                    });
+                }
             }
 
             if ui
                 .add_enabled(running, egui::Button::new("■  Stop server").min_size(egui::vec2(140.0, 28.0)))
                 .clicked()
             {
+                #[cfg(not(target_os = "android"))]
                 self.server.stop();
+                #[cfg(target_os = "android")]
+                crate::android::stop_remote_server();
             }
 
             if !self.server_luau && !self.server_lua51 && !running {
@@ -1505,22 +1609,52 @@ impl TopazApp {
             ui.add_space(8.0);
 
             egui::Frame::group(ui.style()).show(ui, |ui| {
-                use std::sync::atomic::Ordering;
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Activity").strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("Reset").clicked() {
+                            #[cfg(not(target_os = "android"))]
                             self.server.reset_stats();
+                            // Android: stats live in the :service process; a
+                            // "reset while running" remote command isn't
+                            // wired up yet, so this is a no-op there for now.
                         }
                     });
                 });
                 ui.add_space(4.0);
 
-                let s = &self.server.stats;
-                let luau = s.luau_requests.load(Ordering::Relaxed);
-                let lua51 = s.lua51_requests.load(Ordering::Relaxed);
-                let bytes_in = s.bytes_in.load(Ordering::Relaxed);
-                let bytes_out = s.bytes_out.load(Ordering::Relaxed);
+                #[cfg(not(target_os = "android"))]
+                let (luau, lua51, bytes_in, bytes_out, last_str) = {
+                    use std::sync::atomic::Ordering;
+                    let s = &self.server.stats;
+                    let last_str = {
+                        let last = s.last_request.lock().ok().and_then(|g| *g);
+                        match last.and_then(|t| t.elapsed().ok()) {
+                            None => "—".to_string(),
+                            Some(elapsed) => format!("{} ago", format_duration(elapsed)),
+                        }
+                    };
+                    (
+                        s.luau_requests.load(Ordering::Relaxed),
+                        s.lua51_requests.load(Ordering::Relaxed),
+                        s.bytes_in.load(Ordering::Relaxed),
+                        s.bytes_out.load(Ordering::Relaxed),
+                        last_str,
+                    )
+                };
+                #[cfg(target_os = "android")]
+                let (luau, lua51, bytes_in, bytes_out, last_str) = {
+                    let s = &self.android_server_status;
+                    let last_str = match s.last_request_ms {
+                        None => "—".to_string(),
+                        Some(ms) => {
+                            let now = ipc_stats::now_ms();
+                            let elapsed = std::time::Duration::from_millis(now.saturating_sub(ms));
+                            format!("{} ago", format_duration(elapsed))
+                        }
+                    };
+                    (s.luau_requests, s.lua51_requests, s.bytes_in, s.bytes_out, last_str)
+                };
                 let total = luau + lua51;
 
                 egui::Grid::new("server_stats")
@@ -1543,13 +1677,6 @@ impl TopazApp {
                         ui.end_row();
 
                         ui.label("Last request");
-                        let last_str = {
-                            let last = s.last_request.lock().ok().and_then(|g| *g);
-                            match last.and_then(|t| t.elapsed().ok()) {
-                                None => "—".to_string(),
-                                Some(elapsed) => format!("{} ago", format_duration(elapsed)),
-                            }
-                        };
                         ui.monospace(last_str);
                         ui.end_row();
                     });

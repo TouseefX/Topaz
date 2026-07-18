@@ -1469,6 +1469,166 @@ pub fn disable_keepalive() -> bool {
     }
 }
 
+// ── Remote server control (the actual HTTP server lives in KeepAliveService's
+// separate `:service` process — see Cargo.toml `process = ":service"` and
+// service_entry.rs). These just send it commands over an Intent; reading its
+// status back happens out-of-band via the shared JSON file (ipc_stats.rs). ──
+
+fn put_string_extra(
+    env: &mut jni::JNIEnv<'_>,
+    intent: &jni::objects::JObject<'_>,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let key = env.new_string(key).map_err(|e| format!("new_string(key): {e:?}"))?;
+    let value = env.new_string(value).map_err(|e| format!("new_string(value): {e:?}"))?;
+    env.call_method(
+        intent,
+        "putExtra",
+        "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
+        &[JValue::Object(&key), JValue::Object(&value)],
+    )
+    .map_err(|e| format!("putExtra(String): {e:?}"))?;
+    Ok(())
+}
+
+fn put_int_extra(
+    env: &mut jni::JNIEnv<'_>,
+    intent: &jni::objects::JObject<'_>,
+    key: &str,
+    value: i32,
+) -> Result<(), String> {
+    let key = env.new_string(key).map_err(|e| format!("new_string(key): {e:?}"))?;
+    env.call_method(
+        intent,
+        "putExtra",
+        "(Ljava/lang/String;I)Landroid/content/Intent;",
+        &[JValue::Object(&key), JValue::Int(value)],
+    )
+    .map_err(|e| format!("putExtra(int): {e:?}"))?;
+    Ok(())
+}
+
+fn put_bool_extra(
+    env: &mut jni::JNIEnv<'_>,
+    intent: &jni::objects::JObject<'_>,
+    key: &str,
+    value: bool,
+) -> Result<(), String> {
+    let key = env.new_string(key).map_err(|e| format!("new_string(key): {e:?}"))?;
+    env.call_method(
+        intent,
+        "putExtra",
+        "(Ljava/lang/String;Z)Landroid/content/Intent;",
+        &[JValue::Object(&key), JValue::Bool(value as u8)],
+    )
+    .map_err(|e| format!("putExtra(bool): {e:?}"))?;
+    Ok(())
+}
+
+/// `Context.getFilesDir().getPath()` — app-private storage, same path from
+/// either process since both belong to the same app/UID. Used as the
+/// directory for the cross-process stats file.
+pub fn files_dir() -> Option<String> {
+    with_jni(files_dir_inner).ok()
+}
+
+pub struct RemoteServerConfig {
+    pub port: u16,
+    pub luau: bool,
+    pub lua51: bool,
+    pub encode_key: u8,
+}
+
+/// Tell KeepAliveService (in its own process) to start the HTTP server.
+/// Also registers this as an "owner" of the service's foreground lifetime,
+/// same as the Persistent toggle — see `KEEPALIVE_REFS`.
+pub fn start_remote_server(cfg: RemoteServerConfig) -> bool {
+    KEEPALIVE_REFS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    let result = with_keepalive_intent(|env, activity, intent| {
+        put_string_extra(env, intent, "cmd", "start_server")?;
+        put_int_extra(env, intent, "port", cfg.port as i32)?;
+        put_bool_extra(env, intent, "luau", cfg.luau)?;
+        put_bool_extra(env, intent, "lua51", cfg.lua51)?;
+        put_int_extra(env, intent, "encode_key", cfg.encode_key as i32)?;
+
+        let dir = files_dir_inner(env, activity)?;
+        put_string_extra(env, intent, "files_dir", &dir)?;
+
+        let sdk = android_sdk_int();
+        let method = if sdk >= 26 { "startForegroundService" } else { "startService" };
+        env.call_method(
+            activity,
+            method,
+            "(Landroid/content/Intent;)Landroid/content/ComponentName;",
+            &[JValue::Object(intent)],
+        )
+        .map_err(|e| format!("{method}: {e:?}"))?;
+
+        info!("start_remote_server: sent start_server via {method} (port {})", cfg.port);
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            error!("start_remote_server failed: {e}");
+            false
+        }
+    }
+}
+
+/// Tell KeepAliveService to stop the HTTP server, and release this call's
+/// "owner" stake in the service's foreground lifetime (the service itself
+/// stays up if the Persistent toggle is still separately holding it alive).
+pub fn stop_remote_server() -> bool {
+    let cmd_ok = with_keepalive_intent(|env, activity, intent| {
+        put_string_extra(env, intent, "cmd", "stop_server")?;
+        let sdk = android_sdk_int();
+        let method = if sdk >= 26 { "startForegroundService" } else { "startService" };
+        env.call_method(
+            activity,
+            method,
+            "(Landroid/content/Intent;)Landroid/content/ComponentName;",
+            &[JValue::Object(intent)],
+        )
+        .map_err(|e| format!("{method}: {e:?}"))?;
+        info!("stop_remote_server: sent stop_server cmd");
+        Ok(())
+    })
+    .is_ok();
+
+    use std::sync::atomic::Ordering;
+    let prev = KEEPALIVE_REFS
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some(v.saturating_sub(1)))
+        .unwrap_or(0);
+    let stop_ok = if prev <= 1 { jni_stop_keepalive_service() } else { true };
+
+    cmd_ok && stop_ok
+}
+
+fn files_dir_inner(
+    env: &mut jni::JNIEnv<'_>,
+    activity: &jni::objects::JObject<'_>,
+) -> Result<String, String> {
+    let file_obj = env
+        .call_method(activity, "getFilesDir", "()Ljava/io/File;", &[])
+        .map_err(|e| format!("getFilesDir: {e:?}"))?
+        .l()
+        .map_err(|e| format!("getFilesDir().l(): {e:?}"))?;
+    let path_obj = env
+        .call_method(&file_obj, "getPath", "()Ljava/lang/String;", &[])
+        .map_err(|e| format!("getPath: {e:?}"))?
+        .l()
+        .map_err(|e| format!("getPath().l(): {e:?}"))?;
+    let jstr = jni::objects::JString::from(path_obj);
+    env.get_string(&jstr)
+        .map_err(|e| format!("get_string(files_dir): {e:?}"))
+        .map(|s| s.into())
+}
+
+
 /// Cancel all notifications from this app.
 pub fn cancel_all_notifications() -> bool {
     let result = with_jni(|env, activity| {

@@ -10,6 +10,7 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.PowerManager;
 
 /**
  * A genuine foreground service. This — not Notification.Builder#setOngoing(true) on its own —
@@ -17,11 +18,36 @@ import android.os.IBinder;
  * NotificationManager.notify() with setOngoing(true) and no service behind it is treated as
  * dismissable on stock Android 8+, and Samsung's One UI shade is particularly aggressive about
  * letting the user swipe those away.
+ *
+ * Running in its own process (process = ":service" in Cargo.toml) also means the HTTP server
+ * this service now owns (via JNI, see service_entry.rs) survives the UI process dying and
+ * restarting — which is what handles the winit one-EventLoop-per-process limit on reopen.
+ * Two things are asked of this service via Intent extras on
+ * startService()/startForegroundService():
+ *   - "cmd" = "start_server" | "stop_server": start/stop the actual tokio HTTP server.
+ *   - no "cmd" at all: just the Persistent-mode keepalive ping, with optional "text".
  */
 public class KeepAliveService extends Service {
     private static final String CHANNEL_ID = "topaz_keepalive";
     private static final int NOTIF_ID = 9001;
     public static final String EXTRA_TEXT = "text";
+    public static final String EXTRA_CMD = "cmd";
+    public static final String EXTRA_PORT = "port";
+    public static final String EXTRA_LUAU = "luau";
+    public static final String EXTRA_LUA51 = "lua51";
+    public static final String EXTRA_ENCODE_KEY = "encode_key";
+    public static final String EXTRA_FILES_DIR = "files_dir";
+
+    private PowerManager.WakeLock wakeLock;
+
+    static {
+        System.loadLibrary("topaz_gui");
+    }
+
+    private static native void nativeStartServer(
+            int port, boolean luau, boolean lua51, int encodeKey, String filesDir);
+
+    private static native void nativeStopServer();
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -31,16 +57,58 @@ public class KeepAliveService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String text = "Tap to open — Topaz is running in the background.";
-        if (intent != null && intent.hasExtra(EXTRA_TEXT)) {
-            String extra = intent.getStringExtra(EXTRA_TEXT);
-            if (extra != null && !extra.isEmpty()) {
-                text = extra;
+        String cmd = null;
+
+        if (intent != null) {
+            if (intent.hasExtra(EXTRA_TEXT)) {
+                String extra = intent.getStringExtra(EXTRA_TEXT);
+                if (extra != null && !extra.isEmpty()) {
+                    text = extra;
+                }
             }
+            cmd = intent.getStringExtra(EXTRA_CMD);
         }
+
+        if ("start_server".equals(cmd)) {
+            int port = intent.getIntExtra(EXTRA_PORT, 3000);
+            boolean luau = intent.getBooleanExtra(EXTRA_LUAU, true);
+            boolean lua51 = intent.getBooleanExtra(EXTRA_LUA51, false);
+            int encodeKey = intent.getIntExtra(EXTRA_ENCODE_KEY, 0);
+            String filesDir = intent.getStringExtra(EXTRA_FILES_DIR);
+
+            acquireWakeLock();
+            text = "Serving on port " + port + "…";
+            nativeStartServer(port, luau, lua51, encodeKey, filesDir);
+        } else if ("stop_server".equals(cmd)) {
+            nativeStopServer();
+            releaseWakeLock();
+            text = "Tap to open — Topaz is running in the background.";
+        }
+
         showForeground(text);
         // START_STICKY: if the system kills the process under memory pressure it will try to
-        // recreate the service (with a null Intent) rather than leaving it dead.
+        // recreate the service (with a null Intent) rather than leaving it dead. Note a null
+        // Intent on restart means we can't re-issue "start_server" automatically — the server
+        // has to be explicitly restarted from the UI in that case.
         return START_STICKY;
+    }
+
+    private void acquireWakeLock() {
+        if (wakeLock != null && wakeLock.isHeld()) {
+            return;
+        }
+        PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        if (pm != null) {
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "topaz:server");
+            wakeLock.acquire();
+        }
+    }
+
+    private void releaseWakeLock() {
+        if (wakeLock != null && wakeLock.isHeld()) {
+            wakeLock.release();
+        }
+        wakeLock = null;
     }
 
     private void showForeground(String text) {
@@ -103,6 +171,8 @@ public class KeepAliveService extends Service {
 
     @Override
     public void onDestroy() {
+        nativeStopServer();
+        releaseWakeLock();
         stopForeground(true);
         super.onDestroy();
     }

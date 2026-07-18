@@ -110,18 +110,14 @@ impl ServerHandle {
         let thread = std::thread::Builder::new()
             .name("topaz-server".to_string())
             .spawn(move || {
-                // ── Android: acquire wakelock & show notification ──
-                #[cfg(target_os = "android")]
-                {
-                    // Acquire partial wakelock to keep CPU alive during serving
-                    crate::android::acquire_partial_wakelock("TopazServer");
-                    // Real foreground service — genuinely non-swipeable, unlike a bare notify()
-                    crate::android::start_keepalive_service(&format!(
-                        "Starting on port {}…",
-                        cfg.port
-                    ));
-                }
-
+                // NOTE: this closure now runs either on desktop, or inside the
+                // `:service` process on Android (see service_entry.rs). It must
+                // NOT call into crate::android's JNI helpers — those rely on
+                // ndk_context, which is only ever initialized by android_main
+                // in the UI process, and android_main never runs here. Wakelock
+                // acquisition and the foreground notification are handled
+                // directly in KeepAliveService.java's onStartCommand/onDestroy
+                // instead, since that's a real Context in this process.
                 let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -151,13 +147,6 @@ impl ServerHandle {
                         repaint();
                     }
                 });
-
-                // ── Android: release wakelock & cancel notification ──
-                #[cfg(target_os = "android")]
-                {
-                    crate::android::release_wakelock();
-                    crate::android::stop_keepalive_service();
-                }
             })
             .expect("failed to spawn server thread");
 
@@ -263,12 +252,6 @@ async fn run_server(
         addr: addr.clone(),
         started_at: std::time::SystemTime::now(),
     });
-
-    // ── Android: update notification with running address ──
-    #[cfg(target_os = "android")]
-    {
-        crate::android::start_keepalive_service(&format!("Running at http://{addr}"));
-    }
 
     repaint();
 
