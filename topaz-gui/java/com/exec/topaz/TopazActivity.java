@@ -35,6 +35,26 @@ public class TopazActivity extends NativeActivity {
         super.onNewIntent(intent);
         setIntent(intent);
     }
+    
+    @Override
+    public void onBackPressed() {
+        Log.i(TAG, "onBackPressed - clearing activity instance safely");
+        super.onBackPressed();
+        this.finish();
+        
+        android.os.Process.killProcess(android.os.Process.myPid());
+    }
+    
+    @Override
+    protected void onStop() {
+        Log.i(TAG, "onStop - closing activity window to protect Rust runtime");
+        super.onStop();
+        if (!isFinishing()) {
+            this.finish();
+            
+            android.os.Process.killProcess(android.os.Process.myPid());
+        }
+    }
 
     @Override
     protected void onDestroy() {
