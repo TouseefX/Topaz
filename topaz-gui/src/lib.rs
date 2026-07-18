@@ -125,6 +125,29 @@ fn android_main(app: AndroidApp) {
     // after a user action (Open File / Grant), not while the app is starting.
     crate::android::init_android_app(app.clone());
 
+    // === Workaround for splash screen hang when keep-alive service is running ===
+    // When the user swipes the app away while the :service process is alive,
+    // Android sometimes tries to reuse the old winit EventLoop instead of
+    // starting a fresh process. This causes the "top resumed state loss timeout"
+    // and permanent splash screen.
+    //
+    // Solution: on every launch, immediately restart the process once.
+    // This guarantees we always get a clean NativeActivity + new EventLoop.
+    static FIRST_LAUNCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    if FIRST_LAUNCH.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        // First time this process has been started — proceed normally
+        log::info!("android_main: first launch in this process");
+    } else {
+        // We are being relaunched while a service process may still be alive.
+        // Force a clean process restart so winit gets a fresh EventLoop.
+        log::warn!("android_main called again while keep-alive may be active — restarting process to avoid splash hang");
+        let _ = std::process::Command::new(std::env::current_exe().unwrap_or_else(|| std::path::PathBuf::from("/system/bin/app_process")))
+            .args(std::env::args_os().skip(1))
+            .env_remove("TOPAZ_RESTARTED")
+            .spawn();
+        std::process::exit(0);
+    }
+
     let mut options = eframe::NativeOptions::default();
     // Critical: pass AndroidApp to winit
     options.android_app = Some(app);
@@ -669,7 +692,17 @@ impl TopazApp {
         };
 
         if let Some(status) = ipc_stats::read_status(&path) {
-            self.android_server_status = status;
+            // Detect stale status (server was force-killed)
+            let now_ms = ipc_stats::now_ms();
+            if now_ms.saturating_sub(status.updated_ms) > 5000 {
+                // Stale for >5s — treat as stopped
+                self.android_server_status = ipc_stats::SharedServerStatus::default();
+            } else {
+                self.android_server_status = status;
+            }
+        } else {
+            // No file at all — definitely stopped
+            self.android_server_status = ipc_stats::SharedServerStatus::default();
         }
     }
 
