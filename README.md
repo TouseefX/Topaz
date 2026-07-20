@@ -62,7 +62,8 @@ print("Environments patched. Now execute Dex and try opening a script.")
 > [!NOTE]
 > 
 > - If you're using a android, its not possible to use localhost
-> - you may have to reverse proxy your localhost and use that link Instand
+> - you may have to Port Forward your localhost and use that link Instand
+> - i recommend [ngrok](https://ngrok.com/) or [Pinggy](https://pinggy.io/) for port forwarding
 
 ### Android Emulator
 
