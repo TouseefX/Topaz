@@ -26,22 +26,35 @@ If you are using some sort of API, make sure to replace `http://localhost:3000` 
 ### Windows
 
 ```lua
-getgenv().decompile = function(script_instance)
-  local bytecode = getscriptbytecode(script_instance)
-  local encoded = crypt.base64encode(bytecode)
-  return request(
-    {
-      Url = "http://localhost:3000/luau/decompile",
-      Method = "POST",
-      Body = encoded
+getgenv().decompile = function(scriptInstance)
+    local url = "http://localhost:3000/luau/decompile"
+    local rawBytecode = getscriptbytecode(scriptInstance)
+    
+    local payload = {
+        Url = url,
+        Method = "POST",
+        Headers = { ["Content-Type"] = "application/octet-stream" },
+        Body = rawBytecode
     }
-  ).Body
+
+    local httpRequest = request or http_request or (syn and syn.request)
+    local success, response = pcall(function() return httpRequest(payload) end)
+
+    return response.Body
 end
 
-loadstring(game:HttpGet("https://raw.githubusercontent.com/Infinity-Networking/TopazSaveinstance/main/saveinstance.luau"))()({
-  mode = "scripts",
-  NilInstances = true,
-})
+getgenv().syn = getgenv().syn or {}
+getgenv().syn.decompile = getgenv().decompile
+
+getgenv().Fluxus = getgenv().Fluxus or {}
+getgenv().Fluxus.decompile = getgenv().decompile
+
+getgenv().Hydra = getgenv().Hydra or {}
+getgenv().Hydra.decompile = getgenv().decompile
+
+loadstring(game:HttpGet("https://github.com/Tesker-103/DexRecontinued/releases/latest/download/out.lua"))()
+
+print("Environments patched. Now execute Dex and try opening a script.")
 ```
 
 ### Native Android
@@ -65,22 +78,35 @@ Instead, we must use `10.0.2.2` instead.
 To test if everything is working, on your actual machine [http://localhost:3000/] should load fine, and on the emulator's browser, [http://10.0.2.2:3000/] should load. If your emulator is giving you HTTP connection fail errors, then you can try [ngrok](https://ngrok.com/) instead.
 
 ```lua
-getgenv().decompile = function(script_instance)
-  local bytecode = getscriptbytecode(script_instance)
-  local encoded = crypt.base64encode(bytecode)
-  return request(
-    {
-      Url = "http://10.0.2.2:3000/luau/decompile",
-      Method = "POST",
-      Body = encoded
+getgenv().decompile = function(scriptInstance)
+    local url = "http://10.0.2.2:3000/luau/decompile"
+    local rawBytecode = getscriptbytecode(scriptInstance)
+    
+    local payload = {
+        Url = url,
+        Method = "POST",
+        Headers = { ["Content-Type"] = "application/octet-stream" },
+        Body = rawBytecode
     }
-  ).Body
+
+    local httpRequest = request or http_request or (syn and syn.request)
+    local success, response = pcall(function() return httpRequest(payload) end)
+
+    return response.Body
 end
 
-loadstring(game:HttpGet("https://raw.githubusercontent.com/Infinity-Networking/TopazSaveinstance/main/saveinstance.luau"))()({
-  mode = "scripts",
-  NilInstances = true,
-})
+getgenv().syn = getgenv().syn or {}
+getgenv().syn.decompile = getgenv().decompile
+
+getgenv().Fluxus = getgenv().Fluxus or {}
+getgenv().Fluxus.decompile = getgenv().decompile
+
+getgenv().Hydra = getgenv().Hydra or {}
+getgenv().Hydra.decompile = getgenv().decompile
+
+loadstring(game:HttpGet("https://github.com/Tesker-103/DexRecontinued/releases/latest/download/out.lua"))()
+
+print("Environments patched. Now execute Dex and try opening a script.")
 ```
 
 ## License
