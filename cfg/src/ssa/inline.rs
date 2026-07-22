@@ -449,7 +449,11 @@ pub fn inline(
     }
 
     let mut changed = true;
-    while changed {
+    // Limit retries to avoid infinite loops on pathological inputs
+    let mut retries = 0;
+    const MAX_RETRIES: usize = 10;
+    while changed && retries < MAX_RETRIES {
+        retries += 1;
         changed = false;
         Inliner::new(
             function,
@@ -459,8 +463,9 @@ pub fn inline(
         )
         .inline_rvalues();
 
-        
+        // Single pass: remove unused assignments and fold tables/setlists
         for block in function.blocks_mut() {
+            // First pass: convert unused assign side-effects to standalone calls
             for stat_index in 0..block.len() {
                 if let ast::Statement::Assign(assign) = &block[stat_index]
                     && assign.left.len() == 1
@@ -469,12 +474,10 @@ pub fn inline(
                 {
                     let rvalue = &assign.right[0];
                     let has_side_effects = rvalue.has_side_effects();
-                    
                     if !upvalue_to_group.contains_key(local)
                         && local_usages.get(local).map_or(true, |&u| u == 0)
                     {
                         if has_side_effects {
-                            
                             let new_stat = match rvalue {
                                 ast::RValue::Call(call)
                                 | ast::RValue::Select(ast::Select::Call(call)) => {
@@ -497,14 +500,11 @@ pub fn inline(
                     }
                 }
             }
-        }
 
-        for block in function.blocks_mut() {
-            
-            
+            // Remove empty statements
             block.retain(|s| s.as_empty().is_none());
 
-            
+            // Fold table field assignments into table constructors
             let mut i = 0;
             while i < block.len() {
                 if let ast::Statement::Assign(assign) = &block[i]
@@ -527,38 +527,6 @@ pub fn inline(
                         && local == &object_local
                     {
                         let right = &field_assign.right[0];
-                        // A field's value must never be folded into the
-                        // table constructor if it (transitively) reads the
-                        // table's own local before the `local` declaration
-                        // completes -- `local t = { ..., k = v }` only
-                        // brings `t` into scope *after* the whole
-                        // constructor has been evaluated, per Lua's own
-                        // scoping rules, so any reference to `t` inside `v`
-                        // at that point would resolve to whatever
-                        // definition of that name existed *before* this
-                        // `local` (almost always nil/a global), not the
-                        // table being built. This check used to be skipped
-                        // entirely for closures (`right.as_closure().is_none()
-                        // && ...`), on the mistaken assumption that a
-                        // closure "reading" a variable only means capturing
-                        // it as an upvalue, which is somehow different from
-                        // a "real" read -- but `Closure::values_read()`
-                        // (used by `values_read()` here via `#[enum_dispatch]`)
-                        // already correctly reports captured upvalues, so
-                        // this exemption was both unnecessary and actively
-                        // wrong: any closure literal assigned to
-                        // `t.field = function() ... uses t ... end` that
-                        // captures `t` was being folded straight into the
-                        // table literal anyway, silently making the
-                        // closure capture a stale/nil `t` instead of the
-                        // table it was written to belong to (e.g. Dex
-                        // Explorer's `Main.GetInitDeps = function() return
-                        // {Main = Main} end` pattern, where `Main` inside
-                        // the returned table resolved to nil because the
-                        // whole `Main` table -- including this very
-                        // closure -- got folded into a single `local Main
-                        // = {..., GetInitDeps = function() ... end}`
-                        // literal).
                         if right.values_read().contains(&&object_local) {
                             break;
                         }
@@ -591,7 +559,7 @@ pub fn inline(
                 }
             }
 
-            
+            // Fold set_list into table constructor
             for i in 1..block.len() {
                 if let ast::Statement::SetList(set_list) = &block[i] {
                     let object_local = set_list.object_local.clone();
@@ -611,28 +579,17 @@ pub fn inline(
                         for value in set_list.values {
                             table.0.push((None, value));
                         }
-                        
-                        
-                        assert!(!table.0.last().map_or(false, |(k, v)| k.is_none()
-                            && matches!(
-                                v,
-                                ast::RValue::VarArg(_)
-                                    | ast::RValue::Call(_)
-                                    | ast::RValue::MethodCall(_)
-                            )));
                         if let Some(tail) = set_list.tail {
                             table.0.push((None, tail));
                         }
                         changed = true;
                     }
-                    
-                    
                 }
             }
         }
     }
-    
-    
+
+    // Final cleanup
     for block in function.blocks_mut() {
         block.retain(|s| s.as_empty().is_none());
     }

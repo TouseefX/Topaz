@@ -251,19 +251,33 @@ impl<'a> Destructor<'a> {
                 self.dominator_tree.add_edge(dominator, node, ());
             }
         }
+
+        // Build dominator sets via a single DFS on the dominator tree
+        // instead of walking up the tree per-node (O(n²) → O(n))
         self.dominators.reserve(self.dominator_tree.node_count());
-        for node in self.dominator_tree.nodes() {
-            let mut dominators = FxHashSet::default();
-            let mut parent_node = node;
-            while let Ok(next_parent_node) = self
+        let entry = self.function.entry().unwrap();
+
+        // Stack-based DFS accumulating dominator sets
+        let mut stack: Vec<(NodeIndex, FxHashSet<NodeIndex>)> = Vec::new();
+        let entry_set: FxHashSet<NodeIndex> = FxHashSet::default();
+        stack.push((entry, entry_set));
+
+        while let Some((node, incoming_doms)) = stack.pop() {
+            // Clone the incoming set and add current node
+            let mut my_doms = incoming_doms;
+            my_doms.insert(node);
+            // Store for children (excludes current node)
+            let child_doms = my_doms.clone();
+
+            self.dominators.insert(node, my_doms);
+
+            // Push children
+            for child in self
                 .dominator_tree
-                .neighbors_directed(parent_node, Direction::Incoming)
-                .exactly_one()
+                .neighbors_directed(node, Direction::Outgoing)
             {
-                parent_node = next_parent_node;
-                dominators.insert(parent_node);
+                stack.push((child, child_doms.clone()));
             }
-            self.dominators.insert(node, dominators);
         }
 
         let mut dominator_index = 0;

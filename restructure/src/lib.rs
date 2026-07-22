@@ -13,14 +13,16 @@ mod conditional;
 mod jump;
 mod r#loop;
 
-
+/// Compute post-dominators. Returns dominators on the reversed graph
+/// connected to a temporary super-sink (all exit nodes → fake_exit).
+/// The fake node is added and immediately removed — O(1) overhead.
 pub fn post_dominators<N: Default, E: Default>(
     graph: &mut StableDiGraph<N, E>,
 ) -> Dominators<NodeIndex> {
-    let exits = graph
+    let exits: Vec<NodeIndex> = graph
         .node_identifiers()
         .filter(|&n| graph.neighbors(n).count() == 0)
-        .collect_vec();
+        .collect();
     let fake_exit = graph.add_node(Default::default());
     for exit in exits {
         graph.add_edge(exit, fake_exit, Default::default());
@@ -110,21 +112,31 @@ impl GraphStructurer {
             .collect::<FxHashSet<_>>();
         let mut dfs_postorder =
             DfsPostOrder::new(self.function.graph(), self.function.entry().unwrap());
+
+        // Compute dominators once per pass — they're only invalidated lazily
         let mut dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
         let mut post_dom = post_dominators(self.function.graph_mut());
-
-        
         let mut changed = false;
+        let mut doms_dirty = false;
+
         while let Some(node) = dfs_postorder.next(self.function.graph()) {
-            
-            let matched = self.try_match_pattern(node, &dominators, &post_dom);
-            if matched {
+            if doms_dirty {
+                // Only recompute dominators when something actually changed
                 dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
                 post_dom = post_dominators(self.function.graph_mut());
+                doms_dirty = false;
             }
-            changed |= matched;
-            
-            
+            let matched = self.try_match_pattern(node, &dominators, &post_dom);
+            if matched {
+                doms_dirty = true;
+                changed = true;
+            }
+        }
+
+        // Recomputation for disconnected nodes pass
+        if doms_dirty {
+            dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
+            post_dom = post_dominators(self.function.graph_mut());
         }
 
         for node in self
@@ -134,7 +146,6 @@ impl GraphStructurer {
             .filter(|node| !dfs.contains(node))
             .collect_vec()
         {
-            
             if self.function.has_block(node)
                 && self.function.predecessor_blocks(node).next().is_none()
             {
@@ -148,7 +159,6 @@ impl GraphStructurer {
                 {
                     self.function.remove_block(node);
                 } else {
-                    
                     let matched = self.try_match_pattern(node, &dominators, &post_dom);
                     changed |= matched;
                 }
@@ -206,26 +216,25 @@ impl GraphStructurer {
             }
             
             let edges = self.function.graph().edge_indices().collect::<Vec<_>>();
-            
-            
+
+            // Cache dominators for the edge loop — compute once, not per-edge
+            let dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
+
             let mut changed = false;
             for &edge in &edges {
-                
-                
                 if self.function.graph().edge_weight(edge).is_none() {
                     continue;
                 }
 
                 let (source, target) = self.function.graph().edge_endpoints(edge).unwrap();
-                let dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
                 let target_dominators = dominators.dominators(target);
                 let source_dominators = dominators.dominators(source);
                 
                 if target_dominators.is_none() || source_dominators.is_none() {
                     continue;
                 }
-                let mut target_dominators = target_dominators.unwrap();
-                let mut source_dominators = source_dominators.unwrap();
+                let target_dominators = target_dominators.unwrap();
+                let source_dominators = source_dominators.unwrap();
                 if target_dominators.contains(&source) || source_dominators.contains(&target) {
                     continue;
                 }
@@ -240,8 +249,6 @@ impl GraphStructurer {
 
             if !changed {
                 for edge in edges {
-                    
-                    
                     if self.function.graph().edge_weight(edge).is_none() {
                         continue;
                     }

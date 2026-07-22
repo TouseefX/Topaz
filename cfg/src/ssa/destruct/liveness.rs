@@ -1,127 +1,137 @@
 use ast::{LocalRw, RcLocal};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use petgraph::{stable_graph::NodeIndex, visit::Walker};
+use petgraph::stable_graph::NodeIndex;
 
 use crate::function::Function;
 
 #[derive(Debug, Default)]
-struct BlockLiveness<'a> {
-    
-    uses: FxHashSet<&'a RcLocal>,
-    
-    defs: FxHashSet<&'a RcLocal>,
-    
-    arg_out_uses: FxHashSet<&'a RcLocal>,
-    
-    params: FxHashSet<&'a RcLocal>,
-    live_sets: LiveSets,
-}
-
-#[derive(Debug, Default)]
 pub struct LiveSets {
-    
     pub live_in: FxHashSet<RcLocal>,
-    
     pub live_out: FxHashSet<RcLocal>,
 }
 
 #[derive(Debug)]
 pub struct Liveness<'a> {
-    block_liveness: FxHashMap<NodeIndex, BlockLiveness<'a>>,
+    function: &'a Function,
+    uses: FxHashMap<NodeIndex, FxHashSet<RcLocal>>,
+    defs: FxHashMap<NodeIndex, FxHashSet<RcLocal>>,
+    result: FxHashMap<NodeIndex, LiveSets>,
 }
 
 impl<'a> Liveness<'a> {
-    fn explore_all_paths(
-        liveness: &mut Liveness,
-        function: &'a Function,
-        node: NodeIndex,
-        variable: &'a RcLocal,
-    ) {
-        let mut stack = vec![node];
-        while let Some(node) = stack.pop() {
-            let block_liveness = liveness.block_liveness.get_mut(&node).unwrap();
-            if block_liveness.defs.contains(variable)
-                
-                || block_liveness.live_sets.live_in.contains(variable)
-            {
-                continue;
-            }
-            block_liveness.live_sets.live_in.insert(variable.clone());
-            if block_liveness.params.contains(variable) {
-                continue;
-            }
-            for pred in function.predecessor_blocks(node) {
-                liveness
-                    .block_liveness
-                    .get_mut(&pred)
-                    .unwrap()
-                    .live_sets
-                    .live_out
-                    .insert(variable.clone());
-                stack.push(pred);
-            }
-        }
-    }
-
+    /// Compute liveness using a worklist algorithm.
+    /// This is O(n * v) in practice rather than the previous per-variable
+    /// DFS which could be exponential on pathological CFGs.
     pub fn calculate(function: &'a Function) -> FxHashMap<NodeIndex, LiveSets> {
+        let node_count = function.graph().node_count();
         let mut liveness = Liveness {
-            block_liveness: FxHashMap::with_capacity_and_hasher(
-                function.graph().node_count(),
-                Default::default(),
-            ),
+            function,
+            uses: FxHashMap::with_capacity_and_hasher(node_count, Default::default()),
+            defs: FxHashMap::with_capacity_and_hasher(node_count, Default::default()),
+            result: FxHashMap::with_capacity_and_hasher(node_count, Default::default()),
         };
+
+        // Collect uses and defs per block
         for (node, block) in function.blocks() {
-            let block_liveness = liveness.block_liveness.entry(node).or_default();
+            let mut uses = FxHashSet::default();
+            let mut defs = FxHashSet::default();
             for instruction in block.iter() {
-                block_liveness
-                    .uses
-                    .extend(instruction.values_read().into_iter());
-                block_liveness
-                    .defs
-                    .extend(instruction.values_written().into_iter());
+                for v in instruction.values_read() {
+                    if !defs.contains(v) {
+                        uses.insert(v.clone());
+                    }
+                }
+                for v in instruction.values_written() {
+                    defs.insert(v.clone());
+                }
             }
+            // Edge arguments count as uses in the predecessor
             for (pred, edge) in function.edges_to_block(node) {
-                liveness
-                    .block_liveness
-                    .get_mut(&node)
-                    .unwrap()
-                    .params
-                    .extend(edge.arguments.iter().map(|(k, _)| k));
-                let block_liveness = liveness.block_liveness.entry(pred).or_default();
-                block_liveness
-                    .arg_out_uses
-                    .extend(edge.arguments.iter().flat_map(|(_, v)| v.values_read()));
+                let pred_uses = liveness.uses.entry(pred).or_default();
+                for rv in edge.arguments.iter().flat_map(|(_, v)| v.values_read()) {
+                    pred_uses.insert(rv.clone());
+                }
             }
+            liveness.uses.insert(node, uses);
+            liveness.defs.insert(node, defs);
         }
+
+        // Initialize live_out for all blocks
+        // and seed params (params are live-in at their block unless def'd before use)
         for node in function.graph().node_indices() {
-            let block_liveness = liveness.block_liveness.get_mut(&node).unwrap();
-            block_liveness.live_sets.live_in.reserve(
-                block_liveness.params.len()
-                    + block_liveness
-                        .uses
-                        .len()
-                        .saturating_sub(block_liveness.defs.len()),
-            );
-            let arg_out_uses = std::mem::take(&mut block_liveness.arg_out_uses);
-            block_liveness
-                .live_sets
-                .live_out
-                .reserve(arg_out_uses.len());
-            for variable in arg_out_uses {
-                let block_liveness = liveness.block_liveness.get_mut(&node).unwrap();
-                block_liveness.live_sets.live_out.insert(variable.clone());
-                Self::explore_all_paths(&mut liveness, function, node, variable);
+            let mut live_sets = LiveSets::default();
+            // Edge params are live at entry
+            for (_, edge) in function.edges_to_block(node) {
+                for (param, _) in &edge.arguments {
+                    live_sets.live_in.insert(param.clone());
+                }
             }
-            let block_liveness = liveness.block_liveness.get_mut(&node).unwrap();
-            for variable in block_liveness.uses.clone() {
-                Self::explore_all_paths(&mut liveness, function, node, variable);
+            liveness.result.insert(node, live_sets);
+        }
+
+        // Worklist: start with all blocks
+        let mut worklist: Vec<NodeIndex> = function.graph().node_indices().collect();
+        let mut in_worklist: FxHashSet<NodeIndex> =
+            worklist.iter().cloned().collect();
+
+        while let Some(node) = worklist.pop() {
+            in_worklist.remove(&node);
+
+            // live_out[n] = union of live_in of all successors
+            let mut new_live_out: FxHashSet<RcLocal> = FxHashSet::default();
+            for succ in function.successor_blocks(node) {
+                if let Some(succ_live) = liveness.result.get(&succ) {
+                    new_live_out.extend(succ_live.live_in.iter().cloned());
+                }
+            }
+
+            // Also account for edge arguments as live-out uses
+            if let Some(u) = liveness.uses.get(&node) {
+                new_live_out.extend(u.iter().cloned());
+            }
+
+            // Standard dataflow: live_in = uses ∪ (live_out - defs)
+            let defs = liveness.defs.get(&node);
+            let uses = liveness.uses.get(&node);
+
+            let mut new_live_in: FxHashSet<RcLocal> =
+                FxHashSet::with_capacity_and_hasher(
+                    uses.map_or(0, |u| u.len()) + new_live_out.len(),
+                    Default::default(),
+                );
+            if let Some(uses) = uses {
+                new_live_in.extend(uses.iter().cloned());
+            }
+            for v in &new_live_out {
+                if !defs.map_or(false, |d| d.contains(v)) {
+                    new_live_in.insert(v.clone());
+                }
+            }
+
+            // Keep edge params
+            for (_, edge) in function.edges_to_block(node) {
+                for (param, _) in &edge.arguments {
+                    new_live_in.insert(param.clone());
+                }
+            }
+
+            let old = liveness.result.get_mut(&node).unwrap();
+            let changed = old.live_out != new_live_out || old.live_in != new_live_in;
+
+            if changed {
+                old.live_out = new_live_out;
+                old.live_in = new_live_in;
+                // Add predecessors to worklist
+                for pred in function.predecessor_blocks(node) {
+                    if !in_worklist.contains(&pred) {
+                        in_worklist.insert(pred);
+                        worklist.push(pred);
+                    }
+                }
             }
         }
-        liveness
-            .block_liveness
-            .into_iter()
-            .map(|(n, l)| (n, l.live_sets))
-            .collect()
+
+        liveness.result
     }
 }

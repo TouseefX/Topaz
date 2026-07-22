@@ -145,32 +145,15 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, encode_key: u8)
     }
 
     let (main, ..) = lifted.first().unwrap().clone();
-    let mut upvalues = lifted
-        .into_iter()
+
+    // Process all functions in parallel using rayon.
+    // Each function is independent (owns its own Function CFG).
+    let mut upvalues: FxHashMap<_, _> = lifted
+        .into_par_iter()
         .map(|(ast_function, function, upvalues_in)| {
-            use std::{backtrace::Backtrace, cell::RefCell, fmt::Write, panic};
-
-            thread_local! {
-                static BACKTRACE: RefCell<Option<Backtrace>> = const { RefCell::new(None) };
-            }
-
-            let function_id = function.id;
-            let mut args = std::panic::AssertUnwindSafe(Some((
-                ast_function.clone(),
-                function,
-                upvalues_in,
-            )));
-
-            let prev_hook = panic::take_hook();
-            panic::set_hook(Box::new(|_| {
-                let trace = Backtrace::capture();
-                BACKTRACE.with(move |b| b.borrow_mut().replace(trace));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                decompile_function(ast_function.clone(), function, upvalues_in)
             }));
-            let result = panic::catch_unwind(move || {
-                let (ast_function, function, upvalues_in) = args.take().unwrap();
-                decompile_function(ast_function, function, upvalues_in)
-            });
-            panic::set_hook(prev_hook);
 
             match result {
                 Ok(r) => r,
@@ -184,7 +167,8 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, encode_key: u8)
                     };
 
                     let mut message = String::new();
-                    writeln!(message, "failed to decompile").unwrap();
+                    use std::fmt::Write;
+                    writeln!(message, "failed to decompile: {panic_information}").unwrap();
 
                     ast_function.lock().body.extend(
                         message
@@ -196,7 +180,7 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, encode_key: u8)
                 }
             }
         })
-        .collect::<FxHashMap<_, _>>();
+        .collect();
 
     let main = ByAddress(main);
     upvalues.remove(&main);
