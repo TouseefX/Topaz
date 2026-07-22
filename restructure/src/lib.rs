@@ -233,8 +233,8 @@ impl GraphStructurer {
                 if target_dominators.is_none() || source_dominators.is_none() {
                     continue;
                 }
-                let target_dominators = target_dominators.unwrap();
-                let source_dominators = source_dominators.unwrap();
+                let mut target_dominators = target_dominators.unwrap();
+                let mut source_dominators = source_dominators.unwrap();
                 if target_dominators.contains(&source) || source_dominators.contains(&target) {
                     continue;
                 }
