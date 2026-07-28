@@ -66,13 +66,21 @@ impl fmt::Display for Literal {
             Literal::Nil => write!(f, "nil"),
             Literal::Boolean(value) => write!(f, "{}", value),
             &Literal::Number(value) => {
-                
-                
-                debug_assert!(value.is_finite());
-                
-                let mut buffer = ryu::Buffer::new();
-                let printed = buffer.format_finite(value);
-                write!(f, "{}", printed.strip_suffix(".0").unwrap_or(printed))
+                // Handle infinity values - use math.huge for Luau compatibility
+                if value.is_infinite() {
+                    if value.is_sign_positive() {
+                        write!(f, "math.huge")
+                    } else {
+                        write!(f, "-math.huge")
+                    }
+                } else if value.is_nan() {
+                    // NaN - emit 0/0 which produces NaN in both Lua and Luau
+                    write!(f, "(0 / 0)")
+                } else {
+                    let mut buffer = ryu::Buffer::new();
+                    let printed = buffer.format_finite(value);
+                    write!(f, "{}", printed.strip_suffix(".0").unwrap_or(printed))
+                }
             }
             // Integer constants come from LBC_CONSTANT_INTEGER. Luau source
             // has no distinct integer literal syntax (numbers are just

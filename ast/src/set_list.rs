@@ -75,20 +75,12 @@ impl Traverse for SetList {
 
 impl std::fmt::Display for SetList {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // Note: This should be handled by the formatter's format_statement for proper indentation.
+        // If this Display is called directly (e.g., for debugging), emit a comment.
         write!(
             f,
-            "__set_list({}, {}, {{{}}})",
-            self.object_local,
-            self.index,
-            
-            formatter::format_arg_list(
-                &self
-                    .values
-                    .iter()
-                    .chain(self.tail.as_ref())
-                    .cloned()
-                    .collect::<Vec<_>>()
-            )
+            "-- set_list (should have been folded into table constructor): {}[{}] = {{...}}",
+            self.object_local, self.index
         )
     }
 }

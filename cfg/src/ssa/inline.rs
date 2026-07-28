@@ -39,6 +39,16 @@ impl<'a> Inliner<'a> {
         }
     }
 
+    /// Check if a statement's condition reads are in the outer scope.
+    /// For Repeat and While, the condition is evaluated in the outer scope,
+    /// so we shouldn't inline variables defined inside the loop into the condition.
+    fn is_condition_in_outer_scope(statement: &ast::Statement) -> bool {
+        matches!(
+            statement,
+            ast::Statement::Repeat(_) | ast::Statement::While(_)
+        )
+    }
+
     fn try_inline(
         traversible: &mut impl Traverse,
         read: &ast::RcLocal,
@@ -122,16 +132,22 @@ impl<'a> Inliner<'a> {
             
             let mut stat_to_values_read = Vec::with_capacity(block.len());
             for stat in &block.0 {
-                stat_to_values_read.push(
+                // For Repeat and While, the condition is in the outer scope.
+                // Don't include condition reads in the inline analysis, because
+                // variables defined inside the loop shouldn't be inlined into
+                // the condition (which runs in the outer scope).
+                let reads = if Self::is_condition_in_outer_scope(stat) {
+                    vec![]
+                } else {
                     stat.values_read()
                         .into_iter()
                         .filter(|&l| {
                             self.local_usages[l] == 1 && !self.upvalue_to_group.contains_key(l)
                         })
                         .cloned()
-                        .map(Some)
-                        .collect_vec(),
-                );
+                        .collect_vec()
+                };
+                stat_to_values_read.push(reads.into_iter().map(Some).collect_vec());
             }
 
             

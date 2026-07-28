@@ -24,6 +24,8 @@ const SYNTHETIC_PREFIXES: &[&str] = &["v", "p", "t", "s", "n", "b", "k", "fn", "
 const LUA_KEYWORDS: &[&str] = &[
     "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in",
     "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
+    // Luau type keywords (cannot be used as bare identifiers in type annotations)
+    "cframe", "thread", "any", "never", "void",
 ];
 
 pub fn is_synthetic_name(name: &str) -> bool {
@@ -209,7 +211,10 @@ impl Namer {
                 return;
             }
             if let Some(ref existing) = lock.0 {
-                if !is_synthetic_name(existing) {
+                // Check if the existing name is valid: not synthetic AND not a keyword.
+                // Keywords like "cframe" from debug info should be renamed to avoid
+                // conflicts with Luau's type keywords.
+                if !is_synthetic_name(existing) && Self::is_valid_identifier(existing) {
                     self.name_uses.entry(existing.clone()).or_insert(1);
                     return;
                 }
@@ -245,7 +250,8 @@ impl Namer {
         }
         if lock.0.is_some() && self.rename {
             if let Some(ref name) = lock.0 {
-                if !is_synthetic_name(name) {
+                // Check if the existing name is valid: not synthetic AND not a keyword.
+                if !is_synthetic_name(name) && Self::is_valid_identifier(name) {
                     return;
                 }
             }

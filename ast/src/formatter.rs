@@ -9,7 +9,7 @@ use itertools::Itertools;
 
 use crate::{
     Assign, Binary, BinaryOperation, Block, Call, Closure, GenericFor, If, Index, LValue, Literal,
-    MethodCall, NumericFor, RValue, Repeat, Return, Select, Statement, Table, Unary, While,
+    MethodCall, NumericFor, RValue, Repeat, Return, Select, SetList, Statement, Table, Unary, While,
 };
 
 pub enum IndentationMode {
@@ -463,18 +463,16 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             RValue::Binary(binary) => self.format_binary(binary),
             RValue::Closure(closure) => self.format_closure(closure),
             RValue::Literal(Literal::Number(n)) if n.is_infinite() => {
-                
-                write!(self.output, "(")?;
-                self.format_binary(&Binary::new(
-                    Literal::Number(if n.is_sign_positive() { 1.0 } else { -1.0 }).into(),
-                    Literal::Number(0.0).into(),
-                    BinaryOperation::Div,
-                ))?;
-                write!(self.output, ")")
+                // Luau uses math.huge for infinity instead of division by zero
+                if n.is_sign_positive() {
+                    write!(self.output, "math.huge")
+                } else {
+                    write!(self.output, "-math.huge")
+                }
             }
             RValue::Literal(Literal::Number(n)) if n.is_nan() => {
-                
-                
+                // Luau uses 0/0 for NaN or we can use a comment to indicate it's NaN
+                // For clarity, emit 0/0 which produces NaN in both Lua and Luau
                 write!(self.output, "(")?;
                 self.format_binary(&Binary::new(
                     Literal::Number(0.0).into(),
@@ -531,6 +529,8 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
             // Luau statement keyword
             "continue",
+            // Luau type keywords (cannot be used as bare identifiers in type annotations)
+            "cframe", "thread", "any", "never", "void",
         ];
 
         let name_str = std::str::from_utf8(name).unwrap_or("");
@@ -591,7 +591,11 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     }
 
     pub(crate) fn format_index(&mut self, index: &Index) -> fmt::Result {
-        let wrap = Self::should_wrap_left_rvalue(&index.left);
+        // Check if left needs wrapping to avoid ambiguous syntax.
+        // e.g., `(a or b).method [index]` could be parsed as `(a or b).method([index])`.
+        // We need to wrap when the left side is itself an Index (chained indexing).
+        let wrap = Self::should_wrap_left_rvalue(&index.left)
+            || matches!(&index.left, RValue::Index(_));
         if wrap {
             write!(self.output, "(")?;
         }
@@ -864,6 +868,22 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             Statement::Call(call) => self.format_call(call),
             Statement::MethodCall(method_call) => self.format_method_call(method_call),
             Statement::Return(r#return) => self.format_return(r#return),
+            Statement::SetList(setlist) => {
+                // SETLIST is a Lua 5.1 internal function that doesn't exist in Luau.
+                // This code should have been folded into a table constructor by the
+                // SSA inline pass. If we're seeing this, the folding failed.
+                // Convert to individual table field assignments instead.
+                // Format: table[index + i] = values[i] for each value
+                let all_values: Vec<_> = setlist.values.iter().chain(setlist.tail.as_ref()).collect();
+                for (i, value) in all_values.iter().enumerate() {
+                    let index = setlist.index + i;
+                    write!(self.output, "{}[{}] = {}", setlist.object_local, index, value)?;
+                    if i + 1 < all_values.len() {
+                        write!(self.output, ", ")?;
+                    }
+                }
+                Ok(())
+            }
             _ => write!(self.output, "{}", statement),
         }
     }
