@@ -595,7 +595,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         // e.g., `(a or b).method [index]` could be parsed as `(a or b).method([index])`.
         // We need to wrap when the left side is itself an Index (chained indexing).
         let wrap = Self::should_wrap_left_rvalue(&index.left)
-            || matches!(&index.left, RValue::Index(_));
+            || matches!(&*index.left, RValue::Index(_));
         if wrap {
             write!(self.output, "(")?;
         }
