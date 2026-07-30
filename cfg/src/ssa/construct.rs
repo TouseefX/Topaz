@@ -502,7 +502,7 @@ impl<'a> SsaConstructor<'a> {
         usize,
         Vec<FxHashSet<RcLocal>>,
         Vec<(RcLocal, FxHashSet<RcLocal>)>,
-        Vec<FxHashSet<RcLocal>>,
+        Vec<(RcLocal, FxHashSet<RcLocal>)>,
     ) {
         let entry = self.function.entry().unwrap();
         let mut visited_nodes = Vec::with_capacity(self.function.graph().node_count());
@@ -613,9 +613,22 @@ impl<'a> SsaConstructor<'a> {
             self.local_count,
             self.all_definitions.into_values().collect(),
             self.new_upvalues_in.into_iter().collect(),
+            // Keep each group tagged with the *real* captured local (e.g. `b_u59`)
+            // instead of discarding that identity. Previously `.into_values()`
+            // dropped the old_local key here, forcing the caller to invent a
+            // brand-new, unrelated placeholder local as the group's identity --
+            // which meant reads of a captured local occurring later (e.g. inside
+            // a polling loop, after the closures that mutate it were created)
+            // got coalesced into their own fresh local (`v64`) instead of being
+            // unified with the original (`b_u59`), silently freezing them at
+            // whatever value they held the moment they were first read.
             self.upvalues_passed
-                .into_values()
-                .flat_map(|m| m.into_values())
+                .into_iter()
+                .flat_map(|(old_local, by_location)| {
+                    by_location
+                        .into_values()
+                        .map(move |group| (old_local.clone(), group))
+                })
                 .collect(),
         )
     }
@@ -628,7 +641,7 @@ pub fn construct(
     usize,
     Vec<FxHashSet<RcLocal>>,
     Vec<(RcLocal, FxHashSet<RcLocal>)>,
-    Vec<FxHashSet<RcLocal>>,
+    Vec<(RcLocal, FxHashSet<RcLocal>)>,
 ) {
     
     
