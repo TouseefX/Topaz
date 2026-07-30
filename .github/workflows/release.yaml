@@ -2,6 +2,16 @@ name: Build and Release
 
 on:
   workflow_dispatch:
+    inputs:
+      upload_type:
+        description: 'Upload target'
+        required: true
+        default: 'artifact'
+        type: choice
+        options:
+          - artifact
+          - release
+          - both
 
 jobs:
   get-data:
@@ -102,7 +112,14 @@ jobs:
             mv "${ARTIFACT_DIR}/topaz" "${ARTIFACT_DIR}/${ARTIFACT_NAME}"
           fi
 
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
       - name: Upload release asset
+        if: github.event.inputs.upload_type == 'release' || github.event.inputs.upload_type == 'both'
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
@@ -185,7 +202,14 @@ jobs:
             mv "${ARTIFACT_DIR}/topaz-gui" "${ARTIFACT_DIR}/${ARTIFACT_NAME}"
           fi
 
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
       - name: Upload release asset
+        if: github.event.inputs.upload_type == 'release' || github.event.inputs.upload_type == 'both'
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
@@ -279,7 +303,14 @@ jobs:
           cp "$APK" Topaz-debug.apk
           ls -lh Topaz-debug.apk
 
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Topaz-android.apk
+          path: ./Topaz-debug.apk
+
       - name: Upload APK to release
+        if: github.event.inputs.upload_type == 'release' || github.event.inputs.upload_type == 'both'
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
