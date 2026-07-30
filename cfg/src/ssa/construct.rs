@@ -447,13 +447,13 @@ impl<'a> SsaConstructor<'a> {
                     {
                         if let Some(new_upvalues_in) = self.new_upvalues_in.get_mut(old_local) {
                             assert!(new_upvalues_in.contains(&value));
-                        } else {
+                        } else if let Some(all_defs) = self.all_definitions.get(old_local) {
                             self.upvalues_passed
                                 .entry(old_local.clone())
                                 .or_default()
                                 .entry(*open_locations.first().unwrap())
                                 .or_default()
-                                .insert(value);
+                                .extend(all_defs.clone());
                         }
                     }
                 }
