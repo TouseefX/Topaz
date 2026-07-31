@@ -139,9 +139,14 @@ fn extract_name_from_call(call: &Call) -> Option<String> {
 /// Extract name from an index expression
 fn extract_name_from_index(index: &Index) -> Option<String> {
     // Handle game.Workspace, game.Players, etc.
-    if let RValue::Literal(Literal::String(field_name)) = &*index.right {
-        let name = String::from_utf8_lossy(field_name).to_string();
-        return Some(sanitize_identifier(&name));
+    // Only extract when indexing a global, to avoid over-eager renaming
+    // that causes shadowing and collisions on common properties like
+    // .Border, .Price, .Select, .AvailableTo, .Parent.
+    if index.left.as_global().is_some() {
+        if let RValue::Literal(Literal::String(field_name)) = &*index.right {
+            let name = String::from_utf8_lossy(field_name).to_string();
+            return Some(sanitize_identifier(&name));
+        }
     }
     
     None

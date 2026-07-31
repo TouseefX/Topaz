@@ -648,19 +648,30 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     }
 
     pub(crate) fn format_if(&mut self, r#if: &If) -> fmt::Result {
+        let then_block = r#if.then_block.lock();
+        let else_block = r#if.else_block.lock();
+        if then_block.is_empty() && !else_block.is_empty() {
+            write!(self.output, "if ")?;
+            let cond = Unary::new(r#if.condition.clone(), UnaryOperation::Not).reduce_condition();
+            self.format_rvalue(&cond)?;
+            writeln!(self.output, " then")?;
+            self.format_block(&else_block)?;
+            writeln!(self.output)?;
+            self.indent()?;
+            return write!(self.output, "end");
+        }
+
         write!(self.output, "if ")?;
 
         self.format_rvalue(&r#if.condition)?;
 
         writeln!(self.output, " then")?;
 
-        let then_block = r#if.then_block.lock();
         if !then_block.is_empty() {
             self.format_block(&then_block)?;
             writeln!(self.output)?;
         }
 
-        let else_block = r#if.else_block.lock();
         if !else_block.is_empty() {
             self.indent()?;
             if let Some(else_if) = else_block.iter().exactly_one().ok().and_then(|s| s.as_if()) {
