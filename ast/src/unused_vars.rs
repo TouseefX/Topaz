@@ -3,7 +3,7 @@
 //! Detects unused local variables and function parameters, renaming them to `_`
 //! following Lua conventions.
 
-use crate::{Block, Statement, Assign, LValue, RValue, RcLocal, LocalRw, Traverse};
+use crate::{Block, Statement, LValue, RValue, RcLocal, LocalRw, Traverse};
 use rustc_hash::FxHashSet;
 
 /// Mark unused variables with `_`

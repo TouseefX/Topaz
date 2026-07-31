@@ -1,4 +1,3 @@
-use std::fmt::Write;
 use std::iter;
 use std::{
     borrow::Cow,
@@ -9,7 +8,8 @@ use itertools::Itertools;
 
 use crate::{
     Assign, Binary, BinaryOperation, Block, Call, Closure, GenericFor, If, Index, LValue, Literal,
-    MethodCall, NumericFor, RValue, Repeat, Return, Select, SetList, Statement, Table, Unary, While,
+    MethodCall, NumericFor, RValue, Reduce, Repeat, Return, Select, Statement, Table, Unary,
+    UnaryOperation, While,
 };
 
 pub enum IndentationMode {
