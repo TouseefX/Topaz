@@ -594,8 +594,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         // Check if left needs wrapping to avoid ambiguous syntax.
         // e.g., `(a or b).method [index]` could be parsed as `(a or b).method([index])`.
         // We need to wrap when the left side is itself an Index (chained indexing).
-        let wrap = Self::should_wrap_left_rvalue(&index.left)
-            || matches!(&*index.left, RValue::Index(_));
+        let wrap = Self::should_wrap_left_rvalue(&index.left);
         if wrap {
             write!(self.output, "(")?;
         }
@@ -879,7 +878,8 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
                     let index = setlist.index + i;
                     write!(self.output, "{}[{}] = {}", setlist.object_local, index, value)?;
                     if i + 1 < all_values.len() {
-                        write!(self.output, ", ")?;
+                        writeln!(self.output)?;
+                        self.indent()?;
                     }
                 }
                 Ok(())

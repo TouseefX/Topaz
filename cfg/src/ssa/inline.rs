@@ -579,14 +579,27 @@ pub fn inline(
             for i in 1..block.len() {
                 if let ast::Statement::SetList(set_list) = &block[i] {
                     let object_local = set_list.object_local.clone();
-                    if let Some(assign) = block[i - 1].as_assign_mut()
-                        && assign.left == [object_local.into()]
-                    {
+                    let mut found_idx = None;
+                    for j in (0..i).rev() {
+                        if block[j].values_read().iter().any(|&l| l == &object_local)
+                            || block[j].values_written().iter().any(|&l| l == &object_local)
+                        {
+                            if let Some(assign) = block[j].as_assign()
+                                && assign.left == [object_local.clone().into()]
+                                && assign.right.len() == 1
+                                && assign.right[0].as_table().is_some()
+                            {
+                                found_idx = Some(j);
+                            }
+                            break;
+                        }
+                    }
+                    if let Some(j) = found_idx {
                         let set_list = std::mem::replace(&mut block[i], ast::Empty {}.into())
                             .into_set_list()
                             .unwrap();
                         *local_usages.get_mut(&set_list.object_local).unwrap() -= 1;
-                        let assign = block.get_mut(i - 1).unwrap().as_assign_mut().unwrap();
+                        let assign = block.get_mut(j).unwrap().as_assign_mut().unwrap();
                         let table = assign.right[0].as_table_mut().unwrap();
                         assert!(
                             table.0.iter().filter(|(k, _)| k.is_none()).count()
