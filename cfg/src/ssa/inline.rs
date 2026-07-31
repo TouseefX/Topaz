@@ -595,11 +595,12 @@ pub fn inline(
                         }
                     }
                     if let Some(j) = found_idx {
-                        let set_list = std::mem::replace(&mut block[i], ast::Empty {}.into())
+                        let assign_stmt = std::mem::replace(&mut block[j], ast::Empty {}.into());
+                        let set_list = std::mem::replace(&mut block[i], assign_stmt)
                             .into_set_list()
                             .unwrap();
                         *local_usages.get_mut(&set_list.object_local).unwrap() -= 1;
-                        let assign = block.get_mut(j).unwrap().as_assign_mut().unwrap();
+                        let assign = block.get_mut(i).unwrap().as_assign_mut().unwrap();
                         let table = assign.right[0].as_table_mut().unwrap();
                         assert!(
                             table.0.iter().filter(|(k, _)| k.is_none()).count()
