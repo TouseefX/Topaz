@@ -28,6 +28,20 @@ const LUA_KEYWORDS: &[&str] = &[
     "cframe", "thread", "any", "never", "void",
 ];
 
+const LUAU_BUILTINS: &[&str] = &[
+    // Standard Lua / Luau global functions
+    "wait", "warn", "print", "error", "assert", "type", "typeof", "pcall", "xpcall", "select",
+    "require", "next", "pairs", "ipairs", "tostring", "tonumber", "unpack", "rawequal", "rawget",
+    "rawset", "rawlen", "setmetatable", "getmetatable", "newproxy", "gcinfo", "collectgarbage",
+    // Roblox / Luau standard libraries & globals
+    "game", "workspace", "script", "math", "table", "string", "task", "coroutine", "bit32",
+    "debug", "utf8", "os", "plugin", "shared", "_G",
+    // Roblox standard data types & constructors
+    "CFrame", "cframe", "Vector3", "Vector2", "UDim2", "UDim", "Color3", "ColorSequence",
+    "NumberRange", "NumberSequence", "Ray", "TweenInfo", "Instance", "Enum", "BrickColor",
+    "Rect", "Region3", "Region3int16", "Vector2int16", "Vector3int16", "Font", "PathWaypoint",
+];
+
 pub fn is_synthetic_name(name: &str) -> bool {
     if name.is_empty() || name == "_" {
         return true;
@@ -59,7 +73,7 @@ impl Namer {
         if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return false;
         }
-        !LUA_KEYWORDS.contains(&name)
+        !LUA_KEYWORDS.contains(&name) && !LUAU_BUILTINS.contains(&name)
     }
 
     fn lower_first(s: &str) -> String {
