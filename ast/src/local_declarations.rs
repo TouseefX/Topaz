@@ -95,25 +95,19 @@ impl LocalDeclarer {
                     common_dominators = common_dominators.intersect(node_dominators);
                 }
                 let common_dominator = common_dominators[0];
-                if let Some((_, first_stat_index)) =
-                    usages.into_iter().find(|&(n, _)| n == common_dominator)
+                let mut min_stat_index = usages.get(&common_dominator).copied();
+                for child in self
+                    .graph
+                    .neighbors_directed(common_dominator, Direction::Outgoing)
                 {
-                    (common_dominator, first_stat_index)
-                } else {
-                    
-                    let mut first_stat_index = None;
-                    for child in self
-                        .graph
-                        .neighbors_directed(common_dominator, Direction::Outgoing)
-                    {
-                        for node_dominators in &node_dominators {
-                            if node_dominators.contains(&child) {
-                                first_stat_index = Some(self.graph.node_weight(child).unwrap().1);
-                            }
+                    for node_dominators in &node_dominators {
+                        if node_dominators.contains(&child) {
+                            let child_idx = self.graph.node_weight(child).unwrap().1;
+                            min_stat_index = Some(min_stat_index.map_or(child_idx, |curr| curr.min(child_idx)));
                         }
                     }
-                    (common_dominator, first_stat_index.unwrap())
                 }
+                (common_dominator, min_stat_index.unwrap())
             };
             while {
                 let (block, _) = self.graph.node_weight(node).unwrap();
