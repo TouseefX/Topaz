@@ -511,16 +511,34 @@ impl<'a> Destructor<'a> {
 
             let con_class_z = self.get_congruence_class(local_c.clone()).clone();
             if con_class_x == con_class_z && con_class_x != con_class_y {
-                println!("WOAH COPY SHARING");
-                return true;
+                // local_a already shares storage with local_c because they hold the
+                // same value. That alone does NOT make it safe to also drop the
+                // `local_b = local_a` copy -- local_b's own live range still has to
+                // be checked against that congruence class before folding it in.
+                // Previously this returned `true` unconditionally here, which told
+                // the caller to delete the copy assignment without local_b ever
+                // being merged into any congruence class: local_b's definition
+                // became orphaned/dead while later reads of local_b kept resolving
+                // to whatever the destructor happened to pick, silently printing
+                // the wrong local (e.g. an unrelated table/upvalue) at the use site.
+                if self.try_coalesce_copy_by_value(local_a.clone(), local_b.clone()) {
+                    return true;
+                }
+                continue;
             }
             if con_class_y != con_class_x
                 && con_class_y != con_class_z
                 && con_class_x != con_class_z
-                && self.try_coalesce_copy_by_value(local_a.clone(), local_c)
+                && self.try_coalesce_copy_by_value(local_a.clone(), local_c.clone())
             {
-                println!("WOAH COPY SHARING");
-                return true;
+                // Same issue as above: proving local_a and local_c can share
+                // storage says nothing about local_b. Require the normal,
+                // interference-checked merge for local_b too before eliminating
+                // the copy.
+                if self.try_coalesce_copy_by_value(local_a.clone(), local_b.clone()) {
+                    return true;
+                }
+                continue;
             }
         }
 

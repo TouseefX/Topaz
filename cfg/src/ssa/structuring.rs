@@ -362,6 +362,53 @@ fn is_truthy(rvalue: ast::RValue) -> Option<bool> {
     }
 }
 
+/// Finds the single defining expression of `local` anywhere in `function`.
+/// Only valid while `function` is still in pure SSA form (i.e. before
+/// `Destructor::destruct()` runs), since that's what guarantees each local
+/// has exactly one static assignment to look for.
+fn local_defining_value<'a>(
+    function: &'a Function,
+    local: &ast::RcLocal,
+) -> Option<&'a ast::RValue> {
+    for node in function.graph().node_indices() {
+        let Some(block) = function.block(node) else {
+            continue;
+        };
+        for stat in block.iter() {
+            if let Some(assign) = stat.as_assign()
+                && assign.left.len() == 1
+                && assign.right.len() == 1
+                && assign.left[0].as_local() == Some(local)
+            {
+                return Some(&assign.right[0]);
+            }
+        }
+    }
+    None
+}
+
+/// Like `is_truthy`, but when `rvalue` is just a reference to some other
+/// local (e.g. a branch of an `if` that reuses a table built earlier in the
+/// function, rather than constructing one inline), this follows the local's
+/// single SSA definition and checks that instead of giving up. Bounded and
+/// guarded against cycles since copy chains are the only thing we walk
+/// through here.
+fn is_truthy_transitive(function: &Function, mut rvalue: ast::RValue) -> Option<bool> {
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        if let Some(truthy) = is_truthy(rvalue.clone()) {
+            return Some(truthy);
+        }
+        let ast::RValue::Local(local) = &rvalue else {
+            return None;
+        };
+        if !seen.insert(local.clone()) {
+            return None;
+        }
+        rvalue = local_defining_value(function, local)?.clone();
+    }
+}
+
 
 fn make_bool_conditional(
     function: &mut Function,
@@ -387,7 +434,7 @@ fn make_bool_conditional(
         Some(cond.reduce())
     } else {
         
-        let then_truthy = match is_truthy(then_value.clone()) {
+        let then_truthy = match is_truthy_transitive(function, then_value.clone()) {
             Some(truthy) => truthy,
             None if !then_value.has_side_effects() => {
                 let value = match &r#if.condition {
@@ -403,7 +450,7 @@ fn make_bool_conditional(
             None => false,
         };
         
-        let else_truthy = is_truthy(else_value.clone()).is_some_and(|v| v);
+        let else_truthy = is_truthy_transitive(function, else_value.clone()).is_some_and(|v| v);
         let cond = if !then_truthy && !else_truthy {
             return None;
         } else if !then_truthy {
