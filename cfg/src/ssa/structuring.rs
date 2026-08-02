@@ -416,17 +416,17 @@ fn make_bool_conditional(
     mut then_value: ast::RValue,
     mut else_value: ast::RValue,
 ) -> Option<ast::RValue> {
-    let block = function.block_mut(node).unwrap();
-    let r#if = block.last_mut().unwrap().as_if_mut().unwrap();
-    if let ast::RValue::Literal(ast::Literal::Boolean(then_value)) = then_value
-        && let ast::RValue::Literal(ast::Literal::Boolean(else_value)) = else_value
-        && then_value != else_value
+    if let ast::RValue::Literal(ast::Literal::Boolean(then_bool)) = then_value
+        && let ast::RValue::Literal(ast::Literal::Boolean(else_bool)) = else_value
+        && then_bool != else_bool
     {
+        let block = function.block_mut(node).unwrap();
+        let r#if = block.last_mut().unwrap().as_if_mut().unwrap();
         let cond = ast::Unary::new(
             std::mem::replace(&mut r#if.condition, ast::Literal::Nil.into()),
             ast::UnaryOperation::Not,
         );
-        let cond = if then_value {
+        let cond = if then_bool {
             ast::Unary::new(cond.into(), ast::UnaryOperation::Not)
         } else {
             cond
@@ -434,10 +434,23 @@ fn make_bool_conditional(
         Some(cond.reduce())
     } else {
         
+        // Read the if-condition via an immutable borrow first (is_truthy_transitive
+        // needs &Function to walk local definitions), before taking the mutable
+        // borrow of the block below.
+        let condition = function
+            .block(node)
+            .unwrap()
+            .last()
+            .unwrap()
+            .as_if()
+            .unwrap()
+            .condition
+            .clone();
+
         let then_truthy = match is_truthy_transitive(function, then_value.clone()) {
             Some(truthy) => truthy,
             None if !then_value.has_side_effects() => {
-                let value = match &r#if.condition {
+                let value = match &condition {
                     ast::RValue::Binary(ast::Binary {
                         right: box value,
                         operation: ast::BinaryOperation::And,
@@ -451,6 +464,9 @@ fn make_bool_conditional(
         };
         
         let else_truthy = is_truthy_transitive(function, else_value.clone()).is_some_and(|v| v);
+
+        let block = function.block_mut(node).unwrap();
+        let r#if = block.last_mut().unwrap().as_if_mut().unwrap();
         let cond = if !then_truthy && !else_truthy {
             return None;
         } else if !then_truthy {
