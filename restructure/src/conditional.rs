@@ -231,7 +231,7 @@ impl GraphStructurer {
     
     pub(crate) fn refine_virtual_edge_jump(
         &mut self,
-        post_dom: &Dominators<NodeIndex>,
+        _post_dom: &Dominators<NodeIndex>,
         entry: NodeIndex,
         node: NodeIndex,
         header: NodeIndex,
@@ -243,11 +243,7 @@ impl GraphStructurer {
                 .function
                 .predecessor_blocks(header)
                 .filter(|&n| n != entry)
-                .any(|n| {
-                    post_dom
-                        .dominators(entry)
-                        .is_some_and(|mut p| p.contains(&n))
-                })
+                .any(|n| self.post_idx.dominates(n, entry))
             {
                 return false;
             }
@@ -263,7 +259,7 @@ impl GraphStructurer {
 
     pub(crate) fn refine_virtual_edge_conditional(
         &mut self,
-        post_dom: &Dominators<NodeIndex>,
+        _post_dom: &Dominators<NodeIndex>,
         entry: NodeIndex,
         then_node: NodeIndex,
         else_node: NodeIndex,
@@ -274,21 +270,13 @@ impl GraphStructurer {
             .function
             .predecessor_blocks(header)
             .filter(|&n| n != entry)
-            .any(|n| {
-                post_dom
-                    .dominators(then_node)
-                    .is_some_and(|mut p| p.contains(&n))
-            });
+            .any(|n| self.post_idx.dominates(n, then_node));
 
         let else_main_cont = self
             .function
             .predecessor_blocks(header)
             .filter(|&n| n != entry)
-            .any(|n| {
-                post_dom
-                    .dominators(else_node)
-                    .is_some_and(|mut p| p.contains(&n))
-            });
+            .any(|n| self.post_idx.dominates(n, else_node));
 
         let mut changed = false;
         let header_successors = self.function.successor_blocks(header).collect_vec();

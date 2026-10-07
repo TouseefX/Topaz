@@ -1,4 +1,3 @@
-use array_tool::vec::Intersect;
 use ast::{Reduce, SideEffects};
 use cfg::block::{BlockEdge, BranchType};
 use itertools::Itertools;
@@ -61,7 +60,7 @@ impl GraphStructurer {
     pub(crate) fn try_collapse_loop(
         &mut self,
         header: NodeIndex,
-        dominators: &Dominators<NodeIndex>,
+        _dominators: &Dominators<NodeIndex>,
         post_dom: &Dominators<NodeIndex>,
     ) -> bool {
         if !self.is_loop_header(header) {
@@ -329,35 +328,28 @@ impl GraphStructurer {
             let continues = self
                 .function
                 .predecessor_blocks(header)
-                
                 .filter(|&n| n != header)
-                .filter(|&n| {
-                    dominators
-                        .dominators(n)
-                        .map(|mut x| x.contains(&header))
-                        .unwrap_or(false)
-                })
+                .filter(|&n| self.dom_idx.dominates(header, n))
                 .collect_vec();
 
             let mut changed = false;
-            let common_post_doms = post_dom
-                .dominators(body)
-                .map(|d| d.collect_vec())
-                .unwrap_or_default()
-                .intersect(
-                    post_dom
-                        .dominators(next)
-                        .map(|d| d.collect_vec())
-                        .unwrap_or_default(),
-                );
-            
+            // Walk post-dom ancestors of `body` (O(depth), O(1) per query)
+            // instead of materialising both ancestor lists and intersecting.
+            let mut new_next_cand = None;
+            let mut walk = Some(body);
+            while let Some(p) = walk {
+                if self.function.has_block(p)
+                    && self.post_idx.dominates(p, next)
+                    && continues.iter().all(|&n| self.post_idx.dominates(p, n))
+                {
+                    new_next_cand = Some(p);
+                    break;
+                }
+                walk = post_dom.immediate_dominator(p);
+            }
+
             if !self.is_for_next(header)
-                && let Some(new_next) = common_post_doms.into_iter().find(|&p| {
-                    self.function.has_block(p)
-                        && continues
-                            .iter()
-                            .all(|&n| post_dom.dominators(n).unwrap().contains(&p))
-                })
+                && let Some(new_next) = new_next_cand
                 && new_next != next
             {
                 
@@ -391,24 +383,17 @@ impl GraphStructurer {
                 .function
                 .predecessor_blocks(next)
                 .filter(|&n| n != header)
-                .filter(|&n| dominators.dominators(n).unwrap().contains(&body))
+                .filter(|&n| self.dom_idx.dominates(body, n))
                 .collect_vec();
-            
 
             if self
                 .function
                 .predecessor_blocks(header)
                 .filter(|&n| n != header)
                 .any(|n| {
-                    !dominators
-                        .dominators(n)
-                        .is_some_and(|mut d| d.contains(&body))
-                        && dominators
-                            .dominators(n)
-                            .is_some_and(|mut d| d.contains(&header))
-                        && dominators
-                            .dominators(n)
-                            .is_some_and(|mut d| d.contains(&next))
+                    !self.dom_idx.dominates(body, n)
+                        && self.dom_idx.dominates(header, n)
+                        && self.dom_idx.dominates(next, n)
                 })
                 && self.function.successor_blocks(body).exactly_one().ok() != Some(header)
             {
@@ -416,9 +401,7 @@ impl GraphStructurer {
             }
 
             let next = if self.function.successor_blocks(body).exactly_one().ok() == Some(header)
-                || post_dom
-                    .dominators(header)
-                    .is_some_and(|mut p| p.contains(&next))
+                || self.post_idx.dominates(next, header)
             {
                 Some(next)
             } else {

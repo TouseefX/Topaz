@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     replace_locals::replace_locals, Block, LValue, LocalRw, RValue, RcLocal, Select, SideEffects,
-    Statement, Traverse,
+    Statement, Traverse, Upvalue,
 };
 
 fn local_copy(stmt: &Statement) -> Option<(RcLocal, RcLocal)> {
@@ -193,6 +193,29 @@ fn replace_local_in_stmt(stmt: &mut Statement, from: &RcLocal, to: RValue) {
     });
 }
 
+/// `Closure::traverse_rvalues` is empty, so replacing a `Local` rvalue never
+/// rewrites a captured upvalue. Inlining `_callback = p._callback` into
+/// `BindToRenderStep(..., function() _callback(...) end)` then deleting the
+/// assign left CameraShaker printing `UNNAMED_120(v7)`.
+fn rvalue_captures_upvalue(rv: &RValue, local: &RcLocal) -> bool {
+    if let RValue::Closure(c) = rv {
+        if c.upvalues.iter().any(|u| match u {
+            Upvalue::Copy(l) | Upvalue::Ref(l) => l == local,
+        }) {
+            return true;
+        }
+    }
+    rv.rvalues()
+        .iter()
+        .any(|inner| rvalue_captures_upvalue(inner, local))
+}
+
+fn stmt_captures_upvalue(stmt: &Statement, local: &RcLocal) -> bool {
+    stmt.rvalues()
+        .iter()
+        .any(|rv| rvalue_captures_upvalue(rv, local))
+}
+
 fn assigned_local(stmt: &Statement) -> Option<(RcLocal, RValue)> {
     let Statement::Assign(a) = stmt else {
         return None;
@@ -250,6 +273,10 @@ fn inline_consecutive(block: &mut Block, counts: &HashMap<RcLocal, usize>) -> bo
             .iter()
             .any(|l| *l == &local);
         if !reads_next {
+            i += 1;
+            continue;
+        }
+        if stmt_captures_upvalue(&block.0[i + 1], &local) {
             i += 1;
             continue;
         }
@@ -370,7 +397,7 @@ pub fn apply(block: &mut Block) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Assign, Call, Literal, Local, NumericFor};
+    use crate::{Assign, Block, Call, Literal, Local, NumericFor, RValue, Statement};
 
     fn named(n: &str) -> RcLocal {
         RcLocal::new(Local::new(Some(n.into())))
@@ -437,6 +464,39 @@ mod tests {
         assert!(
             !printed.contains("v21"),
             "loop-carried tmp should coalesce: {printed}"
+        );
+    }
+
+    #[test]
+    fn does_not_inline_local_captured_as_upvalue() {
+        let cb = named("_callback");
+        let owner = named("p_u5");
+        let mut decl = Assign::new(
+            vec![cb.clone().into()],
+            vec![RValue::Local(owner.clone())],
+        );
+        decl.prefix = true;
+        let inner = crate::Function {
+            name: None,
+            line: None,
+            parameters: vec![named("v7")],
+            is_variadic: false,
+            body: Block::default(),
+        };
+        let closure = crate::Closure {
+            function: by_address::ByAddress(triomphe::Arc::new(parking_lot::Mutex::new(inner))),
+            upvalues: vec![crate::Upvalue::Ref(cb.clone())],
+        };
+        let call = Call::new(
+            crate::Global::new(b"BindToRenderStep".to_vec()).into(),
+            vec![RValue::Closure(closure)],
+        );
+        let mut block = Block(vec![decl.into(), Statement::Call(call)]);
+        apply(&mut block);
+        let printed = block.to_string();
+        assert!(
+            printed.contains("_callback"),
+            "upvalue local must not be inlined away: {printed}"
         );
     }
 }

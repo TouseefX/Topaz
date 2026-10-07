@@ -19,7 +19,7 @@ use crate::{
 
 mod liveness;
 
-use self::liveness::{LiveSets, Liveness};
+use self::liveness::{Liveness, LivenessResult};
 
 #[derive(PartialOrd, Ord, PartialEq, Eq, Clone, Copy, Debug)]
 enum ParamOrStatIndex {
@@ -55,7 +55,7 @@ pub struct Destructor<'a> {
     /// 60k-block chain and is why large dumps never finished.
     dom_in: FxHashMap<NodeIndex, u32>,
     dom_out: FxHashMap<NodeIndex, u32>,
-    liveness: FxHashMap<NodeIndex, LiveSets>,
+    liveness: LivenessResult,
     undesirable_blocks: FxHashSet<NodeIndex>,
 }
 
@@ -82,7 +82,7 @@ impl<'a> Destructor<'a> {
             dominator_tree: DiGraphMap::new(),
             dom_in: FxHashMap::default(),
             dom_out: FxHashMap::default(),
-            liveness: FxHashMap::default(),
+            liveness: LivenessResult::default(),
             undesirable_blocks: FxHashSet::default(),
         }
     }
@@ -108,16 +108,9 @@ impl<'a> Destructor<'a> {
         self.sequentialize();
     }
 
+    #[allow(dead_code)]
     fn add_liveness_comments(&mut self) {
-        for node in self.function.graph().node_indices().collect::<Vec<_>>() {
-            let liveness = &self.liveness[&node];
-            let block = self.function.block_mut(node).unwrap();
-            block.insert(
-                0,
-                ast::Comment::new(liveness.live_in.iter().join(", ")).into(),
-            );
-            block.push(ast::Comment::new(liveness.live_out.iter().join(", ")).into());
-        }
+        let _ = &self.liveness;
     }
 
     fn coalesce_upvalues(&mut self) {
@@ -581,9 +574,9 @@ impl<'a> Destructor<'a> {
 
         let (_, block_a, _) = self.local_defs[local_a];
         let (_, block_b, _) = self.local_defs[local_b];
-        if self.liveness[&block_a].live_out.contains(local_b) {
+        if self.liveness.live_out_contains(block_a, local_b) {
             true
-        } else if !self.liveness[&block_a].live_in.contains(local_b) && block_a != block_b {
+        } else if !self.liveness.live_in_contains(block_a, local_b) && block_a != block_b {
             false
         } else if let Some(dom_use_index) = self
             .local_last_use
