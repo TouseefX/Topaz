@@ -118,14 +118,16 @@ fn decompile_from_chunk(chunk: deserializer::chunk::Chunk, encode_key: u8) -> St
     };
 
     // wasm32 has no threads. Native: Android / tokio workers are 1–2 MB
-    // and SIGSEGV on 12 MB dumps; lift on a 64 MB stack instead.
+    // and SIGSEGV on 16 MB *decoded* IR (12 MB wire + AUX expansion);
+    // lift on a 64 MB stack instead.
     #[cfg(target_arch = "wasm32")]
     {
         job()
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // 12 MB Roblox dumps build CFGs deep enough that petgraph's
+        // 16 MB decoded IR (~12 MB Roblox wire; AUX words expand the
+        // instruction vec) builds CFGs deep enough that petgraph's
         // recursive dominators blew a 16 MB stack. 64 MB is virtual
         // (overcommit); workers below use the same size.
         const STACK: usize = 64 * 1024 * 1024;
@@ -255,7 +257,8 @@ fn decompile_lifted_waves(
 fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8) -> String {
     // Budget covers lift + SSA. 60k-line scripts used to hang forever in
     // Lifter::lift / construct before the old deadline was even created.
-    let deadline = Instant::now() + Duration::from_secs(120);
+    // 2000 source lines ≈ 666 KB decoded. 16 MB decoded ≈ ~50k lines.
+    let deadline = Instant::now() + Duration::from_secs(180);
     cfg::set_decompile_deadline(Some(deadline));
     let mut lifted = Vec::new();
     let mut stack = vec![(Arc::<Mutex<ast::Function>>::default(), chunk.main)];
@@ -305,21 +308,24 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8
     };
 
     // Children before parents (nested-closure mutex). Independent siblings
-    // in the same wave run in parallel on 64 MB stacks so a 12 MB dump
-    // does not sit on one thread and does not SIGSEGV.
+    // in the same wave run in parallel on 64 MB stacks so a 16 MB decoded
+    // dump does not sit on one thread and does not SIGSEGV.
     let mut upvalues = decompile_lifted_waves(lifted, deadline);
 
     let main = ByAddress(main);
     upvalues.remove(&main);
     let mut body = Arc::try_unwrap(main.0).unwrap().into_inner().body;
     link_upvalues(&mut body, &mut upvalues);
-    if body.0.len() >= 8 && body.0.len() < 8_000 {
+    // 16 MB decoded ≈ 50k lines. Do not drop naming/goto-fold at 8k —
+    // that was skipping quality on real game dumps.
+    const QUALITY_STMT_CAP: usize = 100_000;
+    if body.0.len() >= 8 && body.0.len() < QUALITY_STMT_CAP {
         ast::context_naming::apply_context_naming(&mut body);
         propagate_names(&mut body);
         inline_short_gotos(&mut body);
         ast::guard_clauses::apply_guard_clauses(&mut body);
     }
-    if body.0.len() < 8_000 {
+    if body.0.len() < QUALITY_STMT_CAP {
         name_locals(&mut body, true);
     }
 
@@ -590,7 +596,7 @@ fn finish_function(
     {
         let mut ast_function = ast_function.lock();
         ast_function.body = body;
-        if post && ast_function.body.0.len() >= 4 && ast_function.body.0.len() < 8_000 {
+        if post && ast_function.body.0.len() >= 4 && ast_function.body.0.len() < 100_000 {
             post_process::apply_all(&mut ast_function.body);
         }
         ast_function.parameters = params;

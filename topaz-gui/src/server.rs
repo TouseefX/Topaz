@@ -203,8 +203,8 @@ async fn decompile_luau(
     let bytes_in = body.len() as u64;
     let bytes = maybe_decode_base64(body.to_vec());
     // Don't run the CPU-heavy lift on a tokio worker (small stack, blocks
-    // the runtime). spawn_blocking + the inner 16 MB lift thread is what
-    // keeps CameraShaker / 60k dumps from taking the server down.
+    // the runtime). spawn_blocking + the inner 64 MB lift thread is what
+    // keeps CameraShaker / 16 MB decoded dumps from taking the server down.
     let out = tokio::task::spawn_blocking(move || {
         luau_lifter::decompile_bytecode_default(&bytes, key)
     })
