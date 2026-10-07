@@ -7,8 +7,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    replace_locals, Block, Call, LValue, LocalRw, RValue, RcLocal, Select, SideEffects, Statement,
-    Traverse,
+    replace_locals::replace_locals, Block, LValue, LocalRw, RValue, RcLocal, Select, SideEffects,
+    Statement, Traverse,
 };
 
 fn local_copy(stmt: &Statement) -> Option<(RcLocal, RcLocal)> {
@@ -368,7 +368,7 @@ pub fn apply(block: &mut Block) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Assign, Literal, Local, NumericFor};
+    use crate::{Assign, Call, Literal, Local, NumericFor};
 
     fn named(n: &str) -> RcLocal {
         RcLocal::new(Local::new(Some(n.into())))

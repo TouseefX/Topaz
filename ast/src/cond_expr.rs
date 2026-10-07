@@ -93,13 +93,21 @@ fn collapse_if_assign(block: &mut Block) -> bool {
     while i < block.0.len() {
         match &mut block.0[i] {
             Statement::If(if_stmt) => {
-                collapse_if_assign(&mut if_stmt.then_block.lock());
-                collapse_if_assign(&mut if_stmt.else_block.lock());
+                changed |= collapse_if_assign(&mut if_stmt.then_block.lock());
+                changed |= collapse_if_assign(&mut if_stmt.else_block.lock());
             }
-            Statement::While(s) => collapse_if_assign(&mut s.block.lock()),
-            Statement::Repeat(s) => collapse_if_assign(&mut s.block.lock()),
-            Statement::NumericFor(s) => collapse_if_assign(&mut s.block.lock()),
-            Statement::GenericFor(s) => collapse_if_assign(&mut s.block.lock()),
+            Statement::While(s) => {
+                changed |= collapse_if_assign(&mut s.block.lock());
+            }
+            Statement::Repeat(s) => {
+                changed |= collapse_if_assign(&mut s.block.lock());
+            }
+            Statement::NumericFor(s) => {
+                changed |= collapse_if_assign(&mut s.block.lock());
+            }
+            Statement::GenericFor(s) => {
+                changed |= collapse_if_assign(&mut s.block.lock());
+            }
             _ => {}
         }
 
@@ -198,20 +206,20 @@ fn fold_typeof_default(block: &mut Block) -> bool {
     while i < block.0.len() {
         match &mut block.0[i] {
             Statement::If(if_stmt) => {
-                fold_typeof_default(&mut if_stmt.then_block.lock());
-                fold_typeof_default(&mut if_stmt.else_block.lock());
+                changed |= fold_typeof_default(&mut if_stmt.then_block.lock());
+                changed |= fold_typeof_default(&mut if_stmt.else_block.lock());
             }
             Statement::While(s) => {
-                fold_typeof_default(&mut s.block.lock());
+                changed |= fold_typeof_default(&mut s.block.lock());
             }
             Statement::Repeat(s) => {
-                fold_typeof_default(&mut s.block.lock());
+                changed |= fold_typeof_default(&mut s.block.lock());
             }
             Statement::NumericFor(s) => {
-                fold_typeof_default(&mut s.block.lock());
+                changed |= fold_typeof_default(&mut s.block.lock());
             }
             Statement::GenericFor(s) => {
-                fold_typeof_default(&mut s.block.lock());
+                changed |= fold_typeof_default(&mut s.block.lock());
             }
             _ => {}
         }
