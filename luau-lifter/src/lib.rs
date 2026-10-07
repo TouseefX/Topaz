@@ -118,7 +118,7 @@ fn decompile_from_chunk(chunk: deserializer::chunk::Chunk, encode_key: u8) -> St
     };
 
     // wasm32 has no threads. Native: Android / tokio workers are 1–2 MB
-    // and SIGSEGV on 16 MB *decoded* IR (12 MB wire + AUX expansion);
+    // and SIGSEGV on 60k-line dumps (1–4 MB compiled, ~16 MB decoded IR);
     // lift on a 64 MB stack instead.
     #[cfg(target_arch = "wasm32")]
     {
@@ -126,10 +126,9 @@ fn decompile_from_chunk(chunk: deserializer::chunk::Chunk, encode_key: u8) -> St
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // 16 MB decoded IR (~12 MB Roblox wire; AUX words expand the
-        // instruction vec) builds CFGs deep enough that petgraph's
-        // recursive dominators blew a 16 MB stack. 64 MB is virtual
-        // (overcommit); workers below use the same size.
+        // 60k-line scripts compile to 1–4 MB; decoded IR (AUX expanded)
+        // is ~16 MB and builds CFGs deep enough that petgraph's recursive
+        // dominators blew a 16 MB stack. 64 MB is virtual (overcommit).
         const STACK: usize = 64 * 1024 * 1024;
         match std::thread::Builder::new()
             .name("topaz-lift".into())
@@ -257,7 +256,7 @@ fn decompile_lifted_waves(
 fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8) -> String {
     // Budget covers lift + SSA. 60k-line scripts used to hang forever in
     // Lifter::lift / construct before the old deadline was even created.
-    // 2000 source lines ≈ 666 KB decoded. 16 MB decoded ≈ ~50k lines.
+    // 60k-line body, 16 MB decoded IR. SSA still runs; flatten only if late.
     let deadline = Instant::now() + Duration::from_secs(180);
     cfg::set_decompile_deadline(Some(deadline));
     let mut lifted = Vec::new();
@@ -316,9 +315,8 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8
     upvalues.remove(&main);
     let mut body = Arc::try_unwrap(main.0).unwrap().into_inner().body;
     link_upvalues(&mut body, &mut upvalues);
-    // 16 MB decoded ≈ 50k lines. Do not drop naming/goto-fold at 8k —
-    // that was skipping quality on real game dumps.
-    const QUALITY_STMT_CAP: usize = 100_000;
+    // 60k+ source lines. Do not drop naming/goto-fold at 8k.
+    const QUALITY_STMT_CAP: usize = 250_000;
     if body.0.len() >= 8 && body.0.len() < QUALITY_STMT_CAP {
         ast::context_naming::apply_context_naming(&mut body);
         propagate_names(&mut body);
@@ -596,7 +594,7 @@ fn finish_function(
     {
         let mut ast_function = ast_function.lock();
         ast_function.body = body;
-        if post && ast_function.body.0.len() >= 4 && ast_function.body.0.len() < 100_000 {
+        if post && ast_function.body.0.len() >= 4 && ast_function.body.0.len() < 250_000 {
             post_process::apply_all(&mut ast_function.body);
         }
         ast_function.parameters = params;
