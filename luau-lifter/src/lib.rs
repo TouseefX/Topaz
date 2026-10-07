@@ -120,7 +120,7 @@ fn decompile_from_chunk(chunk: deserializer::chunk::Chunk, encode_key: u8) -> St
 fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8) -> String {
     // Budget covers lift + SSA. 60k-line scripts used to hang forever in
     // Lifter::lift / construct before the old deadline was even created.
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(120);
     let mut lifted = Vec::new();
     let mut stack = vec![(Arc::<Mutex<ast::Function>>::default(), chunk.main)];
     while let Some((ast_func, func_id)) = stack.pop() {
@@ -480,19 +480,12 @@ fn decompile_function(
     let is_variadic = function.is_variadic;
     let func_line = function.line;
     let node_count = function.graph().node_count();
-    let large = node_count > 250;
-    let over_budget = Instant::now() >= deadline;
-
-    // Huge CFGs: skip SSA (construct/destruct are the 60k hang) and just
-    // structure whatever the lifter produced.
-    if large || over_budget {
+    let large = node_count > 800;
+    if Instant::now() >= deadline {
         let params = std::mem::take(&mut function.parameters);
         let is_variadic = function.is_variadic;
         let func_line = function.line;
-        let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            restructure::lift(function)
-        }))
-        .unwrap_or_else(|_| ast::Block::default());
+        let body = flatten_cfg(&function);
         return finish_function(
             ast_function,
             body,

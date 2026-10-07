@@ -270,31 +270,48 @@ fn match_conditional_sequence(
 
 pub fn structure_conditionals(function: &mut Function) -> bool {
     let mut did_structure = false;
-    
-    let mut dfs = DfsPostOrder::new(function.graph(), function.entry().unwrap());
+    let Some(entry) = *function.entry() else {
+        return false;
+    };
+    // Snapshot first. Walking DfsPostOrder while mutating the graph (the
+    // old loop) never returned on scripts like CameraShaker.
+    let mut dfs = DfsPostOrder::new(function.graph(), entry);
+    let mut order = Vec::new();
     while let Some(node) = dfs.next(function.graph()) {
+        order.push(node);
+    }
+    for node in order {
+        if !function.has_block(node) {
+            continue;
+        }
         if simplify_condition(function, node) {
             did_structure = true;
         }
-        if structure_bool_conditional(function, node) {
+        if function.has_block(node) && structure_bool_conditional(function, node) {
             did_structure = true;
         }
 
+        if !function.has_block(node) {
+            continue;
+        }
         if let Some(pattern) = match_conditional_sequence(function, node)
-            
             && &Some(pattern.second_node) != function.entry()
         {
             let second_to_sc_edges = function
                 .edges(pattern.second_node)
                 .filter(|e| e.target() == pattern.short_circuit)
                 .collect::<Vec<_>>();
-            assert!(second_to_sc_edges.len() == 1);
+            if second_to_sc_edges.len() != 1 {
+                continue;
+            }
             let second_to_sc_args = second_to_sc_edges[0].weight().arguments.clone();
             let first_to_sc_edges = function
                 .edges(pattern.first_node)
                 .filter(|e| e.target() == pattern.short_circuit)
                 .collect::<Vec<_>>();
-            assert!(first_to_sc_edges.len() == 1);
+            if first_to_sc_edges.len() != 1 {
+                continue;
+            }
             let first_to_sc_edge = first_to_sc_edges[0].id();
             for arg in &mut function
                 .graph_mut()
@@ -314,7 +331,9 @@ pub fn structure_conditionals(function: &mut Function) -> bool {
                 second_terminator.0
             };
             let other_edge = other_edge.id();
-            assert!(skip_over_node(function, pattern.first_node, other_edge));
+            if !skip_over_node(function, pattern.first_node, other_edge) {
+                continue;
+            }
 
             let mut removed_block = function.remove_block(pattern.second_node).unwrap();
             let first_node = pattern.first_node;

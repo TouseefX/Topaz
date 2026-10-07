@@ -112,6 +112,10 @@ impl GraphStructurer {
             .collect::<FxHashSet<_>>();
         let mut dfs_postorder =
             DfsPostOrder::new(self.function.graph(), self.function.entry().unwrap());
+        let mut order = Vec::new();
+        while let Some(node) = dfs_postorder.next(self.function.graph()) {
+            order.push(node);
+        }
 
         // Compute dominators once per pass — they're only invalidated lazily
         let mut dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
@@ -119,9 +123,11 @@ impl GraphStructurer {
         let mut changed = false;
         let mut doms_dirty = false;
 
-        while let Some(node) = dfs_postorder.next(self.function.graph()) {
+        for node in order {
+            if !self.function.has_block(node) {
+                continue;
+            }
             if doms_dirty {
-                // Only recompute dominators when something actually changed
                 dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
                 post_dom = post_dominators(self.function.graph_mut());
                 doms_dirty = false;
@@ -211,11 +217,6 @@ impl GraphStructurer {
     fn collapse(&mut self) {
         let n = self.function.graph().node_count();
         if n <= 1 {
-            return;
-        }
-        // Dump remaining blocks as-is; matching every node on a 60k CFG never
-        // returns. `structure()` concatenates what's left.
-        if n > 400 {
             return;
         }
         let (outer_cap, inner_cap, insert_cap) = (24u32, 12u32, 64u32);

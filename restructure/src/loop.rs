@@ -28,7 +28,7 @@ impl GraphStructurer {
     }
 
     
-    fn find_for_init(&mut self, for_loop: NodeIndex) -> (NodeIndex, usize) {
+    fn find_for_init(&mut self, for_loop: NodeIndex) -> Option<(NodeIndex, usize)> {
         let predecessors = self
             .function
             .predecessor_blocks(for_loop)
@@ -55,7 +55,7 @@ impl GraphStructurer {
                     }
                 })
         });
-        init_blocks.exactly_one().unwrap()
+        init_blocks.exactly_one().ok()
     }
 
     pub(crate) fn try_collapse_loop(
@@ -79,7 +79,9 @@ impl GraphStructurer {
                     return false;
                 }
 
-                let (init_block, init_index) = self.find_for_init(header);
+                let Some((init_block, init_index)) = self.find_for_init(header) else {
+                    return false;
+                };
                 if then_node != else_node
                     && self.function.predecessor_blocks(then_node).count() != 1
                 {
@@ -244,10 +246,11 @@ impl GraphStructurer {
                     }
                     _ => unreachable!(),
                 };
+                let Some((init_block, init_index)) = self.find_for_init(header) else {
+                    return false;
+                };
                 let statement = self.function.block_mut(header).unwrap().pop().unwrap();
                 let statements = std::mem::take(&mut self.function.block_mut(header).unwrap().0);
-
-                let (init_block, init_index) = self.find_for_init(header);
 
                 let body_ast: ast::Block = statements.to_vec().into();
                 let init_ast = &mut self.function.block_mut(init_block).unwrap();
@@ -492,9 +495,11 @@ impl GraphStructurer {
                     self.match_jump(header, Some(next));
                     return true;
                 } else {
+                    let Some((init_block, init_index)) = self.find_for_init(header) else {
+                        return false;
+                    };
                     let statements =
                         std::mem::take(&mut self.function.block_mut(header).unwrap().0);
-                    let (init_block, init_index) = self.find_for_init(header);
 
                     let mut body_ast = self.function.remove_block(body).unwrap();
                     body_ast.extend(statements.iter().cloned());
