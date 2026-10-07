@@ -210,6 +210,9 @@ impl GraphStructurer {
 
     fn collapse(&mut self) {
         let n = self.function.graph().node_count();
+        if n <= 1 {
+            return;
+        }
         let (outer_cap, inner_cap, insert_cap) = if n > 400 {
             (4u32, 4u32, 48u32)
         } else {
@@ -230,7 +233,7 @@ impl GraphStructurer {
                 break;
             }
 
-            let Some(&entry) = self.function.entry() else {
+            let Some(entry) = *self.function.entry() else {
                 break;
             };
             let dominators = simple_fast(self.function.graph(), entry);

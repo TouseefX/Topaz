@@ -164,7 +164,7 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8
     upvalues.remove(&main);
     let mut body = Arc::try_unwrap(main.0).unwrap().into_inner().body;
     link_upvalues(&mut body, &mut upvalues);
-    if body.0.len() < 12_000 {
+    if body.0.len() >= 8 && body.0.len() < 12_000 {
         ast::context_naming::apply_context_naming(&mut body);
         propagate_names(&mut body);
         inline_short_gotos(&mut body);
@@ -198,7 +198,9 @@ fn decode_best(
     preferred: u8,
 ) -> Result<(deserializer::chunk::Chunk, u8), String> {
     let mut candidates = Vec::with_capacity(3);
-    for k in [1u8, 203, preferred] {
+    // Preferred first so a known Roblox key (203) does not waste a full
+    // failed parse on key 1.
+    for k in [preferred, 1u8, 203] {
         if k != 0 && !candidates.contains(&k) {
             candidates.push(k);
         }
@@ -405,7 +407,7 @@ fn propagate_names_block(block: &mut ast::Block, captured: &FxHashSet<ast::RcLoc
 fn flatten_cfg(function: &Function) -> ast::Block {
     let mut body = ast::Block::default();
     let mut order = Vec::new();
-    if let Some(&entry) = function.entry() {
+    if let Some(entry) = *function.entry() {
         let mut dfs = Dfs::new(function.graph(), entry);
         while let Some(n) = dfs.next(function.graph()) {
             order.push(n);
@@ -436,7 +438,7 @@ fn finish_function(
     {
         let mut ast_function = ast_function.lock();
         ast_function.body = body;
-        if post && ast_function.body.0.len() < 8_000 {
+        if post && ast_function.body.0.len() >= 4 && ast_function.body.0.len() < 8_000 {
             post_process::apply_all(&mut ast_function.body);
         }
         ast_function.parameters = params;
@@ -455,7 +457,8 @@ fn decompile_function(
     let params = function.parameters.clone();
     let is_variadic = function.is_variadic;
     let func_line = function.line;
-    let large = function.graph().node_count() > 400;
+    let node_count = function.graph().node_count();
+    let large = node_count > 400;
 
     let constructed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         cfg::ssa::construct(&mut function, &upvalues_in)
@@ -493,19 +496,26 @@ fn decompile_function(
 
     let mut changed = true;
     let mut iters = 0u32;
-    let ssa_cap = if large { 3 } else { 8 };
+    // Tiny scripts (a single require, etc.) must stay near-instant.
+    let ssa_cap = if node_count <= 12 {
+        1
+    } else if large {
+        2
+    } else {
+        4
+    };
     while changed && iters < ssa_cap && Instant::now() < deadline {
         iters += 1;
         changed = false;
 
-        if let Some(&entry) = function.entry() {
+        if let Some(entry) = *function.entry() {
             let dominators = simple_fast(function.graph(), entry);
             changed |= structure_jumps(&mut function, &dominators);
         }
 
         ssa::inline::inline(&mut function, &local_to_group, &upvalue_to_group);
 
-        if structure_conditionals(&mut function) {
+        if node_count > 2 && structure_conditionals(&mut function) {
             changed = true;
         }
         let mut local_map = FxHashMap::default();
@@ -552,8 +562,6 @@ fn decompile_function(
         upvalues_in,
         Instant::now() < deadline,
     )
-}
-    (ByAddress(ast_function), upvalues_in)
 }
 
 fn link_upvalues(

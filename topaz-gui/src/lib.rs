@@ -418,22 +418,20 @@ impl TopazApp {
             .name("topaz-decompile".to_string())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let source = match format {
+                    // Source only. CFG dump re-lifts the whole chunk and made
+                    // even a one-line `require` wait a full extra pass.
+                    match format {
                         BytecodeFormat::Lua51 => lua51_lifter::decompile_bytecode(&bytecode),
                         BytecodeFormat::Luau => {
                             luau_lifter::decompile_bytecode_default(&bytecode, encode_key)
                         }
-                    };
-
-                    let cfgs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match format {
-                        BytecodeFormat::Lua51 => lua51_lifter::dump_cfgs(&bytecode),
-                        BytecodeFormat::Luau => dump_luau_cfgs_for_gui(&bytecode, encode_key),
-                    }))
-                    .unwrap_or_default();
-                    (source, cfgs)
+                    }
                 }));
                 let msg = match result {
-                    Ok((source, cfgs)) => DecompileMsg::Ok { source, cfgs },
+                    Ok(source) => DecompileMsg::Ok {
+                        source,
+                        cfgs: Vec::new(),
+                    },
                     Err(e) => DecompileMsg::Err(panic_message(&e)),
                 };
                 let _ = tx.send(msg);
@@ -459,10 +457,8 @@ impl TopazApp {
                 self.selected_function = 0;
                 self.cfg_view.reset();
                 self.status = format!(
-                    "Decompilation successful ({:.2}s, {} function{}).",
-                    elapsed.as_secs_f64(),
-                    self.cfgs.len(),
-                    if self.cfgs.len() == 1 { "" } else { "s" }
+                    "Decompilation successful ({:.2}s).",
+                    elapsed.as_secs_f64()
                 );
                 self.status_is_error = false;
                 self.decompile_rx = None;
@@ -1155,7 +1151,22 @@ impl TopazApp {
             });
     }
 
+    fn ensure_cfgs(&mut self) {
+        if !self.cfgs.is_empty() {
+            return;
+        }
+        let Some(bytecode) = self.bytecode.as_ref() else {
+            return;
+        };
+        self.cfgs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match self.format {
+            BytecodeFormat::Lua51 => lua51_lifter::dump_cfgs(bytecode),
+            BytecodeFormat::Luau => dump_luau_cfgs_for_gui(bytecode, self.encode_key),
+        }))
+        .unwrap_or_default();
+    }
+
     fn show_cfg_subtab(&mut self, ui: &mut egui::Ui) {
+        self.ensure_cfgs();
         let Some(snapshot) = self.cfgs.get(self.selected_function).cloned() else {
             ui.centered_and_justified(|ui| {
                 ui.weak("No CFG to display.");
