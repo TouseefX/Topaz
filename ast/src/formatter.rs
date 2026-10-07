@@ -94,6 +94,24 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         )
     }
 
+    /// Medal-improved: `(function() end)[1]()` is valid, but without wrapping
+    /// the callee Lua parses `function() end[1]()` as a syntax error.
+    fn starts_with_parenthesized_rvalue(value: &RValue) -> bool {
+        match value {
+            RValue::Binary(_) | RValue::Unary(_) | RValue::Closure(_) => true,
+            RValue::Index(index) => Self::starts_with_parenthesized_rvalue(&index.left),
+            RValue::Call(call) => Self::starts_with_parenthesized_rvalue(&call.value),
+            RValue::MethodCall(method_call) => {
+                Self::starts_with_parenthesized_rvalue(&method_call.value)
+            }
+            RValue::Select(Select::Call(call)) => Self::starts_with_parenthesized_rvalue(&call.value),
+            RValue::Select(Select::MethodCall(method_call)) => {
+                Self::starts_with_parenthesized_rvalue(&method_call.value)
+            }
+            _ => false,
+        }
+    }
+
     fn format_block(&mut self, block: &Block) -> fmt::Result {
         self.indentation_level += 1;
         self.format_block_no_indent(block)?;
@@ -139,7 +157,25 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
                     writeln!(self.output)?;
                 }
             }
-            self.format_statement(statement)?;
+            // Lua forbids `return` unless it is last in the block. Wrap a
+            // mid-block return (from unstructured CFG) as `do return end`.
+            if statement.as_return().is_some()
+                && block
+                    .iter()
+                    .skip(i + 1)
+                    .any(|s| s.as_comment().is_none())
+            {
+                self.indent()?;
+                writeln!(self.output, "do")?;
+                self.indentation_level += 1;
+                self.format_statement(statement)?;
+                writeln!(self.output)?;
+                self.indentation_level -= 1;
+                self.indent()?;
+                write!(self.output, "end")?;
+            } else {
+                self.format_statement(statement)?;
+            }
             if let Some(next_statement) =
                 block.iter().skip(i + 1).find(|s| s.as_comment().is_none())
             {
@@ -555,7 +591,8 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         // Check if left needs wrapping to avoid ambiguous syntax.
         // e.g., `(a or b).method [index]` could be parsed as `(a or b).method([index])`.
         // We need to wrap when the left side is itself an Index (chained indexing).
-        let wrap = Self::should_wrap_left_rvalue(&index.left);
+        let wrap = Self::should_wrap_left_rvalue(&index.left)
+            || Self::starts_with_parenthesized_rvalue(&index.left);
         if wrap {
             write!(self.output, "(")?;
         }
@@ -577,7 +614,8 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     }
 
     pub(crate) fn format_call(&mut self, call: &Call) -> fmt::Result {
-        let wrap = Self::should_wrap_left_rvalue(&call.value);
+        let wrap = Self::should_wrap_left_rvalue(&call.value)
+            || Self::starts_with_parenthesized_rvalue(&call.value);
         if wrap {
             write!(self.output, "(")?;
         }
@@ -592,7 +630,8 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     }
 
     pub(crate) fn format_method_call(&mut self, method_call: &MethodCall) -> fmt::Result {
-        let wrap = Self::should_wrap_left_rvalue(&method_call.value);
+        let wrap = Self::should_wrap_left_rvalue(&method_call.value)
+            || Self::starts_with_parenthesized_rvalue(&method_call.value);
         if wrap {
             write!(self.output, "(")?;
         }

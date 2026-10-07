@@ -1,5 +1,6 @@
 use crate::{
-    has_side_effects, Assign, Block, LValue, LocalRw, RValue, RcLocal, SideEffects, Traverse,
+    has_side_effects, shared_blocks_equal, Assign, Block, LValue, LocalRw, RValue, RcLocal,
+    SideEffects, Traverse,
 };
 use itertools::Itertools;
 use parking_lot::Mutex;
@@ -182,9 +183,12 @@ pub struct NumericFor {
 }
 
 impl PartialEq for NumericFor {
-    fn eq(&self, _other: &Self) -> bool {
-        
-        false
+    fn eq(&self, other: &Self) -> bool {
+        self.initial == other.initial
+            && self.limit == other.limit
+            && self.step == other.step
+            && self.counter == other.counter
+            && shared_blocks_equal(&self.block, &other.block)
     }
 }
 
@@ -419,9 +423,10 @@ pub struct GenericFor {
 }
 
 impl PartialEq for GenericFor {
-    fn eq(&self, _other: &Self) -> bool {
-        
-        false
+    fn eq(&self, other: &Self) -> bool {
+        self.res_locals == other.res_locals
+            && self.right == other.right
+            && shared_blocks_equal(&self.block, &other.block)
     }
 }
 

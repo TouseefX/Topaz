@@ -60,28 +60,32 @@ impl SideEffects for Literal {}
 
 impl Traverse for Literal {}
 
+fn format_number(f: &mut fmt::Formatter, value: f64) -> fmt::Result {
+    if value.is_infinite() {
+        if value.is_sign_positive() {
+            write!(f, "math.huge")
+        } else {
+            write!(f, "-math.huge")
+        }
+    } else if value.is_nan() {
+        write!(f, "(0 / 0)")
+    } else if (value - std::f64::consts::PI).abs() <= 1e-12 {
+        write!(f, "math.pi")
+    } else if (value + std::f64::consts::PI).abs() <= 1e-12 {
+        write!(f, "-math.pi")
+    } else {
+        let mut buffer = ryu::Buffer::new();
+        let printed = buffer.format_finite(value);
+        write!(f, "{}", printed.strip_suffix(".0").unwrap_or(printed))
+    }
+}
+
 impl fmt::Display for Literal {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Literal::Nil => write!(f, "nil"),
             Literal::Boolean(value) => write!(f, "{}", value),
-            &Literal::Number(value) => {
-                // Handle infinity values - use math.huge for Luau compatibility
-                if value.is_infinite() {
-                    if value.is_sign_positive() {
-                        write!(f, "math.huge")
-                    } else {
-                        write!(f, "-math.huge")
-                    }
-                } else if value.is_nan() {
-                    // NaN - emit 0/0 which produces NaN in both Lua and Luau
-                    write!(f, "(0 / 0)")
-                } else {
-                    let mut buffer = ryu::Buffer::new();
-                    let printed = buffer.format_finite(value);
-                    write!(f, "{}", printed.strip_suffix(".0").unwrap_or(printed))
-                }
-            }
+            &Literal::Number(value) => format_number(f, value),
             // Integer constants come from LBC_CONSTANT_INTEGER. Luau source
             // has no distinct integer literal syntax (numbers are just
             // numbers), so emit a plain decimal without a type suffix.
@@ -96,11 +100,17 @@ impl fmt::Display for Literal {
                 )
             }
             Literal::Vector(x, y, z, w) => {
-                if *w == 0.0 {
-                    write!(f, "Vector3.new({}, {}, {})", x, y, z)
-                } else {
-                    write!(f, "Vector3.new({}, {}, {}, {})", x, y, z, w)
+                write!(f, "Vector3.new(")?;
+                format_number(f, *x as f64)?;
+                write!(f, ", ")?;
+                format_number(f, *y as f64)?;
+                write!(f, ", ")?;
+                format_number(f, *z as f64)?;
+                if *w != 0.0 {
+                    write!(f, ", ")?;
+                    format_number(f, *w as f64)?;
                 }
+                write!(f, ")")
             }
         }
     }
@@ -116,5 +126,25 @@ mod integer_display_tests {
         assert_eq!(Literal::Integer(30).to_string(), "30");
         assert_eq!(Literal::Integer(-7).to_string(), "-7");
         assert_eq!(Literal::Integer(0).to_string(), "0");
+    }
+
+    #[test]
+    fn number_literals_print_pi_and_huge() {
+        assert_eq!(Literal::Number(std::f64::consts::PI).to_string(), "math.pi");
+        assert_eq!(
+            Literal::Number(-std::f64::consts::PI).to_string(),
+            "-math.pi"
+        );
+        assert_eq!(Literal::Number(f64::INFINITY).to_string(), "math.huge");
+        assert_eq!(Literal::Number(f64::NEG_INFINITY).to_string(), "-math.huge");
+        assert_eq!(Literal::Number(1.0).to_string(), "1");
+    }
+
+    #[test]
+    fn vector_literals_strip_dot_zero() {
+        assert_eq!(
+            Literal::Vector(0.0, 1.0, 2.5, 0.0).to_string(),
+            "Vector3.new(0, 1, 2.5)"
+        );
     }
 }

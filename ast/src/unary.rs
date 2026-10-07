@@ -95,6 +95,12 @@ impl Reduce for Unary {
             (RValue::Literal(Literal::Number(value)), UnaryOperation::Negate) => {
                 RValue::Literal(Literal::Number(-value))
             }
+            (RValue::Literal(Literal::Integer(value)), UnaryOperation::Negate) => {
+                RValue::Literal(match value.checked_neg() {
+                    Some(n) => Literal::Integer(n),
+                    None => Literal::Number(-(value as f64)),
+                })
+            }
             (RValue::Literal(Literal::String(value)), UnaryOperation::Length) => {
                 
                 RValue::Literal(Literal::Number(value.len() as f64))

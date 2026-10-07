@@ -3,6 +3,8 @@ use enum_as_inner::EnumAsInner;
 use enum_dispatch::enum_dispatch;
 use formatter::Formatter;
 use itertools::Either;
+use parking_lot::Mutex;
+use triomphe::Arc;
 
 use std::{
     fmt,
@@ -338,6 +340,17 @@ impl fmt::Display for Statement {
 
 #[derive(Debug, PartialEq, Clone, Default, From)]
 pub struct Block(pub Vec<Statement>);
+
+/// Medal-improved: compare shared `if`/`while` bodies by pointer first so
+/// `a and a` folding and cond-expr matching see equal control-flow, not
+/// `PartialEq => false` on every If/While/Repeat.
+pub(crate) fn shared_blocks_equal(left: &Arc<Mutex<Block>>, right: &Arc<Mutex<Block>>) -> bool {
+    Arc::ptr_eq(left, right) || *left.lock() == *right.lock()
+}
+
+pub(crate) fn block_has_side_effects(block: &Arc<Mutex<Block>>) -> bool {
+    block.lock().iter().any(SideEffects::has_side_effects)
+}
 
 
 impl Deref for Block {

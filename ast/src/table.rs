@@ -55,9 +55,11 @@ impl Reduce for Table {
         self.into()
     }
 
-    fn reduce_condition(self) -> RValue {
+    fn reduce_condition(mut self) -> RValue {
         if self.has_side_effects() {
-            
+            self.0.retain(|(key, value)| {
+                key.as_ref().is_some_and(SideEffects::has_side_effects) || value.has_side_effects()
+            });
             self.into()
         } else {
             Literal::Boolean(true).into()

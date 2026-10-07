@@ -1,7 +1,10 @@
 use parking_lot::Mutex;
 use triomphe::Arc;
 
-use crate::{formatter::Formatter, LocalRw, RcLocal, SideEffects, Traverse};
+use crate::{
+    LocalRw, RcLocal, SideEffects, Traverse, block_has_side_effects, formatter::Formatter,
+    shared_blocks_equal,
+};
 
 use super::{Block, RValue};
 
@@ -15,9 +18,10 @@ pub struct If {
 }
 
 impl PartialEq for If {
-    fn eq(&self, _other: &Self) -> bool {
-        
-        false
+    fn eq(&self, other: &Self) -> bool {
+        self.condition == other.condition
+            && shared_blocks_equal(&self.then_block, &other.then_block)
+            && shared_blocks_equal(&self.else_block, &other.else_block)
     }
 }
 
@@ -42,9 +46,10 @@ impl Traverse for If {
 }
 
 impl SideEffects for If {
-    
     fn has_side_effects(&self) -> bool {
-        true
+        self.condition.has_side_effects()
+            || block_has_side_effects(&self.then_block)
+            || block_has_side_effects(&self.else_block)
     }
 }
 

@@ -333,7 +333,31 @@ impl Namer {
             });
             match statement {
                 Statement::Assign(assign) if assign.prefix => {
+                    // Medal-improved: prefer the compiler debug name on a
+                    // `local f = function ...` so CameraShaker.Start-style
+                    // helpers keep their original identifier.
+                    let named_from_debug = assign.left.len() == 1
+                        && assign.right.len() == 1
+                        && assign.left[0].as_local().is_some()
+                        && assign.right[0].as_closure().is_some();
+                    if named_from_debug {
+                        let local = assign.left[0].as_local().unwrap();
+                        let closure = assign.right[0].as_closure().unwrap();
+                        if let Some(name) = closure.function.lock().name.clone() {
+                            if Self::is_valid_identifier(&name) {
+                                let mut lock = local.0 .0.lock();
+                                if lock.0.is_none() || self.rename {
+                                    lock.0 = Some(name);
+                                }
+                            }
+                        }
+                    }
                     for (i, lvalue) in assign.left.iter().enumerate() {
+                        if named_from_debug && i == 0 {
+                            if lvalue.as_local().unwrap().0 .0.lock().0.is_some() {
+                                continue;
+                            }
+                        }
                         let rv = assign.right.get(i);
                         let hint = rv.map(Self::hint_for_rvalue).unwrap_or("v");
                         self.name_local_smart(hint, rv, lvalue.as_local().unwrap());
