@@ -5,7 +5,8 @@ use rustc_hash::FxHashSet;
 use tuple::Map;
 
 use crate::GraphStructurer;
-use petgraph::{algo::dominators::Dominators, stable_graph::NodeIndex, visit::EdgeRef};
+use cfg::IDom;
+use petgraph::{stable_graph::NodeIndex, visit::EdgeRef};
 
 impl GraphStructurer {
     pub(crate) fn is_loop_header(&self, node: NodeIndex) -> bool {
@@ -60,8 +61,8 @@ impl GraphStructurer {
     pub(crate) fn try_collapse_loop(
         &mut self,
         header: NodeIndex,
-        _dominators: &Dominators<NodeIndex>,
-        post_dom: &Dominators<NodeIndex>,
+        _dominators: &IDom<NodeIndex>,
+        post_dom: &IDom<NodeIndex>,
     ) -> bool {
         if !self.is_loop_header(header) {
             if self.is_for_next(header) {

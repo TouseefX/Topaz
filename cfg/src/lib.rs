@@ -1,5 +1,6 @@
 pub mod block;
 pub mod dom_index;
+pub mod dominators;
 pub mod dot;
 pub mod function;
 pub mod pattern;
@@ -7,6 +8,7 @@ pub mod snapshot;
 pub mod ssa;
 
 pub use dom_index::DomIndex;
+pub use dominators::{compute_idoms, compute_post_idoms, IDom};
 
 pub use snapshot::{CfgEdge, CfgNode, CfgSnapshot, EdgeKind};
 

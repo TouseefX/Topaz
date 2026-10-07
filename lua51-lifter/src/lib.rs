@@ -10,7 +10,6 @@ use cfg::ssa::{
 use indexmap::IndexMap;
 use lifter::Lifter;
 use parking_lot::Mutex;
-use petgraph::algo::dominators::simple_fast;
 use rustc_hash::{FxHashMap, FxHashSet};
 use triomphe::Arc;
 
@@ -66,8 +65,9 @@ pub fn decompile_bytecode(bytecode: &[u8]) -> String {
             while changed {
                 changed = false;
 
-                let dominators = simple_fast(function.graph(), function.entry().unwrap());
-                changed |= structure_jumps(&mut function, &dominators);
+                let idom = cfg::compute_idoms(function.graph(), function.entry().unwrap());
+                let dom_idx = cfg::DomIndex::build(function.graph().node_indices(), &idom);
+                changed |= structure_jumps(&mut function, &dom_idx);
 
                 ssa::inline::inline(&mut function, &local_to_group, &upvalue_to_group);
 

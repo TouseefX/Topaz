@@ -2,7 +2,6 @@ use ast::{LocalRw, Reduce, SideEffects, Traverse, UnaryOperation};
 
 use itertools::Itertools;
 use petgraph::{
-    algo::dominators::Dominators,
     stable_graph::{EdgeIndex, NodeIndex},
     visit::{DfsPostOrder, EdgeRef},
     Direction,
@@ -1072,9 +1071,8 @@ fn is_for_next(function: &Function, node: NodeIndex) -> bool {
 }
 
 
-pub fn structure_jumps(function: &mut Function, dominators: &Dominators<NodeIndex>) -> bool {
+pub fn structure_jumps(function: &mut Function, dom_idx: &DomIndex) -> bool {
     let mut did_structure = false;
-    let dom_idx = DomIndex::build(function.graph().node_indices(), dominators);
     for node in function.graph().node_indices().collect_vec() {
         
         if function.block(node).is_some()

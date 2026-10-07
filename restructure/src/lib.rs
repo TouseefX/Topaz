@@ -1,9 +1,8 @@
-use cfg::{block::BranchType, function::Function, DomIndex};
+use cfg::{block::BranchType, compute_idoms, compute_post_idoms, function::Function, DomIndex, IDom};
 use itertools::Itertools;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use petgraph::{
-    algo::dominators::{simple_fast, Dominators},
     stable_graph::{EdgeIndex, NodeIndex, StableDiGraph},
     visit::*,
 };
@@ -13,23 +12,9 @@ mod conditional;
 mod jump;
 mod r#loop;
 
-/// Compute post-dominators. Returns dominators on the reversed graph
-/// connected to a temporary super-sink (all exit nodes → fake_exit).
-/// The fake node is added and immediately removed — O(1) overhead.
-pub fn post_dominators<N: Default, E: Default>(
-    graph: &mut StableDiGraph<N, E>,
-) -> Dominators<NodeIndex> {
-    let exits: Vec<NodeIndex> = graph
-        .node_identifiers()
-        .filter(|&n| graph.neighbors(n).next().is_none())
-        .collect();
-    let fake_exit = graph.add_node(Default::default());
-    for exit in exits {
-        graph.add_edge(exit, fake_exit, Default::default());
-    }
-    let res = simple_fast(Reversed(&*graph), fake_exit);
-    assert!(graph.remove_node(fake_exit).is_some());
-    res
+/// Post-dominators of `graph` (virtual super-sink, no mutation).
+pub fn post_dominators<N, E>(graph: &StableDiGraph<N, E>) -> IDom<NodeIndex> {
+    compute_post_idoms(graph)
 }
 
 struct GraphStructurer {
@@ -71,8 +56,8 @@ impl GraphStructurer {
     fn try_match_pattern(
         &mut self,
         node: NodeIndex,
-        dominators: &Dominators<NodeIndex>,
-        post_dom: &Dominators<NodeIndex>,
+        dominators: &IDom<NodeIndex>,
+        post_dom: &IDom<NodeIndex>,
     ) -> bool {
         let successors = self.function.successor_blocks(node).collect_vec();
 
@@ -107,8 +92,8 @@ impl GraphStructurer {
 
     fn match_blocks(
         &mut self,
-        dominators: &Dominators<NodeIndex>,
-        post_dom: &Dominators<NodeIndex>,
+        dominators: &IDom<NodeIndex>,
+        post_dom: &IDom<NodeIndex>,
     ) -> bool {
         let Some(entry) = *self.function.entry() else {
             return false;
@@ -239,16 +224,17 @@ impl GraphStructurer {
             let Some(entry) = *self.function.entry() else {
                 break;
             };
-            let mut dominators = simple_fast(self.function.graph(), entry);
-            let mut post_dom = post_dominators(self.function.graph_mut());
+            let mut dominators = compute_idoms(self.function.graph(), entry);
+            let mut post_dom = post_dominators(self.function.graph());
             self.dom_idx = DomIndex::build(self.function.graph().node_indices(), &dominators);
             self.post_idx = DomIndex::build(self.function.graph().node_indices(), &post_dom);
 
             let mut inner = 0u32;
+            let mut graph_changed = false;
             while inner < inner_cap {
                 if inner > 0 && !large {
-                    dominators = simple_fast(self.function.graph(), entry);
-                    post_dom = post_dominators(self.function.graph_mut());
+                    dominators = compute_idoms(self.function.graph(), entry);
+                    post_dom = post_dominators(self.function.graph());
                     self.dom_idx =
                         DomIndex::build(self.function.graph().node_indices(), &dominators);
                     self.post_idx =
@@ -257,6 +243,7 @@ impl GraphStructurer {
                 if !self.match_blocks(&dominators, &post_dom) {
                     break;
                 }
+                graph_changed = true;
                 inner += 1;
             }
             if self.function.graph().node_count() <= 1 {
@@ -266,7 +253,14 @@ impl GraphStructurer {
             let Some(entry) = *self.function.entry() else {
                 break;
             };
-            let dominators = simple_fast(self.function.graph(), entry);
+            // Matching rewrote the CFG — recompute. Otherwise the first
+            // solve is still valid and a second HashMap CHK used to cost
+            // as much as the whole decompile.
+            let dominators = if graph_changed {
+                compute_idoms(self.function.graph(), entry)
+            } else {
+                dominators
+            };
             let dom_idx = DomIndex::build(self.function.graph().node_indices(), &dominators);
             let edges = self.function.graph().edge_indices().collect::<Vec<_>>();
 

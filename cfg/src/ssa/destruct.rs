@@ -4,7 +4,6 @@ use ast::{LocalRw, RcLocal};
 use indexmap::IndexMap;
 use itertools::Itertools;
 use petgraph::{
-    algo::dominators::simple_fast,
     prelude::DiGraphMap,
     stable_graph::NodeIndex,
     visit::{Dfs, DfsPostOrder, EdgeRef},
@@ -243,7 +242,8 @@ impl<'a> Destructor<'a> {
 
     
     fn build_def_use(&mut self) {
-        let dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
+        let entry = self.function.entry().unwrap();
+        let dominators = crate::compute_idoms(self.function.graph(), entry);
         for node in self.function.graph().node_indices() {
             if let Some(dominator) = dominators.immediate_dominator(node) {
                 self.dominator_tree.add_edge(dominator, node, ());

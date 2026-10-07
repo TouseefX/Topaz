@@ -24,7 +24,6 @@ use indexmap::IndexMap;
 use lifter::Lifter;
 
 use parking_lot::Mutex;
-use petgraph::algo::dominators::simple_fast;
 use petgraph::visit::Dfs;
 
 use rayon::prelude::*;
@@ -683,8 +682,9 @@ fn decompile_function(
             changed = false;
 
             if let Some(entry) = *function.entry() {
-                let dominators = simple_fast(function.graph(), entry);
-                changed |= structure_jumps(&mut function, &dominators);
+                let idom = cfg::compute_idoms(function.graph(), entry);
+                let dom_idx = cfg::DomIndex::build(function.graph().node_indices(), &idom);
+                changed |= structure_jumps(&mut function, &dom_idx);
             }
 
             ssa::inline::inline(&mut function, &local_to_group, &upvalue_to_group);

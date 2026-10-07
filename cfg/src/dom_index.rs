@@ -1,5 +1,7 @@
-use petgraph::{algo::dominators::Dominators, stable_graph::NodeIndex};
+use petgraph::stable_graph::NodeIndex;
 use rustc_hash::{FxHashMap, FxHashSet};
+
+use crate::dominators::IDom;
 
 /// Euler-tour times on a dominator tree.
 /// `a` dominates `b` iff `inn[a] <= inn[b] && out[b] <= out[a]` — O(1).
@@ -12,7 +14,7 @@ pub struct DomIndex {
 impl DomIndex {
     pub fn build(
         nodes: impl IntoIterator<Item = NodeIndex>,
-        doms: &Dominators<NodeIndex>,
+        doms: &IDom<NodeIndex>,
     ) -> Self {
         let present: FxHashSet<NodeIndex> = nodes.into_iter().collect();
         let mut children: FxHashMap<NodeIndex, Vec<NodeIndex>> =
