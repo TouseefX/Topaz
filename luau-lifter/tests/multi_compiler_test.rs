@@ -277,7 +277,7 @@ fn decompile_every_source_under_every_available_compiler() {
                 ));
                 continue;
             }
-            if !decompiled.starts_with("-- Decomplied with Topaz") {
+            if !decompiled.starts_with("-- Decompiled with Topaz") {
                 failures.push((
                     name.clone(),
                     compiler.name().to_string(),

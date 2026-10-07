@@ -101,11 +101,9 @@ pub fn decode_chunk(data: &[u8], encode_key: u8) -> Result<Chunk, String> {
     }
 }
 
-/// Whether `version` is within luaur's supported open-source range
-/// (`LBC_VERSION_MIN..=LBC_VERSION_MAX`, currently 3..=11).
+/// Studio 0.735 emits 9/11/12/13/14/100; older dumps go back to 3.
 pub fn is_luaur_version(version: u8) -> bool {
-    use luaur::common::enums::luau_bytecode_tag::{LBC_VERSION_MAX, LBC_VERSION_MIN};
-    version >= LBC_VERSION_MIN.0 as u8 && version <= LBC_VERSION_MAX.0 as u8
+    matches!(version, 3..=14 | 100)
 }
 
 
@@ -213,8 +211,12 @@ mod tests {
         assert!(is_luaur_version(3));
         assert!(is_luaur_version(6));
         assert!(is_luaur_version(11));
+        assert!(is_luaur_version(12));
+        assert!(is_luaur_version(13));
+        assert!(is_luaur_version(14));
+        assert!(is_luaur_version(100));
         assert!(!is_luaur_version(0));
         assert!(!is_luaur_version(2));
-        assert!(!is_luaur_version(12));
+        assert!(!is_luaur_version(15));
     }
 }

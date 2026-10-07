@@ -38,7 +38,7 @@ impl fmt::Display for IndentationMode {
 
 impl Default for IndentationMode {
     fn default() -> Self {
-        Self::Tab
+        Self::Spaces(4)
     }
 }
 
@@ -119,6 +119,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
                 | Statement::Repeat(_)
                 | Statement::NumericFor(_)
                 | Statement::GenericFor(_)
+                | Statement::If(_)
         )
     }
 
@@ -354,38 +355,11 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         // `end` look detached from the `function(...)` header — exactly
         // the broken shape in the Welcome-badge screenshot.
         let function = closure.function.lock();
-        if !function.body.is_empty() || !closure.upvalues.is_empty() {
+        if !function.body.is_empty() {
             writeln!(self.output)?;
             self.indentation_level += 1;
-
-            if !closure.upvalues.is_empty() {
-                self.indent()?;
-                write!(self.output, "-- upvalues: ")?;
-                let mut it = closure.upvalues.iter().peekable();
-                while let Some(uv) = it.next() {
-                    match uv {
-                        crate::Upvalue::Copy(copy) => {
-                            write!(self.output, "{} (copy)", copy)?;
-                        }
-                        crate::Upvalue::Ref(lref) => {
-                            write!(self.output, "{} (ref)", lref)?;
-                        }
-                    }
-                    if it.peek().is_some() {
-                        write!(self.output, ", ")?;
-                    }
-                }
-                writeln!(self.output)?;
-            }
-
-            if !function.body.is_empty() {
-                // format_block_no_indent (not format_block) so we don't
-                // bump indentation a second time — we're already one
-                // level deeper than the `function`/`end` keywords.
-                self.format_block_no_indent(&function.body)?;
-                writeln!(self.output)?;
-            }
-
+            self.format_block_no_indent(&function.body)?;
+            writeln!(self.output)?;
             self.indentation_level -= 1;
             self.indent()
         } else {
@@ -397,27 +371,12 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 		write!(self.output, "function(")?;
 		self.format_closure_parameters(closure)?;
 		write!(self.output, ")")?;
-		let function = closure.function.lock();
-		let mut has_comment = false;
-		if let Some(name) = &function.name {
-			write!(self.output, " --[[ {} ]]", name)?;
-			has_comment = true;
-		}
-		if let Some(line) = function.line {
-			if line > 0 {
-				write!(self.output, " -- line: {}", line)?;
-				has_comment = true;
-			}
-		}
-		let is_empty = function.body.is_empty() && closure.upvalues.is_empty();
-		drop(function);
+		let is_empty = {
+			let function = closure.function.lock();
+			function.body.is_empty()
+		};
 		if is_empty {
-			if has_comment {
-				writeln!(self.output)?;
-				self.indent()?;
-			} else {
-				write!(self.output, " ")?;
-			}
+			write!(self.output, " ")?;
 		} else {
 			self.format_closure_body(closure)?;
 		}
@@ -428,23 +387,12 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 		write!(self.output, "function {}(", name)?;
 		self.format_closure_parameters(closure)?;
 		write!(self.output, ")")?;
-		let function = closure.function.lock();
-		let mut has_comment = false;
-		if let Some(line) = function.line {
-			if line > 0 {
-				write!(self.output, " -- line: {}", line)?;
-				has_comment = true;
-			}
-		}
-		let is_empty = function.body.is_empty() && closure.upvalues.is_empty();
-		drop(function);
+		let is_empty = {
+			let function = closure.function.lock();
+			function.body.is_empty()
+		};
 		if is_empty {
-			if has_comment {
-				writeln!(self.output)?;
-				self.indent()?;
-			} else {
-				write!(self.output, " ")?;
-			}
+			write!(self.output, " ")?;
 		} else {
 			self.format_closure_body(closure)?;
 		}
@@ -503,6 +451,19 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         }
         Ok(())
     }
+    fn index_chain_is_named(index: &crate::Index) -> bool {
+        match index.right.as_ref() {
+            RValue::Literal(Literal::String(key)) if Self::is_valid_name(key) => {
+                match index.left.as_ref() {
+                    RValue::Index(inner) => Self::index_chain_is_named(inner),
+                    RValue::Global(_) | RValue::Local(_) => true,
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn is_valid_name(name: &[u8]) -> bool {
         // Empty strings and strings that don't start with a letter/underscore
         // cannot be bare identifiers. Emitting ` = nil` for an empty-string
@@ -716,32 +677,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             if let RValue::Closure(closure) = &assign.right[0] {
                 let left = &assign.left[0];
                 if assign.prefix || left.as_global().is_some() || {
-                    if let LValue::Index(index) = left {
-                        let mut index = index;
-                        let mut valid = true;
-                        loop {
-                            if let box RValue::Literal(Literal::String(key)) = &index.right {
-                                if Self::is_valid_name(key) {
-                                    match index.left {
-                                        box RValue::Index(ref i) => {
-                                            index = i;
-                                            continue;
-                                        }
-                                        box RValue::Global(_) | box RValue::Local(_) => {}
-                                        _ => valid = false,
-                                    }
-                                } else {
-                                    valid = false;
-                                }
-                            } else {
-                                valid = false;
-                            }
-                            break;
-                        }
-                        valid
-                    } else {
-                        false
-                    }
+                    matches!(left, LValue::Index(index) if Self::index_chain_is_named(index))
                 } {
                     return self.format_named_function(left, closure);
                 }
@@ -767,10 +703,6 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
                 write!(self.output, ", ")?;
             }
             self.format_rvalue(rvalue)?;
-        }
-
-        if assign.parallel {
-            write!(self.output, " -- parallel")?;
         }
 
         Ok(())

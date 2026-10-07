@@ -452,10 +452,10 @@ fn make_bool_conditional(
             None if !then_value.has_side_effects() => {
                 let value = match &condition {
                     ast::RValue::Binary(ast::Binary {
-                        right: box value,
+                        right,
                         operation: ast::BinaryOperation::And,
                         ..
-                    }) => value,
+                    }) => right.as_ref(),
                     value => value,
                 };
                 !value.has_side_effects() && *value == then_value
@@ -482,12 +482,12 @@ fn make_bool_conditional(
             let cond =
                 std::mem::replace(&mut r#if.condition, ast::Literal::Nil.into()).reduce_condition();
             if let ast::RValue::Unary(ast::Unary {
-                box value,
+                value,
                 operation: ast::UnaryOperation::Not,
             }) = cond
             {
                 std::mem::swap(&mut then_value, &mut else_value);
-                value
+                *value
             } else {
                 cond
             }
@@ -782,14 +782,12 @@ fn match_method_call(call: &ast::Call) -> Option<(&ast::RValue, &str)> {
     
     if !call.arguments.is_empty()
         && !call.arguments[0].has_side_effects()
-        && let Some(ast::Index {
-            box left,
-            right: box ast::RValue::Literal(ast::Literal::String(index)),
-        }) = call.value.as_index()
-        && left == &call.arguments[0]
+        && let Some(idx) = call.value.as_index()
+        && let ast::RValue::Literal(ast::Literal::String(name)) = idx.right.as_ref()
+        && idx.left.as_ref() == &call.arguments[0]
     {
-        if let Ok(index) = std::str::from_utf8(index) {
-            Some((left, index))
+        if let Ok(method) = std::str::from_utf8(name) {
+            Some((idx.left.as_ref(), method))
         } else {
             None
         }

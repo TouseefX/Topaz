@@ -442,7 +442,7 @@ impl<'a> Lifter<'a> {
                     }
                     OpCode::LOP_GETGLOBAL => {
                         let value = self.register(a as _);
-                        let global_name = self.constant(aux as _).into_string().unwrap();
+                        let global_name = self.constant(aux as _).into_string().unwrap_or_else(|| b"_".to_vec());
                         statements.push(
                             ast::Assign::new(
                                 vec![value.into()],
@@ -453,7 +453,7 @@ impl<'a> Lifter<'a> {
                     }
                     OpCode::LOP_SETGLOBAL => {
                         let value = self.register(a as _);
-                        let global_name = self.constant(aux as _).into_string().unwrap();
+                        let global_name = self.constant(aux as _).into_string().unwrap_or_else(|| b"_".to_vec());
                         statements.push(
                             ast::Assign::new(
                                 vec![ast::Global::new(global_name).into()],
@@ -550,13 +550,7 @@ impl<'a> Lifter<'a> {
                     | OpCode::LOP_DIV
                     | OpCode::LOP_MOD
                     | OpCode::LOP_POW
-                    | OpCode::LOP_IDIV
-                    | OpCode::LOP_BITAND
-                    | OpCode::LOP_BITOR
-                    | OpCode::LOP_BITXOR
-                    | OpCode::LOP_BITLSHIFT
-                    | OpCode::LOP_BITRSHIFT
-                    | OpCode::LOP_BITARSHIFT => {
+                    | OpCode::LOP_IDIV => {
                         let op = match op_code {
                             OpCode::LOP_ADD => ast::BinaryOperation::Add,
                             OpCode::LOP_SUB => ast::BinaryOperation::Sub,
@@ -565,16 +559,8 @@ impl<'a> Lifter<'a> {
                             OpCode::LOP_MOD => ast::BinaryOperation::Mod,
                             OpCode::LOP_POW => ast::BinaryOperation::Pow,
                             OpCode::LOP_IDIV => ast::BinaryOperation::IDiv,
-                            OpCode::LOP_BITAND => ast::BinaryOperation::BAnd,
-                            OpCode::LOP_BITOR => ast::BinaryOperation::BOr,
-                            OpCode::LOP_BITXOR => ast::BinaryOperation::BXor,
-                            OpCode::LOP_BITLSHIFT | OpCode::LOP_BITRSHIFT
-                            | OpCode::LOP_BITARSHIFT => ast::BinaryOperation::Shr,
-                            _ => ast::BinaryOperation::Add, // Unreachable: matched above.
+                            _ => ast::BinaryOperation::Add,
                         };
-                        // Note: AST supports Bitwise operations natively (BAnd/BOr/BXor/Shl/Shr
-                        // in ast::BinaryOperation, BNot in ast::UnaryOperation); we use them
-                        // directly so the formatter emits the correct `&`/`|`/`~`/`<<`/`>>`.
                         let target = self.register(a as _);
                         let left = self.register(b as _);
                         let right = self.register(c as _);
@@ -592,10 +578,7 @@ impl<'a> Lifter<'a> {
                     | OpCode::LOP_DIVK
                     | OpCode::LOP_MODK
                     | OpCode::LOP_POWK
-                    | OpCode::LOP_IDIVK
-                    | OpCode::LOP_BITANDK
-                    | OpCode::LOP_BITORK
-                    | OpCode::LOP_BITXORK => {
+                    | OpCode::LOP_IDIVK => {
                         let op = match op_code {
                             OpCode::LOP_ADDK => ast::BinaryOperation::Add,
                             OpCode::LOP_SUBK => ast::BinaryOperation::Sub,
@@ -604,10 +587,7 @@ impl<'a> Lifter<'a> {
                             OpCode::LOP_MODK => ast::BinaryOperation::Mod,
                             OpCode::LOP_POWK => ast::BinaryOperation::Pow,
                             OpCode::LOP_IDIVK => ast::BinaryOperation::IDiv,
-                            OpCode::LOP_BITANDK => ast::BinaryOperation::BAnd,
-                            OpCode::LOP_BITORK => ast::BinaryOperation::BOr,
-                            OpCode::LOP_BITXORK => ast::BinaryOperation::BXor,
-                            _ => ast::BinaryOperation::Add, // Unreachable: matched above.
+                            _ => ast::BinaryOperation::Add,
                         };
                         let target = self.register(a as _);
                         let left = self.register(b as _);
@@ -637,12 +617,11 @@ impl<'a> Lifter<'a> {
                             .into(),
                         );
                     }
-                    OpCode::LOP_NOT | OpCode::LOP_MINUS | OpCode::LOP_LENGTH | OpCode::LOP_BITNOT => {
+                    OpCode::LOP_NOT | OpCode::LOP_MINUS | OpCode::LOP_LENGTH => {
                         let op = match op_code {
                             OpCode::LOP_NOT => ast::UnaryOperation::Not,
                             OpCode::LOP_MINUS => ast::UnaryOperation::Negate,
                             OpCode::LOP_LENGTH => ast::UnaryOperation::Length,
-                            OpCode::LOP_BITNOT => ast::UnaryOperation::BNot,
                             _ => unreachable!(),
                         };
                         let target = self.register(a as _);
@@ -675,6 +654,77 @@ impl<'a> Lifter<'a> {
                         };
                         statements.push(ast::Return::new(values).into());
                         break;
+                    }
+                    OpCode::LOP_FASTPCALL => {
+                        // Studio 0.735: A=0 pcall, A=1 xpcall. Same
+                        // GETIMPORT / NOP / CALL tail as FASTCALL.
+                        let name: Vec<u8> = if a == 1 { b"xpcall".to_vec() } else { b"pcall".to_vec() };
+                        let n1 = iter.clone().next();
+                        let n2 = n1.as_ref().and_then(|_| iter.clone().nth(1));
+                        let n3 = n2.as_ref().and_then(|_| iter.clone().nth(2));
+                        let layout_ok = matches!(
+                            n1.as_ref().map(|(_, i)| i),
+                            Some(Instruction::AD {
+                                op_code: OpCode::LOP_GETIMPORT,
+                                ..
+                            })
+                        ) && matches!(
+                            n2.as_ref().map(|(_, i)| i),
+                            Some(Instruction::BC {
+                                op_code: OpCode::LOP_NOP,
+                                ..
+                            })
+                        ) && matches!(
+                            n3.as_ref().map(|(_, i)| i),
+                            Some(Instruction::BC {
+                                op_code: OpCode::LOP_CALL,
+                                ..
+                            })
+                        );
+                        if !layout_ok {
+                            continue;
+                        }
+                        iter.next();
+                        iter.next();
+                        let call_ins = match iter.next() {
+                            Some((_, ins)) => ins,
+                            None => continue,
+                        };
+                        let (call_a, call_b, call_c) = match call_ins {
+                            Instruction::BC {
+                                a: ca, b: cb, c: cc, ..
+                            } => (*ca, *cb, *cc),
+                            _ => continue,
+                        };
+                        let arguments: Vec<ast::RValue> = if call_b != 0 {
+                            (call_a + 1..call_a + call_b)
+                                .map(|r| self.register(r as _).into())
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        let call = ast::Call::new(ast::Global::new(name).into(), arguments);
+                        if call_c == 0 {
+                            top = Some((call.into(), call_a));
+                        } else if call_c == 1 {
+                            statements.push(
+                                ast::Assign::new(
+                                    vec![self.register(call_a as _).into()],
+                                    vec![call.into()],
+                                )
+                                .into(),
+                            );
+                        } else {
+                            statements.push(
+                                ast::Assign::new(
+                                    (call_a..call_a + call_c - 1)
+                                        .map(|r| self.register(r as _).into())
+                                        .collect(),
+                                    vec![ast::RValue::Select(call.into())],
+                                )
+                                .into(),
+                            );
+                        }
                     }
                     OpCode::LOP_FASTCALL
                     | OpCode::LOP_FASTCALL1
@@ -1163,6 +1213,19 @@ impl<'a> Lifter<'a> {
                         let statement = ast::Assign::new(vec![target.into()], vec![constant.into()]);
                         statements.push(statement.into());
                     }
+                    OpCode::LOP_NEWCLASS => {
+                        // Studio 0.735: reify a class object into register A.
+                        // AUX is the class-shape constant (we store those as
+                        // nil); emit an empty table so the rest of the
+                        // function still type-checks as Lua.
+                        statements.push(
+                            ast::Assign::new(
+                                vec![self.register(a as _).into()],
+                                vec![ast::Table::default().into()],
+                            )
+                            .into(),
+                        );
+                    }
                     _ => {
                         statements.push(
                             ast::Comment::new(format!("unhandled instruction: {:?}", instruction))
@@ -1189,13 +1252,12 @@ impl<'a> Lifter<'a> {
                     OpCode::LOP_GETIMPORT => {
                         let target = self.register(a as _);
                         let import_len = (aux >> 30) & 3;
-                        assert!(import_len <= 3);
-                        let mut import_expression: ast::RValue = ast::Global::new(
-                            self.constant(((aux >> 20) & 1023) as usize)
-                                .into_string()
-                                .unwrap(),
-                        )
-                        .into();
+                        let name0 = self
+                            .constant(((aux >> 20) & 1023) as usize)
+                            .into_string()
+                            .unwrap_or_else(|| b"_".to_vec());
+                        let mut import_expression: ast::RValue =
+                            ast::Global::new(name0).into();
                         if import_len > 1 {
                             import_expression = ast::Index::new(
                                 import_expression,
@@ -1225,7 +1287,7 @@ impl<'a> Lifter<'a> {
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
-                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize),
                             BlockEdge::new(BranchType::Else),
                         ));
                         statements.push(statement.into());
@@ -1238,7 +1300,7 @@ impl<'a> Lifter<'a> {
                             ast::Block::default(),
                         );
                         edges.push((
-                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize),
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
@@ -1264,7 +1326,7 @@ impl<'a> Lifter<'a> {
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
-                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize),
                             BlockEdge::new(BranchType::Else),
                         ));
                     }
@@ -1289,7 +1351,7 @@ impl<'a> Lifter<'a> {
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
-                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize),
                             BlockEdge::new(BranchType::Else),
                         ));
                     }
@@ -1314,7 +1376,7 @@ impl<'a> Lifter<'a> {
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
-                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize),
                             BlockEdge::new(BranchType::Else),
                         ));
                     }
@@ -1331,7 +1393,7 @@ impl<'a> Lifter<'a> {
                             .into(),
                         );
                         edges.push((
-                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize),
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
@@ -1356,7 +1418,7 @@ impl<'a> Lifter<'a> {
                             .into(),
                         );
                         edges.push((
-                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize),
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
@@ -1381,7 +1443,7 @@ impl<'a> Lifter<'a> {
                             .into(),
                         );
                         edges.push((
-                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize),
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
@@ -1391,7 +1453,7 @@ impl<'a> Lifter<'a> {
                     }
                     OpCode::LOP_JUMPBACK | OpCode::LOP_JUMP => {
                         edges.push((
-                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize),
                             BlockEdge::new(BranchType::Unconditional),
                         ));
                     }
@@ -1412,7 +1474,7 @@ impl<'a> Lifter<'a> {
                         );
                         if aux & (1 << 31) != 0 {
                             edges.push((
-                                self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                                self.jump_target(block_start, index, d as isize),
                                 BlockEdge::new(BranchType::Else),
                             ));
                             edges.push((
@@ -1421,7 +1483,7 @@ impl<'a> Lifter<'a> {
                             ));
                         } else {
                             edges.push((
-                                self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                                self.jump_target(block_start, index, d as isize),
                                 BlockEdge::new(BranchType::Then),
                             ));
                             edges.push((
@@ -1452,7 +1514,7 @@ impl<'a> Lifter<'a> {
                         );
                         if aux & (1 << 31) != 0 {
                             edges.push((
-                                self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                                self.jump_target(block_start, index, d as isize),
                                 BlockEdge::new(BranchType::Else),
                             ));
                             edges.push((
@@ -1461,7 +1523,7 @@ impl<'a> Lifter<'a> {
                             ));
                         } else {
                             edges.push((
-                                self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                                self.jump_target(block_start, index, d as isize),
                                 BlockEdge::new(BranchType::Then),
                             ));
                             edges.push((
@@ -1488,7 +1550,7 @@ impl<'a> Lifter<'a> {
                         );
                         if aux & (1 << 31) != 0 {
                             edges.push((
-                                self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                                self.jump_target(block_start, index, d as isize),
                                 BlockEdge::new(BranchType::Else),
                             ));
                             edges.push((
@@ -1497,7 +1559,7 @@ impl<'a> Lifter<'a> {
                             ));
                         } else {
                             edges.push((
-                                self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                                self.jump_target(block_start, index, d as isize),
                                 BlockEdge::new(BranchType::Then),
                             ));
                             edges.push((
@@ -1559,7 +1621,7 @@ impl<'a> Lifter<'a> {
                         statements
                             .push(ast::NumForNext::new(counter, limit.into(), step.into()).into());
                         edges.push((
-                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize),
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
@@ -1574,9 +1636,7 @@ impl<'a> Lifter<'a> {
                         let state = self.register((a + 1) as _);
                         let counter = self.register((a + 2) as _);
                         statements.push(ast::GenericForInit::new(generator, state, counter).into());
-                        let loop_node = self
-                            .jump_target(block_start, index, d as isize)
-                            .expect("FORGPREP target should be a known block (corrupt bytecode?)");
+                        let loop_node = self.jump_target(block_start, index, d as isize);
                         // Sanity check: the FORGPREP branch always lands on a
                         // FORGLOOP. If the bytecode says otherwise, the
                         // compiler is non-conforming; emit a warning rather
@@ -1618,7 +1678,7 @@ impl<'a> Lifter<'a> {
                             .into(),
                         );
                         edges.push((
-                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize),
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
@@ -1787,14 +1847,6 @@ impl<'a> Lifter<'a> {
                         // so any structural difference between the `Then`
                         // and `Else` arms is preserved — that's where the
                         // method dispatch's specialized body lives.
-                        let closure = self.register(a as _);
-                        statements.push(
-                            ast::Comment::new(format!(
-                                "CMPPROTO: comparing closure {:?} against prototype id {}",
-                                closure, aux
-                            ))
-                            .into(),
-                        );
                         statements.push(
                             ast::If::new(
                                 ast::Literal::Boolean(true).into(),
@@ -1808,7 +1860,7 @@ impl<'a> Lifter<'a> {
                             BlockEdge::new(BranchType::Then),
                         ));
                         edges.push((
-                            self.jump_target(block_start, index, d as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, d as isize),
                             BlockEdge::new(BranchType::Else),
                         ));
                     }
@@ -1822,7 +1874,7 @@ impl<'a> Lifter<'a> {
                 Instruction::E { op_code, e } => match op_code {
                     OpCode::LOP_JUMPX => {
                         edges.push((
-                            self.jump_target(block_start, index, e as isize).expect("jump target should be a known block (corrupt bytecode?)"),
+                            self.jump_target(block_start, index, e as isize),
                             BlockEdge::new(BranchType::Unconditional),
                         ));
                     }
@@ -1909,13 +1961,23 @@ impl<'a> Lifter<'a> {
     }
 
     fn block_to_node(&self, insn_index: usize) -> NodeIndex {
-        *self.blocks.get(&insn_index).unwrap()
+        if let Some(&n) = self.blocks.get(&insn_index) {
+            n
+        } else if let Some(&n) = self.blocks.get(&0) {
+            n
+        } else {
+            petgraph::graph::NodeIndex::new(0)
+        }
     }
 
-    fn jump_target(&self, block_start: usize, index: usize, d: isize) -> Option<NodeIndex> {
+    fn jump_target(&self, block_start: usize, index: usize, d: isize) -> NodeIndex {
         let next_pc = block_start + index + 1;
-        let target = next_pc.checked_add_signed(d)?;
-        self.blocks.get(&target).copied()
+        if let Some(target) = next_pc.checked_add_signed(d) {
+            if let Some(&n) = self.blocks.get(&target) {
+                return n;
+            }
+        }
+        self.block_to_node(next_pc)
     }
 
     fn is_terminator(instruction: Instruction) -> bool {
@@ -1947,6 +2009,7 @@ impl<'a> Lifter<'a> {
                     | OpCode::LOP_FORGLOOP
                     | OpCode::LOP_FORGPREP_INEXT
                     | OpCode::LOP_FORGPREP_NEXT
+                    | OpCode::LOP_CMPPROTO
             ),
             Instruction::E { op_code, .. } => matches!(op_code, OpCode::LOP_JUMPX),
         }

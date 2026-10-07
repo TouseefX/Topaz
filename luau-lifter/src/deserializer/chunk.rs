@@ -57,13 +57,9 @@ impl Chunk {
         } else {
             0
         };
-        // LBC_TYPE_VERSION_MAX in upstream luau is 3.
-        if types_version > 3 {
-            return Err(ParseError {
-                message: format!("unsupported types_version {}", types_version),
-                position: offset,
-            });
-        }
+        // Studio always writes types_version 3. Unknown future values
+        // still have a typesize payload we skip, so don't abort the
+        // whole blob — a wrong guess here used to reject real scripts.
 
         // -- String table --
         let (string_count, advance) = read_leb128_u32(data, offset).map_err(|e| {

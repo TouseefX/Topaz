@@ -19,6 +19,7 @@ const LBC_CONSTANT_VECTOR: u8 = 7;
 const LBC_CONSTANT_TABLE_WITH_CONSTANTS: u8 = 8;
 const LBC_CONSTANT_INTEGER: u8 = 9;
 const LBC_CONSTANT_CLASS_SHAPE: u8 = 10;
+const LBC_CONSTANT_VECTORD: u8 = 11;
 
 #[derive(Debug, Clone)]
 pub struct DebugLocal {
@@ -84,14 +85,10 @@ impl std::fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 
-/// Map Topaz OpCode → word length via luaur-common's getOpLength
-/// (same table as C++ Luau / luaur VM).
-fn luaur_op_length(op: OpCode) -> i32 {
-    use luaur::common::enums::luau_opcode::LuauOpcode;
-    use luaur::common::functions::get_op_length::get_op_length;
-    // Topaz and luaur both use the upstream LOP_* numeric order.
-    let luau_op = LuauOpcode::from(op as u8);
-    get_op_length(luau_op)
+/// Word length from Studio 0.735 `Luau::getOpLength` (see `OpCode::word_length`).
+#[inline]
+fn op_word_length(op: OpCode) -> u32 {
+    op.word_length()
 }
 
 impl Function {
@@ -113,8 +110,7 @@ impl Function {
                 | Instruction::AD { op_code, .. }
                 | Instruction::E { op_code, .. } => op_code,
             };
-            // Instruction width from luaur (faithful port of Luau getOpLength).
-            let op_len = luaur_op_length(op);
+            let op_len = op_word_length(op);
             if op_len == 2 {
                 let Some(&aux) = raw.get(pc + 1) else {
                     return Err(format!("expected AUX word for op {:?}", op));
@@ -271,6 +267,17 @@ impl Function {
                         let bytes: [u8; 4] = data[*offset..*offset + 4].try_into().unwrap();
                         *slot = f32::from_le_bytes(bytes);
                         *offset += 4;
+                    }
+                    constants.push(Constant::Vector(v[0], v[1], v[2], v[3]));
+                }
+                LBC_CONSTANT_VECTORD => {
+                    // Studio 0.735 / Luau v13: 4 little-endian f64s.
+                    need!(32);
+                    let mut v = [0f32; 4];
+                    for slot in v.iter_mut() {
+                        let bytes: [u8; 8] = data[*offset..*offset + 8].try_into().unwrap();
+                        *slot = f64::from_le_bytes(bytes) as f32;
+                        *offset += 8;
                     }
                     constants.push(Constant::Vector(v[0], v[1], v[2], v[3]));
                 }

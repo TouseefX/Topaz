@@ -163,17 +163,22 @@ impl<'a: 'b, 'b> Reduce for Binary {
             }
             (
                 RValue::Binary(Binary {
-                    left:
-                        box value @ RValue::Unary(Unary {
-                            operation: UnaryOperation::Not,
-                            ..
-                        }),
-                    right: box RValue::Literal(Literal::Boolean(true)),
+                    left,
+                    right,
                     operation: BinaryOperation::And,
                 }),
                 RValue::Literal(Literal::Boolean(false)),
                 BinaryOperation::Or,
-            ) => value,
+            ) if matches!(
+                &*left,
+                RValue::Unary(Unary {
+                    operation: UnaryOperation::Not,
+                    ..
+                })
+            ) && matches!(&*right, RValue::Literal(Literal::Boolean(true))) =>
+            {
+                *left
+            }
             (left, right, BinaryOperation::Or) if left == right => left,
             (left, RValue::Literal(Literal::Boolean(false)), BinaryOperation::Or)
             | (left, RValue::Literal(Literal::Nil), BinaryOperation::Or) => left,

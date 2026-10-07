@@ -209,8 +209,19 @@ impl GraphStructurer {
     }
 
     fn collapse(&mut self) {
+        let mut guard = 0u32;
         loop {
-            while self.match_blocks() {}
+            guard += 1;
+            if guard > 128 {
+                break;
+            }
+            let mut inner = 0u32;
+            while self.match_blocks() {
+                inner += 1;
+                if inner > 48 {
+                    break;
+                }
+            }
             if self.function.graph().node_count() == 1 {
                 break;
             }

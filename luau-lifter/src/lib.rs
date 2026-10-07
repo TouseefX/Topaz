@@ -23,23 +23,12 @@ use indexmap::IndexMap;
 
 use lifter::Lifter;
 
-use clap::Parser;
 use parking_lot::Mutex;
 use petgraph::algo::dominators::simple_fast;
+use rayon::prelude::*;
 
-use anyhow::anyhow;
 use rustc_hash::{FxHashMap, FxHashSet};
 use triomphe::Arc;
-use walkdir::WalkDir;
-
-use std::{
-    fs::File,
-    io::{Read, Write},
-    path::Path,
-    time::Instant,
-};
-
-use deserializer::bytecode::Bytecode;
 
 /// Decompile using the **luaur-compatible** plain-opcode path.
 ///
@@ -88,15 +77,9 @@ pub fn decompile_bytecode_via_ruau(bytecode: &[u8], encode_key: u8) -> String {
 /// encode_key only affects instruction op-bytes (`op' = op * key`); string
 /// tables and constant payloads are not keyed.
 pub fn decompile_bytecode_default(bytecode: &[u8], encode_key: u8) -> String {
-    // 1) Plain path (luaur-compatible).
-    if let Ok(c) = deserializer::loadsafe_ir::decode_chunk(bytecode, 1) {
-        return decompile_from_chunk(c, 1);
-    }
-
-    // 2) Same IR decoder with a detected Roblox / custom encode key.
-    let key = detect_encode_key(bytecode, encode_key);
-    match deserializer::loadsafe_ir::decode_chunk(bytecode, key) {
-        Ok(c) => decompile_from_chunk(c, key),
+    ast::reset_local_id_counter();
+    match decode_best(bytecode, encode_key) {
+        Ok((c, key)) => decompile_from_chunk(c, key),
         Err(e) => format!("failed to deserialize bytecode: {e}"),
     }
 }
@@ -133,7 +116,7 @@ fn decompile_from_chunk(chunk: deserializer::chunk::Chunk, encode_key: u8) -> St
     })
 }
 
-fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, encode_key: u8) -> String {
+fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8) -> String {
     let mut lifted = Vec::new();
     let mut stack = vec![(Arc::<Mutex<ast::Function>>::default(), chunk.main)];
     while let Some((ast_func, func_id)) = stack.pop() {
@@ -143,57 +126,27 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, encode_key: u8)
         stack.extend(child_functions.into_iter().map(|(a, f)| (a.0, f as u32)));
     }
 
-    let (main, ..) = lifted.first().unwrap().clone();
+    let Some(main) = lifted.first().map(|(ast_function, ..)| ast_function.clone()) else {
+        return "-- Decompiled with Topaz\n-- Created by: Andrew & TouseefX\n\n".into();
+    };
     let mut upvalues = lifted
-        .into_iter()
+        .into_par_iter()
         .map(|(ast_function, function, upvalues_in)| {
-            use std::{backtrace::Backtrace, cell::RefCell, fmt::Write, panic};
-
-            thread_local! {
-                static BACKTRACE: RefCell<Option<Backtrace>> = const { RefCell::new(None) };
-            }
-
-            let mut args = std::panic::AssertUnwindSafe(Some((
-                ast_function.clone(),
-                function,
-                upvalues_in,
-            )));
-
-            let prev_hook = panic::take_hook();
-            panic::set_hook(Box::new(|_| {
-                let trace = Backtrace::capture();
-                BACKTRACE.with(move |b| b.borrow_mut().replace(trace));
-            }));
-            let result = panic::catch_unwind(move || {
-                let (ast_function, function, upvalues_in) = args.take().unwrap();
+            let ast_clone = ast_function.clone();
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 decompile_function(ast_function, function, upvalues_in)
-            });
-            panic::set_hook(prev_hook);
-
-            match result {
+            })) {
                 Ok(r) => r,
-                Err(e) => {
-                    let panic_information = match e.downcast::<String>() {
-                        Ok(v) => *v,
-                        Err(e) => match e.downcast::<&str>() {
-                            Ok(v) => v.to_string(),
-                            _ => "Unknown Source of Error".to_owned(),
-                        },
-                    };
-
-                    let mut message = String::new();
-                    writeln!(message, "failed to decompile: {panic_information}").unwrap();
-
-                    ast_function.lock().body.extend(
-                        message
-                            .trim_end()
-                            .split('\n')
-                            .map(|s| ast::Comment::new(s.to_string()).into()),
+                Err(_) => {
+                    ast_clone.lock().body.push(
+                        ast::Comment::new("failed to decompile function".to_string()).into(),
                     );
-                    (ByAddress(ast_function), Vec::new())
+                    (ByAddress(ast_clone), Vec::new())
                 }
             }
         })
+        .collect::<Vec<_>>()
+        .into_iter()
         .collect::<FxHashMap<_, _>>();
 
     let main = ByAddress(main);
@@ -207,9 +160,8 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, encode_key: u8)
     name_locals(&mut body, true);
 
     format!(
-        "-- Decomplied with Topaz\n-- Created by: Andrew & TouseefX\n-- Key: {}\n\n{}",
-        encode_key,
-        body.to_string()
+        "-- Decompiled with Topaz\n-- Created by: Andrew & TouseefX\n\n{}",
+        body
     )
 }
 
@@ -219,40 +171,33 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, encode_key: u8)
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
-#[derive(Parser, Debug)]
-#[clap(about, version, author)]
-struct Args {
-    paths: Vec<String>,
-
-    #[clap(short, long, default_value_t = 0)]
-    threads: usize,
-
-    #[clap(short, long, default_value_t = 1)]
-    key: u8,
-    #[clap(short, long)]
-    recursive: bool,
-    #[clap(short, long)]
-    verbose: bool,
+/// Try a small set of keys (plain 1, Roblox 203, then `preferred`) and
+/// return the first that fully parses. Key 0 is invalid (everything
+/// becomes NOP).
+pub fn detect_encode_key(bytecode: &[u8], preferred: u8) -> u8 {
+    decode_best(bytecode, preferred)
+        .map(|(_, k)| k)
+        .unwrap_or(if preferred == 0 { 1 } else { preferred })
 }
 
-
-pub fn detect_encode_key(bytecode: &[u8], preferred: u8) -> u8 {
-    // Prefer a key that fully parses through loadsafe_ir (same IR as decompile).
-    // Key 0 is invalid (wrapping_mul maps every op to NOP).
-    // Order: plain 1 first is handled by the caller; here we try preferred
-    // then Roblox 203 then 1.
-    let mut candidates = vec![preferred, 203u8, 1u8];
-    candidates.dedup();
-    candidates.retain(|&k| k != 0);
-    if candidates.is_empty() {
-        candidates.push(1);
-    }
-    for candidate in candidates {
-        if deserializer::loadsafe_ir::decode_chunk(bytecode, candidate).is_ok() {
-            return candidate;
+fn decode_best(
+    bytecode: &[u8],
+    preferred: u8,
+) -> Result<(deserializer::chunk::Chunk, u8), String> {
+    let mut candidates = Vec::with_capacity(3);
+    for k in [1u8, 203, preferred] {
+        if k != 0 && !candidates.contains(&k) {
+            candidates.push(k);
         }
     }
-    if preferred == 0 { 1 } else { preferred }
+    let mut last = None;
+    for candidate in candidates {
+        match deserializer::loadsafe_ir::decode_chunk(bytecode, candidate) {
+            Ok(c) => return Ok((c, candidate)),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| "failed to deserialize bytecode".into()))
 }
 
 fn dump_cfgs_from_chunk(chunk: deserializer::chunk::Chunk) -> Vec<cfg::CfgSnapshot> {
@@ -279,12 +224,8 @@ fn dump_cfgs_from_chunk(chunk: deserializer::chunk::Chunk) -> Vec<cfg::CfgSnapsh
 /// CFG dump through loadsafe_ir (plain key 1, then detected key).
 pub fn dump_cfgs_via_luaur(bytecode: &[u8]) -> Vec<cfg::CfgSnapshot> {
     ast::reset_local_id_counter();
-    if let Ok(c) = deserializer::loadsafe_ir::decode_chunk(bytecode, 1) {
-        return dump_cfgs_from_chunk(c);
-    }
-    let key = detect_encode_key(bytecode, 1);
-    match deserializer::loadsafe_ir::decode_chunk(bytecode, key) {
-        Ok(c) => dump_cfgs_from_chunk(c),
+    match decode_best(bytecode, 1) {
+        Ok((c, _)) => dump_cfgs_from_chunk(c),
         Err(_) => Vec::new(),
     }
 }
@@ -296,30 +237,24 @@ pub fn dump_cfgs_via_ruau(bytecode: &[u8]) -> Vec<cfg::CfgSnapshot> {
 
 pub fn dump_cfgs_default(bytecode: &[u8], encode_key: u8) -> Vec<cfg::CfgSnapshot> {
     ast::reset_local_id_counter();
-    if let Ok(c) = deserializer::loadsafe_ir::decode_chunk(bytecode, 1) {
-        return dump_cfgs_from_chunk(c);
-    }
-    let key = detect_encode_key(bytecode, encode_key);
-    match deserializer::loadsafe_ir::decode_chunk(bytecode, key) {
-        Ok(c) => dump_cfgs_from_chunk(c),
+    match decode_best(bytecode, encode_key) {
+        Ok((c, _)) => dump_cfgs_from_chunk(c),
         Err(_) => Vec::new(),
     }
 }
 
 pub fn dump_cfgs(bytecode: &[u8], encode_key: u8) -> Vec<cfg::CfgSnapshot> {
     ast::reset_local_id_counter();
-    let encode_key = detect_encode_key(bytecode, encode_key);
-    match deserializer::loadsafe_ir::decode_chunk(bytecode, encode_key) {
-        Ok(c) => dump_cfgs_from_chunk(c),
+    match decode_best(bytecode, encode_key) {
+        Ok((c, _)) => dump_cfgs_from_chunk(c),
         Err(_) => Vec::new(),
     }
 }
 
 pub fn decompile_bytecode(bytecode: &[u8], encode_key: u8) -> String {
     ast::reset_local_id_counter();
-    let encode_key = detect_encode_key(bytecode, encode_key);
-    match deserializer::loadsafe_ir::decode_chunk(bytecode, encode_key) {
-        Ok(c) => decompile_from_chunk(c, encode_key),
+    match decode_best(bytecode, encode_key) {
+        Ok((c, key)) => decompile_from_chunk(c, key),
         Err(e) => format!("failed to deserialize bytecode: {e}"),
     }
 }
@@ -478,7 +413,9 @@ fn decompile_function(
         .collect::<FxHashMap<_, _>>();
 
     let mut changed = true;
-    while changed {
+    let mut iters = 0u32;
+    while changed && iters < 24 {
+        iters += 1;
         changed = false;
 
         let dominators = simple_fast(function.graph(), function.entry().unwrap());

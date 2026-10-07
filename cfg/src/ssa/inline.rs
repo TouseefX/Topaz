@@ -67,7 +67,7 @@ impl<'a> Inliner<'a> {
                                     operation,
                                 }) if operation.is_comparator()
                                     && left.has_side_effects()
-                                    && let &mut box ast::RValue::Local(ref local) = right
+                                    && let ast::RValue::Local(local) = right.as_ref()
                                     && local == read =>
                                 {
                                     *right = std::mem::replace(
@@ -240,13 +240,22 @@ impl<'a> Inliner<'a> {
                                 }
                             } else if let Some(generic_for_init) =
                                 block[index].as_generic_for_init()
-                                && generic_for_init
-                                    .0
-                                    .right
-                                    .iter()
-                                    .rev()
-                                    .map_while(|r| r.as_local())
-                                    .eq_by(assign.left.iter().rev(), |a, b| Some(a) == b.as_local())
+                                && {
+                                    let mut rights = generic_for_init
+                                        .0
+                                        .right
+                                        .iter()
+                                        .rev()
+                                        .map_while(|r| r.as_local());
+                                    let mut lefts = assign.left.iter().rev();
+                                    loop {
+                                        match (rights.next(), lefts.next()) {
+                                            (None, None) => break true,
+                                            (Some(a), Some(b)) if Some(a) == b.as_local() => {}
+                                            _ => break false,
+                                        }
+                                    }
+                                }
                                 && assign.left.iter().all(|l| {
                                     l.as_local().is_some_and(|l| {
                                         stat_to_values_read[index]
@@ -536,10 +545,9 @@ pub fn inline(
                         && let ast::Statement::Assign(field_assign) = &block[i]
                         && field_assign.left.len() == 1
                         && field_assign.right.len() == 1
-                        && let ast::LValue::Index(ast::Index {
-                            left: box ast::RValue::Local(local),
-                            ..
-                        }) = &field_assign.left[0]
+                        && let ast::LValue::Index(ast::Index { left, .. }) =
+                            &field_assign.left[0]
+                        && let ast::RValue::Local(local) = left.as_ref()
                         && local == &object_local
                     {
                         let right = &field_assign.right[0];
@@ -555,8 +563,8 @@ pub fn inline(
                             .unwrap()
                             .0
                             .push((
-                                Some(Box::into_inner(
-                                    field_assign
+                                Some(
+                                    *field_assign
                                         .left
                                         .into_iter()
                                         .next()
@@ -564,7 +572,7 @@ pub fn inline(
                                         .into_index()
                                         .unwrap()
                                         .right,
-                                )),
+                                ),
                                 field_assign.right.into_iter().next().unwrap(),
                             ));
                         changed = true;

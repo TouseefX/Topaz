@@ -75,20 +75,9 @@ impl Instruction {
                     aux: 0,
                 })
             }
-            OpCode::LOP_BITAND
-            | OpCode::LOP_BITOR
-            | OpCode::LOP_BITXOR
-            | OpCode::LOP_BITNOT
-            | OpCode::LOP_BITLSHIFT
-            | OpCode::LOP_BITRSHIFT
-            | OpCode::LOP_BITARSHIFT
-            | OpCode::LOP_BITANDK
-            | OpCode::LOP_BITORK
-            | OpCode::LOP_BITXORK
-            | OpCode::LOP_SUBRK
-            | OpCode::LOP_DIVRK => {
-                 let (a, b, c) = Self::parse_abc(insn);
-                 Ok(Self::BC {
+            OpCode::LOP_SUBRK | OpCode::LOP_DIVRK => {
+                let (a, b, c) = Self::parse_abc(insn);
+                Ok(Self::BC {
                     op_code,
                     a,
                     b,

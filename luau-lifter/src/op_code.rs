@@ -1,5 +1,12 @@
 use num_enum::TryFromPrimitive;
 
+/// Luau / Roblox Studio 0.735 opcode numbers.
+///
+/// Taken from the 2026 Mac Studio decompile (`BytecodeBuilder.c`
+/// `dumpInstruction` switch) and matching open-source Luau 0.735
+/// `Common/include/Luau/Bytecode.h`. Roblox does **not** ship extra
+/// bitwise opcodes; `0x59` is `FASTPCALL` and `0x5A` is `NEWCLASS`.
+/// Client dumps only shuffle the op *byte* (`stored * encode_key`).
 #[repr(u8)]
 #[derive(Debug, TryFromPrimitive, Eq, PartialEq, Copy, Clone)]
 #[allow(non_camel_case_types)]
@@ -93,18 +100,51 @@ pub enum OpCode {
     LOP_NEWCLASSMEMBER = 0x56,
     LOP_CALLFB = 0x57,
     LOP_CMPPROTO = 0x58,
-    
-    // Bitwise opcodes (recent/experimental)
-    LOP_BITAND = 0x59,
-    LOP_BITOR = 0x5A,
-    LOP_BITXOR = 0x5B,
-    LOP_BITNOT = 0x5C,
-    LOP_BITLSHIFT = 0x5D,
-    LOP_BITRSHIFT = 0x5E,
-    LOP_BITARSHIFT = 0x5F,
-    LOP_BITANDK = 0x60,
-    LOP_BITORK = 0x61,
-    LOP_BITXORK = 0x62,
+    /// Studio 0.735: `FASTPCALL` (A=0 pcall / A=1 xpcall). Not a bitwise op.
+    LOP_FASTPCALL = 0x59,
+    /// Studio 0.735: `NEWCLASS` (AUX = class constant, length 2).
+    LOP_NEWCLASS = 0x5A,
 
     LOP__COUNT,
+}
+
+impl OpCode {
+    /// Word length of this opcode, matching Studio `Luau::getOpLength`
+    /// / `BytecodeUtils.h`. 2 means a following AUX word.
+    #[inline]
+    pub fn word_length(self) -> u32 {
+        match self {
+            OpCode::LOP_GETGLOBAL
+            | OpCode::LOP_SETGLOBAL
+            | OpCode::LOP_GETIMPORT
+            | OpCode::LOP_GETTABLEKS
+            | OpCode::LOP_SETTABLEKS
+            | OpCode::LOP_NAMECALL
+            | OpCode::LOP_JUMPIFEQ
+            | OpCode::LOP_JUMPIFLE
+            | OpCode::LOP_JUMPIFLT
+            | OpCode::LOP_JUMPIFNOTEQ
+            | OpCode::LOP_JUMPIFNOTLE
+            | OpCode::LOP_JUMPIFNOTLT
+            | OpCode::LOP_NEWTABLE
+            | OpCode::LOP_SETLIST
+            | OpCode::LOP_FORGLOOP
+            | OpCode::LOP_LOADKX
+            | OpCode::LOP_FASTCALL2
+            | OpCode::LOP_FASTCALL2K
+            | OpCode::LOP_FASTCALL3
+            | OpCode::LOP_JUMPXEQKNIL
+            | OpCode::LOP_JUMPXEQKB
+            | OpCode::LOP_JUMPXEQKN
+            | OpCode::LOP_JUMPXEQKS
+            | OpCode::LOP_GETUDATAKS
+            | OpCode::LOP_SETUDATAKS
+            | OpCode::LOP_NAMECALLUDATA
+            | OpCode::LOP_NEWCLASSMEMBER
+            | OpCode::LOP_CALLFB
+            | OpCode::LOP_CMPPROTO
+            | OpCode::LOP_NEWCLASS => 2,
+            _ => 1,
+        }
+    }
 }
