@@ -118,23 +118,43 @@ fn decompile_from_chunk(chunk: deserializer::chunk::Chunk, encode_key: u8) -> St
 }
 
 fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8) -> String {
+    // Budget covers lift + SSA. 60k-line scripts used to hang forever in
+    // Lifter::lift / construct before the old deadline was even created.
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut lifted = Vec::new();
     let mut stack = vec![(Arc::<Mutex<ast::Function>>::default(), chunk.main)];
     while let Some((ast_func, func_id)) = stack.pop() {
-        let (function, upvalues, child_functions) =
-            Lifter::lift(&chunk.functions, &chunk.string_table, func_id as usize);
-        lifted.push((ast_func, function, upvalues));
-        stack.extend(child_functions.into_iter().map(|(a, f)| (a.0, f as u32)));
+        if Instant::now() >= deadline {
+            ast_func.lock().body.push(
+                ast::Comment::new("skipped lift (time budget)".to_string()).into(),
+            );
+            lifted.push((ast_func, Function::new(func_id as usize), Vec::new()));
+            continue;
+        }
+        let lifted_fn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Lifter::lift(&chunk.functions, &chunk.string_table, func_id as usize)
+        }));
+        match lifted_fn {
+            Ok((function, upvalues, child_functions)) => {
+                lifted.push((ast_func, function, upvalues));
+                stack.extend(child_functions.into_iter().map(|(a, f)| (a.0, f as u32)));
+            }
+            Err(_) => {
+                ast_func.lock().body.push(
+                    ast::Comment::new("failed to lift function".to_string()).into(),
+                );
+                lifted.push((ast_func, Function::new(func_id as usize), Vec::new()));
+            }
+        }
     }
 
     let Some(main) = lifted.first().map(|(ast_function, ..)| ast_function.clone()) else {
-        return "-- Decompiled with Topaz\n-- Created by: Andrew & TouseefX\n\n".into();
+        return "-- Decompiled with Topaz\n-- Created by: Andrew and TouseefX\n\n".into();
     };
 
     // Children first. Parallel parent+child used to deadlock: post_process
     // on the parent locks nested closures while the child thread holds the
     // same mutex (CameraShaker / BoatTween / Bezier all nest functions).
-    let deadline = Instant::now() + Duration::from_secs(90);
     let mut upvalues = lifted
         .into_iter()
         .rev()
@@ -164,16 +184,18 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8
     upvalues.remove(&main);
     let mut body = Arc::try_unwrap(main.0).unwrap().into_inner().body;
     link_upvalues(&mut body, &mut upvalues);
-    if body.0.len() >= 8 && body.0.len() < 12_000 {
+    if body.0.len() >= 8 && body.0.len() < 8_000 {
         ast::context_naming::apply_context_naming(&mut body);
         propagate_names(&mut body);
         inline_short_gotos(&mut body);
         ast::guard_clauses::apply_guard_clauses(&mut body);
     }
-    name_locals(&mut body, true);
+    if body.0.len() < 8_000 {
+        name_locals(&mut body, true);
+    }
 
     format!(
-        "-- Decompiled with Topaz\n-- Created by: Andrew & TouseefX\n\n{}",
+        "-- Decompiled with Topaz\n-- Created by: Andrew and TouseefX\n\n{}",
         body
     )
 }
@@ -458,7 +480,29 @@ fn decompile_function(
     let is_variadic = function.is_variadic;
     let func_line = function.line;
     let node_count = function.graph().node_count();
-    let large = node_count > 400;
+    let large = node_count > 250;
+    let over_budget = Instant::now() >= deadline;
+
+    // Huge CFGs: skip SSA (construct/destruct are the 60k hang) and just
+    // structure whatever the lifter produced.
+    if large || over_budget {
+        let params = std::mem::take(&mut function.parameters);
+        let is_variadic = function.is_variadic;
+        let func_line = function.line;
+        let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            restructure::lift(function)
+        }))
+        .unwrap_or_else(|_| ast::Block::default());
+        return finish_function(
+            ast_function,
+            body,
+            params,
+            is_variadic,
+            func_line,
+            upvalues_in,
+            false,
+        );
+    }
 
     let constructed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         cfg::ssa::construct(&mut function, &upvalues_in)

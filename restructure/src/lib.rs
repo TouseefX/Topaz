@@ -213,11 +213,12 @@ impl GraphStructurer {
         if n <= 1 {
             return;
         }
-        let (outer_cap, inner_cap, insert_cap) = if n > 400 {
-            (4u32, 4u32, 48u32)
-        } else {
-            (24u32, 12u32, 64u32)
-        };
+        // Dump remaining blocks as-is; matching every node on a 60k CFG never
+        // returns. `structure()` concatenates what's left.
+        if n > 400 {
+            return;
+        }
+        let (outer_cap, inner_cap, insert_cap) = (24u32, 12u32, 64u32);
 
         let mut guard = 0u32;
         loop {
