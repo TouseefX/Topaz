@@ -1,74 +1,219 @@
 use ast::{LocalRw, RcLocal};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use petgraph::stable_graph::NodeIndex;
+use petgraph::{stable_graph::NodeIndex, visit::DfsPostOrder};
 
 use crate::function::Function;
 
-/// Packed bitset. Union / difference are word-wise; membership is O(1).
-///
-/// `HashSet<RcLocal>` live sets were O(|live|) per block per worklist
-/// iteration. ClientRenderer’s handler has thousands of SSA names and
-/// thousands of blocks — that never finished. Bit tests are the O(1)
-/// query that path needed.
+/// Dense word-vector when the local universe is small; sorted id list when
+/// SSA invented tens of thousands of names (phi at every join). A dense
+/// million-bit set × 15k blocks is gigabytes and never finishes. Sparse
+/// union is O(|live|), which stays in the hundreds even on ClientRenderer.
+const DENSE_LIMIT: usize = 16_384;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct BitSet {
-    words: Vec<u64>,
+enum LiveBits {
+    #[default]
+    Empty,
+    Dense(Vec<u64>),
+    Sparse(Vec<u32>),
 }
 
-impl BitSet {
-    fn with_bits(nbits: usize) -> Self {
-        Self {
-            words: vec![0; nbits.div_ceil(64)],
+impl LiveBits {
+    fn new(nbits: usize) -> Self {
+        if nbits <= DENSE_LIMIT {
+            Self::Dense(vec![0; nbits.div_ceil(64)])
+        } else {
+            Self::Sparse(Vec::new())
+        }
+    }
+
+    fn clear(&mut self) {
+        match self {
+            Self::Empty => {}
+            Self::Dense(w) => w.fill(0),
+            Self::Sparse(v) => v.clear(),
         }
     }
 
     #[inline]
     pub fn contains(&self, i: usize) -> bool {
-        self.words
-            .get(i / 64)
-            .is_some_and(|w| w & (1u64 << (i % 64)) != 0)
+        match self {
+            Self::Empty => false,
+            Self::Dense(w) => w
+                .get(i / 64)
+                .is_some_and(|word| word & (1u64 << (i % 64)) != 0),
+            Self::Sparse(v) => v.binary_search(&(i as u32)).is_ok(),
+        }
     }
 
     #[inline]
     fn insert(&mut self, i: usize) {
-        let w = i / 64;
-        if w >= self.words.len() {
-            self.words.resize(w + 1, 0);
+        match self {
+            Self::Empty => {
+                *self = Self::Sparse(vec![i as u32]);
+            }
+            Self::Dense(w) => {
+                let word = i / 64;
+                if word >= w.len() {
+                    w.resize(word + 1, 0);
+                }
+                w[word] |= 1u64 << (i % 64);
+            }
+            Self::Sparse(v) => {
+                let id = i as u32;
+                if let Err(pos) = v.binary_search(&id) {
+                    v.insert(pos, id);
+                }
+            }
         }
-        self.words[w] |= 1u64 << (i % 64);
     }
 
-    /// `self |= other`. Returns whether any bit changed.
     fn union_with(&mut self, other: &Self) -> bool {
-        if other.words.len() > self.words.len() {
-            self.words.resize(other.words.len(), 0);
+        match (&mut *self, other) {
+            (Self::Dense(a), Self::Dense(b)) => {
+                if b.len() > a.len() {
+                    a.resize(b.len(), 0);
+                }
+                let mut changed = false;
+                for (x, y) in a.iter_mut().zip(b.iter()) {
+                    let n = *x | *y;
+                    changed |= n != *x;
+                    *x = n;
+                }
+                changed
+            }
+            (Self::Sparse(a), Self::Sparse(b)) => {
+                if b.is_empty() {
+                    return false;
+                }
+                if a.is_empty() {
+                    *a = b.clone();
+                    return !b.is_empty();
+                }
+                let mut out = Vec::with_capacity(a.len() + b.len());
+                let mut i = 0;
+                let mut j = 0;
+                let mut changed = false;
+                while i < a.len() && j < b.len() {
+                    match a[i].cmp(&b[j]) {
+                        std::cmp::Ordering::Less => {
+                            out.push(a[i]);
+                            i += 1;
+                        }
+                        std::cmp::Ordering::Greater => {
+                            out.push(b[j]);
+                            j += 1;
+                            changed = true;
+                        }
+                        std::cmp::Ordering::Equal => {
+                            out.push(a[i]);
+                            i += 1;
+                            j += 1;
+                        }
+                    }
+                }
+                if j < b.len() {
+                    changed = true;
+                    out.extend_from_slice(&b[j..]);
+                }
+                if i < a.len() {
+                    out.extend_from_slice(&a[i..]);
+                }
+                let changed = changed || out.len() != a.len();
+                *a = out;
+                changed
+            }
+            (me, other) => {
+                // Mixed / Empty: fall back to inserting.
+                let mut changed = false;
+                match other {
+                    Self::Empty => {}
+                    Self::Dense(w) => {
+                        for (wi, word) in w.iter().enumerate() {
+                            let mut bits = *word;
+                            let base = wi * 64;
+                            while bits != 0 {
+                                let b = bits.trailing_zeros() as usize;
+                                bits &= bits - 1;
+                                if !me.contains(base + b) {
+                                    me.insert(base + b);
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    Self::Sparse(v) => {
+                        for &id in v {
+                            if !me.contains(id as usize) {
+                                me.insert(id as usize);
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                changed
+            }
         }
-        let mut changed = false;
-        for (a, b) in self.words.iter_mut().zip(other.words.iter()) {
-            let n = *a | *b;
-            changed |= n != *a;
-            *a = n;
-        }
-        changed
     }
 
     /// `self |= add & !sub`
     fn or_and_not(&mut self, add: &Self, sub: &Self) {
-        let n = add.words.len().max(sub.words.len()).max(self.words.len());
-        self.words.resize(n, 0);
-        for i in 0..n {
-            let a = add.words.get(i).copied().unwrap_or(0);
-            let s = sub.words.get(i).copied().unwrap_or(0);
-            self.words[i] |= a & !s;
+        match (add, sub) {
+            (Self::Dense(a), Self::Dense(s)) => {
+                if let Self::Dense(dst) = self {
+                    let n = a.len().max(s.len()).max(dst.len());
+                    dst.resize(n, 0);
+                    for i in 0..n {
+                        let av = a.get(i).copied().unwrap_or(0);
+                        let sv = s.get(i).copied().unwrap_or(0);
+                        dst[i] |= av & !sv;
+                    }
+                    return;
+                }
+            }
+            (Self::Sparse(a), Self::Sparse(s)) => {
+                for &id in a {
+                    if s.binary_search(&id).is_err() {
+                        self.insert(id as usize);
+                    }
+                }
+                return;
+            }
+            _ => {}
+        }
+        // Mixed: walk add's members.
+        match add {
+            Self::Empty => {}
+            Self::Dense(w) => {
+                for (wi, word) in w.iter().enumerate() {
+                    let mut bits = *word;
+                    let base = wi * 64;
+                    while bits != 0 {
+                        let b = bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        let i = base + b;
+                        if !sub.contains(i) {
+                            self.insert(i);
+                        }
+                    }
+                }
+            }
+            Self::Sparse(v) => {
+                for &id in v {
+                    if !sub.contains(id as usize) {
+                        self.insert(id as usize);
+                    }
+                }
+            }
         }
     }
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct LiveSets {
-    pub live_in: BitSet,
-    pub live_out: BitSet,
+    pub live_in: LiveBits,
+    pub live_out: LiveBits,
 }
 
 #[derive(Default)]
@@ -99,12 +244,9 @@ impl LivenessResult {
     }
 }
 
-/// Namespace matching the previous `Liveness::calculate` call site.
 pub struct Liveness;
 
 impl Liveness {
-    /// Worklist liveness. Params are live-in but do **not** propagate to
-    /// predecessors’ live_out (they’re defined by the CFG edge).
     pub fn calculate(function: &Function) -> LivenessResult {
         calculate(function)
     }
@@ -148,18 +290,18 @@ fn calculate(function: &Function) -> LivenessResult {
         *id_of.get(l).expect("local not interned")
     };
 
-    let mut uses: FxHashMap<NodeIndex, BitSet> =
+    let mut uses: FxHashMap<NodeIndex, LiveBits> =
         FxHashMap::with_capacity_and_hasher(node_count, Default::default());
-    let mut defs: FxHashMap<NodeIndex, BitSet> =
+    let mut defs: FxHashMap<NodeIndex, LiveBits> =
         FxHashMap::with_capacity_and_hasher(node_count, Default::default());
-    let mut params: FxHashMap<NodeIndex, BitSet> =
+    let mut params: FxHashMap<NodeIndex, LiveBits> =
         FxHashMap::with_capacity_and_hasher(node_count, Default::default());
     let mut result: FxHashMap<NodeIndex, LiveSets> =
         FxHashMap::with_capacity_and_hasher(node_count, Default::default());
 
     for (node, block) in function.blocks() {
-        let mut block_uses = BitSet::with_bits(nbits);
-        let mut block_defs = BitSet::with_bits(nbits);
+        let mut block_uses = LiveBits::new(nbits);
+        let mut block_defs = LiveBits::new(nbits);
         for instruction in block.iter() {
             for v in instruction.values_read() {
                 let vid = id(&id_of, v);
@@ -172,19 +314,17 @@ fn calculate(function: &Function) -> LivenessResult {
             }
         }
         for (pred, edge) in function.edges_to_block(node) {
-            let pred_uses = uses
-                .entry(pred)
-                .or_insert_with(|| BitSet::with_bits(nbits));
+            let pred_uses = uses.entry(pred).or_insert_with(|| LiveBits::new(nbits));
             for rv in edge.arguments.iter().flat_map(|(_, v)| v.values_read()) {
                 pred_uses.insert(id(&id_of, rv));
             }
         }
         uses.entry(node)
-            .or_insert_with(|| BitSet::with_bits(nbits))
+            .or_insert_with(|| LiveBits::new(nbits))
             .union_with(&block_uses);
         defs.insert(node, block_defs);
 
-        let mut block_params = BitSet::with_bits(nbits);
+        let mut block_params = LiveBits::new(nbits);
         for (_, edge) in function.edges_to_block(node) {
             for (param, _) in &edge.arguments {
                 block_params.insert(id(&id_of, param));
@@ -195,54 +335,72 @@ fn calculate(function: &Function) -> LivenessResult {
 
     for node in function.graph().node_indices() {
         uses.entry(node)
-            .or_insert_with(|| BitSet::with_bits(nbits));
+            .or_insert_with(|| LiveBits::new(nbits));
         defs.entry(node)
-            .or_insert_with(|| BitSet::with_bits(nbits));
+            .or_insert_with(|| LiveBits::new(nbits));
         params
             .entry(node)
-            .or_insert_with(|| BitSet::with_bits(nbits));
-        let live_in = params[&node].clone();
-        let live_out = uses[&node].clone();
+            .or_insert_with(|| LiveBits::new(nbits));
         result.insert(
             node,
             LiveSets {
-                live_in,
-                live_out,
+                live_in: params[&node].clone(),
+                live_out: uses[&node].clone(),
             },
         );
     }
 
-    let mut worklist: Vec<NodeIndex> = function.graph().node_indices().collect();
-    let mut in_worklist: FxHashSet<NodeIndex> = worklist.iter().copied().collect();
-
-    while let Some(node) = worklist.pop() {
-        in_worklist.remove(&node);
-
-        let mut new_live_out = BitSet::with_bits(nbits);
-        for succ in function.successor_blocks(node) {
-            if let Some(succ_live) = result.get(&succ) {
-                // live_in[s] - params[s]
-                new_live_out.or_and_not(&succ_live.live_in, &params[&succ]);
-            }
+    // Backward dataflow in CFG postorder: successors are processed first,
+    // so a reducible graph converges in 1–3 passes instead of O(n) worklist
+    // waves (each wave walking every block).
+    let mut order = Vec::with_capacity(node_count);
+    let mut seen: FxHashSet<NodeIndex> =
+        FxHashSet::with_capacity_and_hasher(node_count, Default::default());
+    if let Some(entry) = *function.entry() {
+        let mut dfs = DfsPostOrder::new(function.graph(), entry);
+        while let Some(n) = dfs.next(function.graph()) {
+            order.push(n);
+            seen.insert(n);
         }
-        new_live_out.union_with(&uses[&node]);
+    }
+    for n in function.graph().node_indices() {
+        if seen.insert(n) {
+            order.push(n);
+        }
+    }
 
-        let mut new_live_in = params[&node].clone();
-        new_live_in.union_with(&uses[&node]);
-        new_live_in.or_and_not(&new_live_out, &defs[&node]);
-
-        let old = result.get_mut(&node).unwrap();
-        let changed = old.live_out != new_live_out || old.live_in != new_live_in;
-        if changed {
-            old.live_out = new_live_out;
-            old.live_in = new_live_in;
-            for pred in function.predecessor_blocks(node) {
-                if in_worklist.insert(pred) {
-                    worklist.push(pred);
+    let mut changed = true;
+    let mut iters = 0u32;
+    while changed {
+        changed = false;
+        iters += 1;
+        if iters > 32 || crate::past_decompile_deadline() {
+            break;
+        }
+        for &node in &order {
+            let mut new_live_out = LiveBits::new(nbits);
+            for succ in function.successor_blocks(node) {
+                if let Some(succ_live) = result.get(&succ) {
+                    new_live_out.or_and_not(&succ_live.live_in, &params[&succ]);
                 }
+            }
+            new_live_out.union_with(&uses[&node]);
+
+            let mut new_live_in = params[&node].clone();
+            new_live_in.union_with(&uses[&node]);
+            new_live_in.or_and_not(&new_live_out, &defs[&node]);
+
+            let old = result.get_mut(&node).unwrap();
+            if old.live_out != new_live_out || old.live_in != new_live_in {
+                old.live_out = new_live_out;
+                old.live_in = new_live_in;
+                changed = true;
             }
         }
     }
 
-    LivenessResult { sets: result, id_of }
+    LivenessResult {
+        sets: result,
+        id_of,
+    }
 }

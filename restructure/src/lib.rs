@@ -105,7 +105,11 @@ impl GraphStructurer {
         changed
     }
 
-    fn match_blocks(&mut self) -> bool {
+    fn match_blocks(
+        &mut self,
+        dominators: &Dominators<NodeIndex>,
+        post_dom: &Dominators<NodeIndex>,
+    ) -> bool {
         let Some(entry) = *self.function.entry() else {
             return false;
         };
@@ -118,14 +122,6 @@ impl GraphStructurer {
             order.push(node);
         }
 
-        // Dominators once per pass. Recomputing after every collapse was
-        // O(matches × n) and is why 60k-line scripts took minutes while
-        // Oracle (same Medal collapse, one dominator run per pass) is ~2s.
-        self.find_loop_headers();
-        let dominators = simple_fast(self.function.graph(), entry);
-        let post_dom = post_dominators(self.function.graph_mut());
-        self.dom_idx = DomIndex::build(self.function.graph().node_indices(), &dominators);
-        self.post_idx = DomIndex::build(self.function.graph().node_indices(), &post_dom);
         let mut changed = false;
         let mut n_checked = 0u32;
 
@@ -216,7 +212,19 @@ impl GraphStructurer {
         if n <= 1 {
             return;
         }
-        let (outer_cap, inner_cap, insert_cap) = (24u32, 12u32, 64u32);
+        // LunaUX does a 60k-line dump in ~20s. 24×12 CHK dominance runs
+        // on a 15k-node CFG is why we still looked hung: that's hundreds
+        // of full dominator solves. Large graphs: one match per outer
+        // with fresh dominators, then gotos. Small graphs keep the old
+        // inner recompute (cheap when n is tiny).
+        let large = n > 2000;
+        let (outer_cap, inner_cap, insert_cap) = if large {
+            (12u32, 1u32, 256u32)
+        } else if n > 400 {
+            (16u32, 6u32, 96u32)
+        } else {
+            (24u32, 12u32, 64u32)
+        };
 
         let mut guard = 0u32;
         loop {
@@ -227,8 +235,28 @@ impl GraphStructurer {
             if guard > outer_cap {
                 break;
             }
+            self.find_loop_headers();
+            let Some(entry) = *self.function.entry() else {
+                break;
+            };
+            let mut dominators = simple_fast(self.function.graph(), entry);
+            let mut post_dom = post_dominators(self.function.graph_mut());
+            self.dom_idx = DomIndex::build(self.function.graph().node_indices(), &dominators);
+            self.post_idx = DomIndex::build(self.function.graph().node_indices(), &post_dom);
+
             let mut inner = 0u32;
-            while inner < inner_cap && self.match_blocks() {
+            while inner < inner_cap {
+                if inner > 0 && !large {
+                    dominators = simple_fast(self.function.graph(), entry);
+                    post_dom = post_dominators(self.function.graph_mut());
+                    self.dom_idx =
+                        DomIndex::build(self.function.graph().node_indices(), &dominators);
+                    self.post_idx =
+                        DomIndex::build(self.function.graph().node_indices(), &post_dom);
+                }
+                if !self.match_blocks(&dominators, &post_dom) {
+                    break;
+                }
                 inner += 1;
             }
             if self.function.graph().node_count() <= 1 {
