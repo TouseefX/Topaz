@@ -107,20 +107,40 @@ fn looks_like_luaur_plain_bytecode(bytecode: &[u8]) -> bool {
 }
 
 fn decompile_from_chunk(chunk: deserializer::chunk::Chunk, encode_key: u8) -> String {
-    // Wrap the entire decompilation in catch_unwind to prevent
-    // panics in the AST/restructure pipeline from killing the process.
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        decompile_from_chunk_inner(chunk, encode_key)
-    }))
-    .unwrap_or_else(|_| {
-        "-- Decompiled with Topaz\n-- Error: decompilation panicked\n".to_string()
-    })
+    const PANIC_MSG: &str =
+        "-- Decompiled with Topaz\n-- Error: decompilation panicked\n";
+    let job = move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            decompile_from_chunk_inner(chunk, encode_key)
+        }))
+        .unwrap_or_else(|_| PANIC_MSG.to_string())
+    };
+
+    // wasm32 has no threads. Native: Android / tokio workers are 1–2 MB
+    // and SIGSEGV on 60k-line dumps; lift on a 16 MB stack instead.
+    #[cfg(target_arch = "wasm32")]
+    {
+        job()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        const STACK: usize = 16 * 1024 * 1024;
+        match std::thread::Builder::new()
+            .name("topaz-lift".into())
+            .stack_size(STACK)
+            .spawn(job)
+        {
+            Ok(handle) => handle.join().unwrap_or_else(|_| PANIC_MSG.to_string()),
+            Err(_) => PANIC_MSG.to_string(),
+        }
+    }
 }
 
 fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8) -> String {
     // Budget covers lift + SSA. 60k-line scripts used to hang forever in
     // Lifter::lift / construct before the old deadline was even created.
     let deadline = Instant::now() + Duration::from_secs(120);
+    cfg::set_decompile_deadline(Some(deadline));
     let mut lifted = Vec::new();
     let mut stack = vec![(Arc::<Mutex<ast::Function>>::default(), chunk.main)];
     while let Some((ast_func, func_id)) = stack.pop() {
@@ -219,10 +239,11 @@ fn decode_best(
     bytecode: &[u8],
     preferred: u8,
 ) -> Result<(deserializer::chunk::Chunk, u8), String> {
-    let mut candidates = Vec::with_capacity(3);
+    let mut candidates = Vec::with_capacity(4);
     // Preferred first so a known Roblox key (203) does not waste a full
-    // failed parse on key 1.
-    for k in [preferred, 1u8, 203] {
+    // failed parse on key 1. 227 is inv(203) — LunaUX reports it as the
+    // encoder "magic key"; try both so either convention loads.
+    for k in [preferred, 1u8, 203, 227] {
         if k != 0 && !candidates.contains(&k) {
             candidates.push(k);
         }
@@ -541,27 +562,29 @@ fn decompile_function(
     } else {
         4
     };
-    while changed && iters < ssa_cap && Instant::now() < deadline {
-        iters += 1;
-        changed = false;
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        while changed && iters < ssa_cap && Instant::now() < deadline {
+            iters += 1;
+            changed = false;
 
-        if let Some(entry) = *function.entry() {
-            let dominators = simple_fast(function.graph(), entry);
-            changed |= structure_jumps(&mut function, &dominators);
+            if let Some(entry) = *function.entry() {
+                let dominators = simple_fast(function.graph(), entry);
+                changed |= structure_jumps(&mut function, &dominators);
+            }
+
+            ssa::inline::inline(&mut function, &local_to_group, &upvalue_to_group);
+
+            if node_count > 2 && structure_conditionals(&mut function) {
+                changed = true;
+            }
+            let mut local_map = FxHashMap::default();
+
+            if ssa::construct::remove_unnecessary_params(&mut function, &mut local_map) {
+                changed = true;
+            }
+            ssa::construct::apply_local_map(&mut function, local_map);
         }
-
-        ssa::inline::inline(&mut function, &local_to_group, &upvalue_to_group);
-
-        if node_count > 2 && structure_conditionals(&mut function) {
-            changed = true;
-        }
-        let mut local_map = FxHashMap::default();
-
-        if ssa::construct::remove_unnecessary_params(&mut function, &mut local_map) {
-            changed = true;
-        }
-        ssa::construct::apply_local_map(&mut function, local_map);
-    }
+    }));
 
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ssa::Destructor::new(
@@ -584,10 +607,12 @@ fn decompile_function(
         Err(_) => ast::Block::default(),
     };
     let block = Arc::new(body.into());
-    LocalDeclarer::default().declare_locals(
-        Arc::clone(&block),
-        &upvalues_in.iter().chain(params.iter()).cloned().collect(),
-    );
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        LocalDeclarer::default().declare_locals(
+            Arc::clone(&block),
+            &upvalues_in.iter().chain(params.iter()).cloned().collect(),
+        );
+    }));
 
     let body = Arc::try_unwrap(block).unwrap().into_inner();
     finish_function(

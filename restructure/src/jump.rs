@@ -61,7 +61,9 @@ impl super::GraphStructurer {
                 return false;
             }
             if !self.is_for_next(node) {
-                assert!(self.function.unconditional_edge(node).is_some());
+                if self.function.unconditional_edge(node).is_none() {
+                    return false;
+                }
                 if Self::block_is_no_op(self.function.block(node).unwrap())
                     && self.function.entry() != &Some(node)
                     && !self.is_loop_header(node)

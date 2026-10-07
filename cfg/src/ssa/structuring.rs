@@ -71,7 +71,9 @@ fn simplify_condition(function: &mut Function, node: NodeIndex) -> bool {
             && unary.operation == UnaryOperation::Not
         {
             if_stat.condition = *unary.value.clone();
-            let (then_edge, else_edge) = function.conditional_edges(node).unwrap().map(|e| e.id());
+            let Some((then_edge, else_edge)) = function.conditional_edges(node).map(|e| e.map(|x| x.id())) else {
+                return false;
+            };
             let (then_edge, else_edge) = function.graph_mut().index_twice_mut(then_edge, else_edge);
             then_edge.branch_type = BranchType::Else;
             else_edge.branch_type = BranchType::Then;
@@ -176,7 +178,7 @@ fn match_conditional_sequence(
             }
             None
         };
-        let first_terminator = function.conditional_edges(node).unwrap();
+        let first_terminator = function.conditional_edges(node)?;
         let (then_edge, else_edge) = first_terminator;
         if function.predecessor_blocks(then_edge.target()).count() == 1
             && then_edge.weight().arguments.is_empty()
@@ -189,7 +191,7 @@ fn match_conditional_sequence(
             && let Some((second_condition, assign)) =
                 test_pattern(then_edge.target(), else_edge.target(), else_args)
         {
-            let second_terminator = function.conditional_edges(then_edge.target()).unwrap();
+            let second_terminator = function.conditional_edges(then_edge.target())?;
             if second_terminator.0.target() == else_edge.target() {
                 Some(ConditionalSequencePattern {
                     first_node: node,
@@ -230,7 +232,7 @@ fn match_conditional_sequence(
             && let Some((second_condition, assign)) =
                 test_pattern(else_edge.target(), then_edge.target(), then_args)
         {
-            let second_terminator = function.conditional_edges(else_edge.target()).unwrap();
+            let second_terminator = function.conditional_edges(else_edge.target())?;
             if first_terminator.0.target() == second_terminator.0.target() {
                 Some(ConditionalSequencePattern {
                     first_node: node,
@@ -281,6 +283,9 @@ pub fn structure_conditionals(function: &mut Function) -> bool {
         order.push(node);
     }
     for node in order {
+        if crate::past_decompile_deadline() {
+            break;
+        }
         if !function.has_block(node) {
             continue;
         }
@@ -545,7 +550,9 @@ fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool 
     };
 
     if let Some(ast::Statement::If(_)) = function.block(node).unwrap().last() {
-        let (then_edge, else_edge) = function.conditional_edges(node).unwrap();
+        let Some((then_edge, else_edge)) = function.conditional_edges(node) else {
+            return false;
+        };
         if then_edge.target() == else_edge.target() {
             if let Ok((res_local, then_value, else_value)) = then_edge
                 .weight()

@@ -202,7 +202,16 @@ async fn decompile_luau(
     let key = q.encode_key.unwrap_or(cfg.encode_key);
     let bytes_in = body.len() as u64;
     let bytes = maybe_decode_base64(body.to_vec());
-    let out = luau_lifter::decompile_bytecode_default(&bytes, key);
+    // Don't run the CPU-heavy lift on a tokio worker (small stack, blocks
+    // the runtime). spawn_blocking + the inner 16 MB lift thread is what
+    // keeps CameraShaker / 60k dumps from taking the server down.
+    let out = tokio::task::spawn_blocking(move || {
+        luau_lifter::decompile_bytecode_default(&bytes, key)
+    })
+    .await
+    .unwrap_or_else(|_| {
+        "-- Decompiled with Topaz\n-- Error: decompilation worker panicked\n".to_string()
+    });
     cfg.stats.record_request(bytes_in, out.len() as u64, false);
     out
 }
@@ -213,7 +222,11 @@ async fn decompile_lua51(
 ) -> String {
     let bytes_in = body.len() as u64;
     let bytes = maybe_decode_base64(body.to_vec());
-    let out = lua51_lifter::decompile_bytecode(&bytes);
+    let out = tokio::task::spawn_blocking(move || lua51_lifter::decompile_bytecode(&bytes))
+        .await
+        .unwrap_or_else(|_| {
+            "-- Decompiled with Topaz\n-- Error: decompilation worker panicked\n".to_string()
+        });
     cfg.stats.record_request(bytes_in, out.len() as u64, true);
     out
 }

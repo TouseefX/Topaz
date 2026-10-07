@@ -41,15 +41,14 @@ struct GraphStructurer {
 impl GraphStructurer {
     fn find_loop_headers(&mut self) {
         self.loop_headers.clear();
-        depth_first_search(
-            self.function.graph(),
-            Some(self.function.entry().unwrap()),
-            |event| {
-                if let DfsEvent::BackEdge(_, header) = event {
-                    self.loop_headers.insert(header);
-                }
-            },
-        );
+        let Some(entry) = *self.function.entry() else {
+            return;
+        };
+        depth_first_search(self.function.graph(), Some(entry), |event| {
+            if let DfsEvent::BackEdge(_, header) = event {
+                self.loop_headers.insert(header);
+            }
+        });
     }
     fn new(function: Function) -> Self {
         let mut this = Self {
@@ -86,20 +85,18 @@ impl GraphStructurer {
 
         let changed = match successors.len() {
             0 => false,
-            1 => {
-                
-                self.match_jump(node, Some(successors[0]))
-            }
+            1 => self.match_jump(node, Some(successors[0])),
             2 => {
-                let (then_target, else_target) = self
+                let Some((then_target, else_target)) = self
                     .function
                     .conditional_edges(node)
-                    .unwrap()
-                    .map(|e| e.target());
+                    .map(|e| e.map(|x| x.target()))
+                else {
+                    return false;
+                };
                 self.match_conditional(node, then_target, else_target)
             }
-
-            _ => unreachable!(),
+            _ => false,
         };
 
         
@@ -107,28 +104,36 @@ impl GraphStructurer {
     }
 
     fn match_blocks(&mut self) -> bool {
-        let dfs = Dfs::new(self.function.graph(), self.function.entry().unwrap())
+        let Some(entry) = *self.function.entry() else {
+            return false;
+        };
+        let dfs = Dfs::new(self.function.graph(), entry)
             .iter(self.function.graph())
             .collect::<FxHashSet<_>>();
-        let mut dfs_postorder =
-            DfsPostOrder::new(self.function.graph(), self.function.entry().unwrap());
+        let mut dfs_postorder = DfsPostOrder::new(self.function.graph(), entry);
         let mut order = Vec::new();
         while let Some(node) = dfs_postorder.next(self.function.graph()) {
             order.push(node);
         }
 
         // Compute dominators once per pass — they're only invalidated lazily
-        let mut dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
+        let mut dominators = simple_fast(self.function.graph(), entry);
         let mut post_dom = post_dominators(self.function.graph_mut());
         let mut changed = false;
         let mut doms_dirty = false;
 
         for node in order {
+            if cfg::past_decompile_deadline() {
+                return changed;
+            }
             if !self.function.has_block(node) {
                 continue;
             }
             if doms_dirty {
-                dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
+                let Some(entry) = *self.function.entry() else {
+                    return changed;
+                };
+                dominators = simple_fast(self.function.graph(), entry);
                 post_dom = post_dominators(self.function.graph_mut());
                 doms_dirty = false;
             }
@@ -141,7 +146,10 @@ impl GraphStructurer {
 
         // Recomputation for disconnected nodes pass
         if doms_dirty {
-            dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
+            let Some(entry) = *self.function.entry() else {
+                return changed;
+            };
+            dominators = simple_fast(self.function.graph(), entry);
             post_dom = post_dominators(self.function.graph_mut());
         }
 
@@ -178,8 +186,8 @@ impl GraphStructurer {
         let (source, target) = self.function.graph().edge_endpoints(edge).unwrap();
         if self.function.graph().edge_weight(edge).unwrap().branch_type == BranchType::Unconditional
             && self.function.predecessor_blocks(target).count() == 1
+            && self.function.successor_blocks(source).count() == 1
         {
-            assert!(self.function.successor_blocks(source).count() == 1);
             
             let edges = self.function.remove_edges(target);
             let block = self.function.remove_block(target).unwrap();
@@ -223,6 +231,9 @@ impl GraphStructurer {
 
         let mut guard = 0u32;
         loop {
+            if cfg::past_decompile_deadline() {
+                break;
+            }
             guard += 1;
             if guard > outer_cap {
                 break;
@@ -282,7 +293,9 @@ impl GraphStructurer {
         self.collapse();
         if self.function.graph().node_count() != 1 {
             let mut res_block = ast::Block::default();
-            let entry = self.function.entry().unwrap();
+            let Some(entry) = *self.function.entry() else {
+                return res_block;
+            };
             let mut stack = vec![entry];
             let mut visited = FxHashSet::default();
             while let Some(node) = stack.pop() {
@@ -322,11 +335,10 @@ impl GraphStructurer {
                 let mut goto_destinations = FxHashSet::default();
                 collect_gotos(&block, &mut goto_destinations);
                 for label in goto_destinations {
-                    
-                    
-                    let target_node = self.label_to_node[&label];
-                    if self.function.has_block(target_node) {
-                        stack.push(target_node);
+                    if let Some(&target_node) = self.label_to_node.get(&label) {
+                        if self.function.has_block(target_node) {
+                            stack.push(target_node);
+                        }
                     }
                 }
                 if let Some(ast::Statement::Goto(goto)) = res_block.last()
@@ -356,12 +368,12 @@ impl GraphStructurer {
             }
 
             res_block
-        } else {
+        } else if let Some(entry) = *self.function.entry() {
             Self::remove_last_return(
-                self.function
-                    .remove_block(self.function.entry().unwrap())
-                    .unwrap(),
+                self.function.remove_block(entry).unwrap_or_default(),
             )
+        } else {
+            ast::Block::default()
         }
     }
 }

@@ -87,14 +87,18 @@ impl LocalDeclarer {
             } else {
                 let node_dominators = usages
                     .keys()
-                    .map(|&n| dominators.dominators(n).unwrap().collect_vec())
+                    .filter_map(|&n| dominators.dominators(n).map(|d| d.collect_vec()))
                     .collect_vec();
                 let mut dom_iter = node_dominators.iter().cloned();
-                let mut common_dominators = dom_iter.next().unwrap();
+                let Some(mut common_dominators) = dom_iter.next() else {
+                    continue;
+                };
                 for node_dominators in dom_iter {
                     common_dominators = common_dominators.intersect(node_dominators);
                 }
-                let common_dominator = common_dominators[0];
+                let Some(&common_dominator) = common_dominators.first() else {
+                    continue;
+                };
                 let mut min_stat_index = usages.get(&common_dominator).copied();
                 for child in self
                     .graph
@@ -102,33 +106,49 @@ impl LocalDeclarer {
                 {
                     for node_dominators in &node_dominators {
                         if node_dominators.contains(&child) {
-                            let child_idx = self.graph.node_weight(child).unwrap().1;
-                            min_stat_index = Some(min_stat_index.map_or(child_idx, |curr| curr.min(child_idx)));
+                            if let Some((_, child_idx)) = self.graph.node_weight(child) {
+                                min_stat_index = Some(min_stat_index.map_or(*child_idx, |curr| curr.min(*child_idx)));
+                            }
                         }
                     }
                 }
-                (common_dominator, min_stat_index.unwrap())
+                let Some(min_stat_index) = min_stat_index else {
+                    continue;
+                };
+                (common_dominator, min_stat_index)
             };
-            while {
-                let (block, _) = self.graph.node_weight(node).unwrap();
-                block.is_none()
-            } {
-                let (_, parent_stat_index) = self.graph.node_weight(node).unwrap();
-                let parent = self
+            let mut parent_hops = 0u32;
+            loop {
+                let Some((block, _)) = self.graph.node_weight(node) else {
+                    break;
+                };
+                if block.is_some() {
+                    break;
+                }
+                parent_hops += 1;
+                if parent_hops > 4096 {
+                    break;
+                }
+                let Some((_, parent_stat_index)) = self.graph.node_weight(node) else {
+                    break;
+                };
+                let parent_stat_index = *parent_stat_index;
+                let Ok(parent) = self
                     .graph
                     .neighbors_directed(node, Direction::Incoming)
                     .exactly_one()
-                    .unwrap();
-                (node, first_stat_index) = (parent, *parent_stat_index);
+                else {
+                    break;
+                };
+                (node, first_stat_index) = (parent, parent_stat_index);
             }
-            let block = self
+            let Some(block) = self
                 .graph
                 .node_weight(node)
-                .unwrap()
-                .0
-                .as_ref()
-                .unwrap()
-                .clone();
+                .and_then(|(b, _)| b.clone())
+            else {
+                continue;
+            };
             self.declarations
                 .entry(block.into())
                 .or_default()
