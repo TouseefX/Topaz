@@ -670,6 +670,8 @@ fn decompile_function(
     // Tiny scripts (a single require, etc.) must stay near-instant.
     let ssa_cap = if node_count <= 12 {
         1
+    } else if node_count > 2000 {
+        1
     } else if large {
         2
     } else {

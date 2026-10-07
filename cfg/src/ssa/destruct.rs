@@ -49,8 +49,12 @@ pub struct Destructor<'a> {
     local_defs: FxHashMap<RcLocal, (usize, NodeIndex, ParamOrStatIndex)>,
     local_last_use: FxHashMap<RcLocal, FxHashMap<NodeIndex, (usize, ParamOrStatIndex)>>,
     dominator_tree: DiGraphMap<NodeIndex, ()>,
-    
-    dominators: FxHashMap<NodeIndex, FxHashSet<NodeIndex>>,
+    /// Euler-tour times on the dominator tree. `a` dominates `b` iff
+    /// `dom_in[a] <= dom_in[b] && dom_out[b] <= dom_out[a]`. Storing a
+    /// HashSet of all dominators per node was O(n²) memory/time on a
+    /// 60k-block chain and is why large dumps never finished.
+    dom_in: FxHashMap<NodeIndex, u32>,
+    dom_out: FxHashMap<NodeIndex, u32>,
     liveness: FxHashMap<NodeIndex, LiveSets>,
     undesirable_blocks: FxHashSet<NodeIndex>,
 }
@@ -76,7 +80,8 @@ impl<'a> Destructor<'a> {
             local_defs: FxHashMap::with_capacity_and_hasher(local_count, Default::default()),
             local_last_use: FxHashMap::default(),
             dominator_tree: DiGraphMap::new(),
-            dominators: FxHashMap::default(),
+            dom_in: FxHashMap::default(),
+            dom_out: FxHashMap::default(),
             liveness: FxHashMap::default(),
             undesirable_blocks: FxHashSet::default(),
         }
@@ -252,31 +257,29 @@ impl<'a> Destructor<'a> {
             }
         }
 
-        // Build dominator sets via a single DFS on the dominator tree
-        // instead of walking up the tree per-node (O(n²) → O(n))
-        self.dominators.reserve(self.dominator_tree.node_count());
+        // Euler tour of the dominator tree: O(n) preprocess, O(1) "does
+        // A dominate B?" instead of cloning a HashSet of ancestors at
+        // every node (O(n²) on a chain).
         let entry = self.function.entry().unwrap();
-
-        // Stack-based DFS accumulating dominator sets
-        let mut stack: Vec<(NodeIndex, FxHashSet<NodeIndex>)> = Vec::new();
-        let entry_set: FxHashSet<NodeIndex> = FxHashSet::default();
-        stack.push((entry, entry_set));
-
-        while let Some((node, incoming_doms)) = stack.pop() {
-            // Clone the incoming set and add current node
-            let mut my_doms = incoming_doms;
-            my_doms.insert(node);
-            // Store for children (excludes current node)
-            let child_doms = my_doms.clone();
-
-            self.dominators.insert(node, my_doms);
-
-            // Push children
-            for child in self
-                .dominator_tree
-                .neighbors_directed(node, Direction::Outgoing)
-            {
-                stack.push((child, child_doms.clone()));
+        let n = self.function.graph().node_count();
+        self.dom_in.reserve(n);
+        self.dom_out.reserve(n);
+        let mut time = 0u32;
+        let mut stack: Vec<(NodeIndex, bool)> = vec![(entry, true)];
+        while let Some((node, entering)) = stack.pop() {
+            if entering {
+                self.dom_in.insert(node, time);
+                time += 1;
+                stack.push((node, false));
+                for child in self
+                    .dominator_tree
+                    .neighbors_directed(node, Direction::Outgoing)
+                {
+                    stack.push((child, true));
+                }
+            } else {
+                self.dom_out.insert(node, time);
+                time += 1;
             }
         }
 
@@ -601,7 +604,12 @@ impl<'a> Destructor<'a> {
             
             (a_dom_index, a_stat_index) < (b_dom_index, b_stat_index)
         } else {
-            self.dominators[&block_b].contains(&block_a)
+            match (self.dom_in.get(&block_a), self.dom_in.get(&block_b), self.dom_out.get(&block_a), self.dom_out.get(&block_b)) {
+                (Some(&ain), Some(&bin), Some(&aout), Some(&bout)) => {
+                    ain <= bin && bout <= aout
+                }
+                _ => false,
+            }
         }
     }
 

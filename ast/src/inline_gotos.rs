@@ -36,7 +36,8 @@ use crate::{
 };
 
 pub fn inline_short_gotos(block: &mut Block) {
-    for _ in 0..64 {
+    let rounds = if block.0.len() > 4_000 { 8 } else { 64 };
+    for _ in 0..rounds {
         let mut changed = false;
         changed |= eliminate_join_gotos(block);
         changed |= rewrite_skip_rest_gotos(block);

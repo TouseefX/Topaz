@@ -21,7 +21,7 @@ pub fn post_dominators<N: Default, E: Default>(
 ) -> Dominators<NodeIndex> {
     let exits: Vec<NodeIndex> = graph
         .node_identifiers()
-        .filter(|&n| graph.neighbors(n).count() == 0)
+        .filter(|&n| graph.neighbors(n).next().is_none())
         .collect();
     let fake_exit = graph.add_node(Default::default());
     for exit in exits {
@@ -74,8 +74,6 @@ impl GraphStructurer {
 
         
         if self.try_collapse_loop(node, dominators, post_dom) {
-            self.find_loop_headers();
-            
             return true;
         }
 
@@ -116,41 +114,26 @@ impl GraphStructurer {
             order.push(node);
         }
 
-        // Compute dominators once per pass — they're only invalidated lazily
-        let mut dominators = simple_fast(self.function.graph(), entry);
-        let mut post_dom = post_dominators(self.function.graph_mut());
+        // Dominators once per pass. Recomputing after every collapse was
+        // O(matches × n) and is why 60k-line scripts took minutes while
+        // Oracle (same Medal collapse, one dominator run per pass) is ~2s.
+        self.find_loop_headers();
+        let dominators = simple_fast(self.function.graph(), entry);
+        let post_dom = post_dominators(self.function.graph_mut());
         let mut changed = false;
-        let mut doms_dirty = false;
+        let mut n_checked = 0u32;
 
         for node in order {
-            if cfg::past_decompile_deadline() {
+            n_checked += 1;
+            if n_checked & 15 == 0 && cfg::past_decompile_deadline() {
                 return changed;
             }
             if !self.function.has_block(node) {
                 continue;
             }
-            if doms_dirty {
-                let Some(entry) = *self.function.entry() else {
-                    return changed;
-                };
-                dominators = simple_fast(self.function.graph(), entry);
-                post_dom = post_dominators(self.function.graph_mut());
-                doms_dirty = false;
-            }
-            let matched = self.try_match_pattern(node, &dominators, &post_dom);
-            if matched {
-                doms_dirty = true;
+            if self.try_match_pattern(node, &dominators, &post_dom) {
                 changed = true;
             }
-        }
-
-        // Recomputation for disconnected nodes pass
-        if doms_dirty {
-            let Some(entry) = *self.function.entry() else {
-                return changed;
-            };
-            dominators = simple_fast(self.function.graph(), entry);
-            post_dom = post_dominators(self.function.graph_mut());
         }
 
         for node in self

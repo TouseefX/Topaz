@@ -314,7 +314,12 @@ impl<'a> SsaConstructor<'a> {
         let same = same.clone();
         self.local_map.insert(param_local.clone(), same.clone());
 
-        
+        // Walking every block for every trivial phi is O(n²). On large
+        // CFGs the extra cleanup isn't worth it — SSA is already correct.
+        if self.function.graph().node_count() > 512 {
+            return same;
+        }
+
         for node in self.function.graph().node_indices().collect::<Vec<_>>() {
             let mut edges = self
                 .function
