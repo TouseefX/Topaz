@@ -836,25 +836,9 @@ impl<'a> Lifter<'a> {
                             // the call's base-register copy. Emit a
                             // `-- was a fastcall <name>` comment for
                             // the reader's benefit.
-                            if matches!(
-                                n1.as_ref().map(|(_, i)| i),
-                                Some(Instruction::BC { op_code: OpCode::LOP_NOP, .. })
-                            ) {
-                                if let Some(info) = crate::builtins::lookup(builtin_id) {
-                                    let name = if info.module.is_empty() {
-                                        info.name.to_string()
-                                    } else {
-                                        format!("{}.{}", info.module, info.name)
-                                    };
-                                    statements.push(
-                                        ast::Comment::new(format!(
-                                            "aliased fastcall {} (called via local/upvalue)",
-                                            name
-                                        ))
-                                        .into(),
-                                    );
-                                }
-                            }
+                            // Aliased fastcall (local assert = assert; assert(x)):
+                            // the following MOVE+CALL already decompiles to a
+                            // normal call. Don't leave a noise comment.
                             continue;
                         }
 

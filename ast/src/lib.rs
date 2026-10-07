@@ -362,7 +362,9 @@ impl fmt::Display for Block {
 
 // New modules for Oracle-quality features
 pub mod compound_assign;
+pub mod cond_expr;
 pub mod context_naming;
+pub mod copy_fold;
 pub mod post_process;
 pub mod table_cleanup;
 pub mod unused_vars;

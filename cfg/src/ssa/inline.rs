@@ -558,23 +558,19 @@ pub fn inline(
                         let field_assign = std::mem::replace(&mut block[i], ast::Empty {}.into())
                             .into_assign()
                             .unwrap();
+                        let key = *field_assign
+                            .left
+                            .into_iter()
+                            .next()
+                            .unwrap()
+                            .into_index()
+                            .unwrap()
+                            .right;
+                        let value = field_assign.right.into_iter().next().unwrap();
                         block[table_index].as_assign_mut().unwrap().right[0]
                             .as_table_mut()
                             .unwrap()
-                            .0
-                            .push((
-                                Some(
-                                    *field_assign
-                                        .left
-                                        .into_iter()
-                                        .next()
-                                        .unwrap()
-                                        .into_index()
-                                        .unwrap()
-                                        .right,
-                                ),
-                                field_assign.right.into_iter().next().unwrap(),
-                            ));
+                            .put_field(key, value);
                         changed = true;
                         i += 1;
                     }

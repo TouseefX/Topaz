@@ -3,10 +3,19 @@
 //! This module applies various transformations to make the decompiled
 //! output more readable and closer to the original source code.
 
-use crate::{Block, compound_assign, context_naming, guard_clauses, table_cleanup, unused_vars};
+use crate::{
+    Block, compound_assign, cond_expr, context_naming, copy_fold, guard_clauses, table_cleanup,
+    unused_vars,
+};
 
 /// Apply all post-processing passes to a block
 pub fn apply_all(block: &mut Block) {
+    // CameraShaker-style: `if cond then x=true else x=false` → `x = cond`,
+    // DUPTABLE nils folded, loop-carried copies dropped, temps inlined.
+    cond_expr::apply(block);
+    table_cleanup::cleanup_table_constructors(block);
+    copy_fold::apply(block);
+
     // Detect and convert compound assignments (x = x + 1 -> x += 1)
     compound_assign::detect_compound_assignments(block);
     

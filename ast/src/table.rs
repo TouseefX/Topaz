@@ -7,6 +7,49 @@ use std::{fmt, iter};
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Table(pub Vec<(Option<RValue>, RValue)>);
 
+fn field_key_id(key: &RValue) -> Option<String> {
+    match key {
+        RValue::Literal(Literal::String(s)) => {
+            Some(format!("s:{}", String::from_utf8_lossy(s)))
+        }
+        RValue::Literal(Literal::Number(n)) => Some(format!("n:{n}")),
+        RValue::Literal(Literal::Integer(n)) => Some(format!("i:{n}")),
+        RValue::Literal(Literal::Boolean(b)) => Some(format!("b:{b}")),
+        _ => None,
+    }
+}
+
+impl Table {
+    /// Insert `key = value`, replacing a previous entry with the same
+    /// literal key when that entry was `nil` or otherwise side-effect free.
+    ///
+    /// DUPTABLE materialises keys as `nil`; SETTABLEKS then fills them.
+    /// Pushing a second copy of the key made table-cleanup split the
+    /// constructor back into `t.key = value` (CameraShaker.new).
+    pub fn put_field(&mut self, key: RValue, value: RValue) {
+        if let Some(id) = field_key_id(&key) {
+            if let Some((_, slot)) = self.0.iter_mut().find(|(k, _)| {
+                k.as_ref().and_then(field_key_id).as_deref() == Some(id.as_str())
+            }) {
+                if matches!(slot, RValue::Literal(Literal::Nil)) || !slot.has_side_effects()
+                {
+                    *slot = value;
+                    return;
+                }
+            }
+        }
+        self.0.push((Some(key), value));
+    }
+
+    /// `{ k = nil }` does not create `k` in Lua. Drop leftover DUPTABLE
+    /// placeholders that were never filled.
+    pub fn drop_nil_fields(&mut self) {
+        self.0.retain(|(k, v)| {
+            !(k.is_some() && matches!(v, RValue::Literal(Literal::Nil)))
+        });
+    }
+}
+
 impl Reduce for Table {
     fn reduce(self) -> RValue {
         self.into()
