@@ -27,6 +27,7 @@ use parking_lot::Mutex;
 use petgraph::algo::dominators::simple_fast;
 use petgraph::visit::Dfs;
 
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::time::{Duration, Instant};
 use triomphe::Arc;
@@ -117,14 +118,17 @@ fn decompile_from_chunk(chunk: deserializer::chunk::Chunk, encode_key: u8) -> St
     };
 
     // wasm32 has no threads. Native: Android / tokio workers are 1–2 MB
-    // and SIGSEGV on 60k-line dumps; lift on a 16 MB stack instead.
+    // and SIGSEGV on 12 MB dumps; lift on a 64 MB stack instead.
     #[cfg(target_arch = "wasm32")]
     {
         job()
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        const STACK: usize = 16 * 1024 * 1024;
+        // 12 MB Roblox dumps build CFGs deep enough that petgraph's
+        // recursive dominators blew a 16 MB stack. 64 MB is virtual
+        // (overcommit); workers below use the same size.
+        const STACK: usize = 64 * 1024 * 1024;
         match std::thread::Builder::new()
             .name("topaz-lift".into())
             .stack_size(STACK)
@@ -134,6 +138,118 @@ fn decompile_from_chunk(chunk: deserializer::chunk::Chunk, encode_key: u8) -> St
             Err(_) => PANIC_MSG.to_string(),
         }
     }
+}
+
+struct LiftedItem {
+    ast_function: Arc<Mutex<ast::Function>>,
+    function: Function,
+    upvalues_in: Vec<ast::RcLocal>,
+    child_asts: Vec<ByAddress<Arc<Mutex<ast::Function>>>>,
+}
+
+fn decompile_one(
+    item: LiftedItem,
+    deadline: Instant,
+) -> (ByAddress<Arc<Mutex<ast::Function>>>, Vec<ast::RcLocal>) {
+    let ast_clone = item.ast_function.clone();
+    if Instant::now() >= deadline {
+        ast_clone.lock().body.push(
+            ast::Comment::new("skipped (time budget)".to_string()).into(),
+        );
+        return (ByAddress(ast_clone), Vec::new());
+    }
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        decompile_function(
+            item.ast_function,
+            item.function,
+            item.upvalues_in,
+            deadline,
+        )
+    })) {
+        Ok(r) => r,
+        Err(_) => {
+            ast_clone.lock().body.push(
+                ast::Comment::new("failed to decompile function".to_string()).into(),
+            );
+            (ByAddress(ast_clone), Vec::new())
+        }
+    }
+}
+
+fn decompile_lifted_waves(
+    mut lifted: Vec<LiftedItem>,
+    deadline: Instant,
+) -> FxHashMap<ByAddress<Arc<Mutex<ast::Function>>>, Vec<ast::RcLocal>> {
+    let mut done: FxHashSet<ByAddress<Arc<Mutex<ast::Function>>>> = FxHashSet::default();
+    let mut upvalues = FxHashMap::default();
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let pool = {
+        let n = std::thread::available_parallelism()
+            .map(|p| p.get().clamp(2, 4))
+            .unwrap_or(4);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .stack_size(64 * 1024 * 1024)
+            .thread_name(|i| format!("topaz-fn-{i}"))
+            .build()
+            .ok()
+    };
+
+    let run_wave = |ready: Vec<LiftedItem>| -> Vec<(
+        ByAddress<Arc<Mutex<ast::Function>>>,
+        Vec<ast::RcLocal>,
+    )> {
+        if ready.len() <= 1 {
+            return ready
+                .into_iter()
+                .map(|it| decompile_one(it, deadline))
+                .collect();
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            ready
+                .into_iter()
+                .map(|it| decompile_one(it, deadline))
+                .collect()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(pool) = pool.as_ref() {
+                pool.install(|| {
+                    ready
+                        .into_par_iter()
+                        .map(|it| decompile_one(it, deadline))
+                        .collect()
+                })
+            } else {
+                ready
+                    .into_iter()
+                    .map(|it| decompile_one(it, deadline))
+                    .collect()
+            }
+        }
+    };
+
+    while !lifted.is_empty() {
+        let (ready, rest): (Vec<_>, Vec<_>) = lifted
+            .into_iter()
+            .partition(|it| it.child_asts.iter().all(|c| done.contains(c)));
+        if ready.is_empty() {
+            for item in rest {
+                let (k, v) = decompile_one(item, deadline);
+                done.insert(k.clone());
+                upvalues.insert(k, v);
+            }
+            break;
+        }
+        lifted = rest;
+        for (k, v) in run_wave(ready) {
+            done.insert(k.clone());
+            upvalues.insert(k, v);
+        }
+    }
+    upvalues
 }
 
 fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8) -> String {
@@ -148,7 +264,12 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8
             ast_func.lock().body.push(
                 ast::Comment::new("skipped lift (time budget)".to_string()).into(),
             );
-            lifted.push((ast_func, Function::new(func_id as usize), Vec::new()));
+            lifted.push(LiftedItem {
+                ast_function: ast_func,
+                function: Function::new(func_id as usize),
+                upvalues_in: Vec::new(),
+                child_asts: Vec::new(),
+            });
             continue;
         }
         let lifted_fn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -156,49 +277,37 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8
         }));
         match lifted_fn {
             Ok((function, upvalues, child_functions)) => {
-                lifted.push((ast_func, function, upvalues));
+                let child_asts: Vec<_> = child_functions.keys().cloned().collect();
                 stack.extend(child_functions.into_iter().map(|(a, f)| (a.0, f as u32)));
+                lifted.push(LiftedItem {
+                    ast_function: ast_func,
+                    function,
+                    upvalues_in: upvalues,
+                    child_asts,
+                });
             }
             Err(_) => {
                 ast_func.lock().body.push(
                     ast::Comment::new("failed to lift function".to_string()).into(),
                 );
-                lifted.push((ast_func, Function::new(func_id as usize), Vec::new()));
+                lifted.push(LiftedItem {
+                    ast_function: ast_func,
+                    function: Function::new(func_id as usize),
+                    upvalues_in: Vec::new(),
+                    child_asts: Vec::new(),
+                });
             }
         }
     }
 
-    let Some(main) = lifted.first().map(|(ast_function, ..)| ast_function.clone()) else {
+    let Some(main) = lifted.first().map(|it| it.ast_function.clone()) else {
         return "-- Decompiled with Topaz\n-- Created by: Andrew and TouseefX\n\n".into();
     };
 
-    // Children first. Parallel parent+child used to deadlock: post_process
-    // on the parent locks nested closures while the child thread holds the
-    // same mutex (CameraShaker / BoatTween / Bezier all nest functions).
-    let mut upvalues = lifted
-        .into_iter()
-        .rev()
-        .map(|(ast_function, function, upvalues_in)| {
-            let ast_clone = ast_function.clone();
-            if Instant::now() >= deadline {
-                ast_clone.lock().body.push(
-                    ast::Comment::new("skipped (time budget)".to_string()).into(),
-                );
-                return (ByAddress(ast_clone), Vec::new());
-            }
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                decompile_function(ast_function, function, upvalues_in, deadline)
-            })) {
-                Ok(r) => r,
-                Err(_) => {
-                    ast_clone.lock().body.push(
-                        ast::Comment::new("failed to decompile function".to_string()).into(),
-                    );
-                    (ByAddress(ast_clone), Vec::new())
-                }
-            }
-        })
-        .collect::<FxHashMap<_, _>>();
+    // Children before parents (nested-closure mutex). Independent siblings
+    // in the same wave run in parallel on 64 MB stacks so a 12 MB dump
+    // does not sit on one thread and does not SIGSEGV.
+    let mut upvalues = decompile_lifted_waves(lifted, deadline);
 
     let main = ByAddress(main);
     upvalues.remove(&main);

@@ -193,8 +193,11 @@ fn apply_local_map_to_values_referenced<T: LocalRw + Traverse>(
 
 pub fn apply_local_map(function: &mut Function, local_map: FxHashMap<RcLocal, RcLocal>) {
     for param in &mut function.parameters {
-        if let Some(new_param) = local_map.get(param) {
-            *param = follow_local_map(local_map, new_param).clone();
+        let mapped = local_map
+            .get(param)
+            .map(|new_param| follow_local_map(&local_map, new_param).clone());
+        if let Some(mapped) = mapped {
+            *param = mapped;
         }
     }
     
@@ -215,8 +218,11 @@ pub fn apply_local_map(function: &mut Function, local_map: FxHashMap<RcLocal, Rc
             {
                 match local {
                     Either::Left(local) => {
-                        if let Some(new_local) = local_map.get(local) {
-                            *local = follow_local_map(local_map, new_local).clone();
+                        let mapped = local_map
+                            .get(local)
+                            .map(|new_local| follow_local_map(&local_map, new_local).clone());
+                        if let Some(mapped) = mapped {
+                            *local = mapped;
                         }
                     }
                     Either::Right(rvalue) => {

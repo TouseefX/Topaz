@@ -292,6 +292,10 @@ pub fn structure_conditionals(function: &mut Function) -> bool {
         if simplify_condition(function, node) {
             did_structure = true;
         }
+        if function.has_block(node) && try_constant_branch(function, node) {
+            did_structure = true;
+            continue;
+        }
         if function.has_block(node) && structure_bool_conditional(function, node) {
             did_structure = true;
         }
@@ -381,6 +385,14 @@ fn is_truthy(rvalue: ast::RValue) -> Option<bool> {
         )
         | ast::RValue::Table(_)
         | ast::RValue::Closure(_) => Some(true),
+        // `a .. b` is always a string, and strings are truthy in Lua.
+        // ConvertSecondsToTime compiles `x = tostring(n).."h"; if x then`
+        // after the empty-string branch; treating concat as truthy lets
+        // us drop that JUMPIF and match the real if/else instead of gotos.
+        ast::RValue::Binary(ast::Binary {
+            operation: ast::BinaryOperation::Concat,
+            ..
+        }) => Some(true),
         ast::RValue::Literal(ast::Literal::Nil | ast::Literal::Boolean(_)) => Some(false),
         _ => None,
     }
@@ -915,6 +927,55 @@ fn skip_over_node(
     }
 
     did_structure
+}
+
+/// Replace `if <always-true> then A else B` with a jump to A (and the
+/// opposite for always-false). Luau emits `JUMPIF` on a concat result
+/// after `if s == "" then t = n.."h" else t = s.." "..n.."h"`; that extra
+/// branch is constant and blocks diamond matching, so collapse dumps gotos.
+fn try_constant_branch(function: &mut Function, node: NodeIndex) -> bool {
+    let Some(block) = function.block(node) else {
+        return false;
+    };
+    let Some(ast::Statement::If(if_stat)) = block.last() else {
+        return false;
+    };
+    let Some(truthy) = is_truthy_transitive(function, if_stat.condition.clone()) else {
+        return false;
+    };
+    let Some((then_edge, else_edge)) = function.conditional_edges(node) else {
+        return false;
+    };
+    let (keep, args) = if truthy {
+        (then_edge.target(), then_edge.weight().arguments.clone())
+    } else {
+        (else_edge.target(), else_edge.weight().arguments.clone())
+    };
+    let cond = function
+        .block_mut(node)
+        .unwrap()
+        .pop()
+        .unwrap()
+        .into_if()
+        .unwrap()
+        .condition;
+    if cond.has_side_effects() {
+        function.block_mut(node).unwrap().push(
+            ast::Assign {
+                left: vec![ast::RcLocal::default().into()],
+                right: vec![cond],
+                prefix: true,
+                parallel: false,
+                compound_op: None,
+            }
+            .into(),
+        );
+    }
+    function.remove_edges(node);
+    let mut edge = BlockEdge::new(BranchType::Unconditional);
+    edge.arguments = args;
+    function.set_edges(node, vec![(keep, edge)]);
+    true
 }
 
 fn try_remove_unnecessary_condition(function: &mut Function, node: NodeIndex) -> bool {

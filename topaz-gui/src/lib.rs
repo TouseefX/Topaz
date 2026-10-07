@@ -416,7 +416,7 @@ impl TopazApp {
 
         std::thread::Builder::new()
             .name("topaz-decompile".to_string())
-            .stack_size(16 * 1024 * 1024)
+            .stack_size(64 * 1024 * 1024)
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     // Source only. CFG dump re-lifts the whole chunk and made
