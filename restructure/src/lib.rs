@@ -209,71 +209,67 @@ impl GraphStructurer {
     }
 
     fn collapse(&mut self) {
+        let n = self.function.graph().node_count();
+        let (outer_cap, inner_cap, insert_cap) = if n > 400 {
+            (4u32, 4u32, 48u32)
+        } else {
+            (24u32, 12u32, 64u32)
+        };
+
         let mut guard = 0u32;
         loop {
             guard += 1;
-            if guard > 128 {
+            if guard > outer_cap {
                 break;
             }
             let mut inner = 0u32;
-            while self.match_blocks() {
+            while inner < inner_cap && self.match_blocks() {
                 inner += 1;
-                if inner > 48 {
-                    break;
-                }
             }
-            if self.function.graph().node_count() == 1 {
+            if self.function.graph().node_count() <= 1 {
                 break;
             }
-            
+
+            let Some(&entry) = self.function.entry() else {
+                break;
+            };
+            let dominators = simple_fast(self.function.graph(), entry);
             let edges = self.function.graph().edge_indices().collect::<Vec<_>>();
 
-            // Cache dominators for the edge loop — compute once, not per-edge
-            let dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
-
-            let mut changed = false;
+            // Insert many gotos in one pass. Matching after every edge was
+            // O(E × dominators) and never returned on large CFGs.
+            let mut inserted = 0u32;
             for &edge in &edges {
+                if inserted >= insert_cap {
+                    break;
+                }
                 if self.function.graph().edge_weight(edge).is_none() {
                     continue;
                 }
-
                 let (source, target) = self.function.graph().edge_endpoints(edge).unwrap();
-                let target_dominators = dominators.dominators(target);
-                let source_dominators = dominators.dominators(source);
-                
-                if target_dominators.is_none() || source_dominators.is_none() {
+                let Some(mut target_dominators) = dominators.dominators(target) else {
                     continue;
-                }
-                let mut target_dominators = target_dominators.unwrap();
-                let mut source_dominators = source_dominators.unwrap();
+                };
+                let Some(mut source_dominators) = dominators.dominators(source) else {
+                    continue;
+                };
                 if target_dominators.contains(&source) || source_dominators.contains(&target) {
                     continue;
                 }
-
                 self.insert_goto_for_edge(edge);
-                self.find_loop_headers();
-                changed = self.match_blocks();
-                if changed {
-                    break;
-                }
+                inserted += 1;
             }
-
-            if !changed {
-                for edge in edges {
-                    if self.function.graph().edge_weight(edge).is_none() {
-                        continue;
-                    }
+            if inserted == 0 {
+                if let Some(&edge) = edges
+                    .iter()
+                    .find(|e| self.function.graph().edge_weight(**e).is_some())
+                {
                     self.insert_goto_for_edge(edge);
-                    self.find_loop_headers();
-                    changed = self.match_blocks();
-                    if changed {
-                        break;
-                    }
-                }
-                if !changed {
+                } else {
                     break;
                 }
             }
+            self.find_loop_headers();
         }
     }
 

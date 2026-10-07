@@ -476,7 +476,7 @@ pub fn inline(
     let mut changed = true;
     // Limit retries to avoid infinite loops on pathological inputs
     let mut retries = 0;
-    const MAX_RETRIES: usize = 10;
+    const MAX_RETRIES: usize = 4;
     while changed && retries < MAX_RETRIES {
         retries += 1;
         changed = false;

@@ -25,9 +25,10 @@ use lifter::Lifter;
 
 use parking_lot::Mutex;
 use petgraph::algo::dominators::simple_fast;
-use rayon::prelude::*;
+use petgraph::visit::Dfs;
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::time::{Duration, Instant};
 use triomphe::Arc;
 
 /// Decompile using the **luaur-compatible** plain-opcode path.
@@ -129,12 +130,24 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8
     let Some(main) = lifted.first().map(|(ast_function, ..)| ast_function.clone()) else {
         return "-- Decompiled with Topaz\n-- Created by: Andrew & TouseefX\n\n".into();
     };
+
+    // Children first. Parallel parent+child used to deadlock: post_process
+    // on the parent locks nested closures while the child thread holds the
+    // same mutex (CameraShaker / BoatTween / Bezier all nest functions).
+    let deadline = Instant::now() + Duration::from_secs(90);
     let mut upvalues = lifted
-        .into_par_iter()
+        .into_iter()
+        .rev()
         .map(|(ast_function, function, upvalues_in)| {
             let ast_clone = ast_function.clone();
+            if Instant::now() >= deadline {
+                ast_clone.lock().body.push(
+                    ast::Comment::new("skipped (time budget)".to_string()).into(),
+                );
+                return (ByAddress(ast_clone), Vec::new());
+            }
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                decompile_function(ast_function, function, upvalues_in)
+                decompile_function(ast_function, function, upvalues_in, deadline)
             })) {
                 Ok(r) => r,
                 Err(_) => {
@@ -145,18 +158,18 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8
                 }
             }
         })
-        .collect::<Vec<_>>()
-        .into_iter()
         .collect::<FxHashMap<_, _>>();
 
     let main = ByAddress(main);
     upvalues.remove(&main);
     let mut body = Arc::try_unwrap(main.0).unwrap().into_inner().body;
     link_upvalues(&mut body, &mut upvalues);
-    ast::context_naming::apply_context_naming(&mut body);
-    propagate_names(&mut body);
-    inline_short_gotos(&mut body);
-    ast::guard_clauses::apply_guard_clauses(&mut body);
+    if body.0.len() < 12_000 {
+        ast::context_naming::apply_context_naming(&mut body);
+        propagate_names(&mut body);
+        inline_short_gotos(&mut body);
+        ast::guard_clauses::apply_guard_clauses(&mut body);
+    }
     name_locals(&mut body, true);
 
     format!(
@@ -389,13 +402,79 @@ fn propagate_names_block(block: &mut ast::Block, captured: &FxHashSet<ast::RcLoc
     }
 }
 
+fn flatten_cfg(function: &Function) -> ast::Block {
+    let mut body = ast::Block::default();
+    let mut order = Vec::new();
+    if let Some(&entry) = function.entry() {
+        let mut dfs = Dfs::new(function.graph(), entry);
+        while let Some(n) = dfs.next(function.graph()) {
+            order.push(n);
+        }
+    } else {
+        order.extend(function.graph().node_indices());
+    }
+    for n in order {
+        if let Some(b) = function.block(n) {
+            if !b.0.is_empty() {
+                body.push(ast::Comment::new(format!("block {}", n.index())).into());
+                body.extend(b.0.iter().cloned());
+            }
+        }
+    }
+    body
+}
+
+fn finish_function(
+    ast_function: Arc<Mutex<ast::Function>>,
+    body: ast::Block,
+    params: Vec<ast::RcLocal>,
+    is_variadic: bool,
+    func_line: Option<usize>,
+    upvalues_in: Vec<ast::RcLocal>,
+    post: bool,
+) -> (ByAddress<Arc<Mutex<ast::Function>>>, Vec<ast::RcLocal>) {
+    {
+        let mut ast_function = ast_function.lock();
+        ast_function.body = body;
+        if post && ast_function.body.0.len() < 8_000 {
+            post_process::apply_all(&mut ast_function.body);
+        }
+        ast_function.parameters = params;
+        ast_function.is_variadic = is_variadic;
+        ast_function.line = func_line;
+    }
+    (ByAddress(ast_function), upvalues_in)
+}
+
 fn decompile_function(
     ast_function: Arc<Mutex<ast::Function>>,
     mut function: Function,
     upvalues_in: Vec<ast::RcLocal>,
+    deadline: Instant,
 ) -> (ByAddress<Arc<Mutex<ast::Function>>>, Vec<ast::RcLocal>) {
-    let (local_count, local_groups, upvalue_in_groups, upvalue_passed_groups) =
-        cfg::ssa::construct(&mut function, &upvalues_in);
+    let params = function.parameters.clone();
+    let is_variadic = function.is_variadic;
+    let func_line = function.line;
+    let large = function.graph().node_count() > 400;
+
+    let constructed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cfg::ssa::construct(&mut function, &upvalues_in)
+    }));
+    let (local_count, local_groups, upvalue_in_groups, upvalue_passed_groups) = match constructed {
+        Ok(v) => v,
+        Err(_) => {
+            let body = flatten_cfg(&function);
+            return finish_function(
+                ast_function,
+                body,
+                params,
+                is_variadic,
+                func_line,
+                upvalues_in,
+                false,
+            );
+        }
+    };
     let upvalue_to_group = upvalue_in_groups
         .into_iter()
         .chain(
@@ -414,18 +493,19 @@ fn decompile_function(
 
     let mut changed = true;
     let mut iters = 0u32;
-    while changed && iters < 24 {
+    let ssa_cap = if large { 3 } else { 8 };
+    while changed && iters < ssa_cap && Instant::now() < deadline {
         iters += 1;
         changed = false;
 
-        let dominators = simple_fast(function.graph(), function.entry().unwrap());
-        changed |= structure_jumps(&mut function, &dominators);
+        if let Some(&entry) = function.entry() {
+            let dominators = simple_fast(function.graph(), entry);
+            changed |= structure_jumps(&mut function, &dominators);
+        }
 
         ssa::inline::inline(&mut function, &local_to_group, &upvalue_to_group);
 
-        if structure_conditionals(&mut function)
-
-        {
+        if structure_conditionals(&mut function) {
             changed = true;
         }
         let mut local_map = FxHashMap::default();
@@ -436,34 +516,43 @@ fn decompile_function(
         ssa::construct::apply_local_map(&mut function, local_map);
     }
 
-    ssa::Destructor::new(
-        &mut function,
-        upvalue_to_group,
-        upvalues_in.iter().cloned().collect(),
-        local_count,
-    )
-    .destruct();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ssa::Destructor::new(
+            &mut function,
+            upvalue_to_group,
+            upvalues_in.iter().cloned().collect(),
+            local_count,
+        )
+        .destruct();
+    }));
 
     let params = std::mem::take(&mut function.parameters);
     let is_variadic = function.is_variadic;
     let func_line = function.line;
-    let block = Arc::new(restructure::lift(function).into());
+    let lifted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        restructure::lift(function)
+    }));
+    let body = match lifted {
+        Ok(b) => b,
+        Err(_) => ast::Block::default(),
+    };
+    let block = Arc::new(body.into());
     LocalDeclarer::default().declare_locals(
-
         Arc::clone(&block),
         &upvalues_in.iter().chain(params.iter()).cloned().collect(),
     );
 
-    {
-        let mut ast_function = ast_function.lock();
-        ast_function.body = Arc::try_unwrap(block).unwrap().into_inner();
-        
-        // Apply post-processing to this function's body
-        post_process::apply_all(&mut ast_function.body);
-        ast_function.parameters = params;
-        ast_function.is_variadic = is_variadic;
-        ast_function.line = func_line;
-    }
+    let body = Arc::try_unwrap(block).unwrap().into_inner();
+    finish_function(
+        ast_function,
+        body,
+        params,
+        is_variadic,
+        func_line,
+        upvalues_in,
+        Instant::now() < deadline,
+    )
+}
     (ByAddress(ast_function), upvalues_in)
 }
 

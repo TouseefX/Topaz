@@ -505,10 +505,8 @@ impl<'a> SsaConstructor<'a> {
         Vec<FxHashSet<RcLocal>>,
     ) {
         let entry = self.function.entry().unwrap();
-        let mut visited_nodes = Vec::with_capacity(self.function.graph().node_count());
         for i in 0..self.dfs.len() {
             let node = self.dfs[i];
-            visited_nodes.push(node);
             for stat_index in 0..self.function.block(node).unwrap().len() {
                 let statement = self
                     .function
@@ -569,23 +567,30 @@ impl<'a> SsaConstructor<'a> {
             }
             self.filled_blocks.insert(node);
 
-            for &node in &visited_nodes {
-                if node != entry
-                    && !self.sealed_blocks.contains(&node)
+            // Only a node whose last unfilled predecessor just filled can
+            // become sealable. Checking every visited node here was O(n²)
+            // and froze 60k-line scripts.
+            let mut candidates: Vec<NodeIndex> =
+                self.function.successor_blocks(node).collect();
+            candidates.push(node);
+            candidates.sort_unstable();
+            candidates.dedup();
+            for cand in candidates {
+                if cand != entry
+                    && !self.sealed_blocks.contains(&cand)
                     && !self
                         .function
-                        .predecessor_blocks(node)
+                        .predecessor_blocks(cand)
                         .any(|p| !self.filled_blocks.contains(&p))
                 {
-                    if let Some(incomplete_params) = self.incomplete_params.remove(&node) {
+                    if let Some(incomplete_params) = self.incomplete_params.remove(&cand) {
                         for (local, param_local) in incomplete_params {
-                            
                             if !self.new_upvalues_in.contains_key(&local) {
-                                self.add_param_args(node, &local, param_local);
+                                self.add_param_args(cand, &local, param_local);
                             }
                         }
                     }
-                    self.sealed_blocks.insert(node);
+                    self.sealed_blocks.insert(cand);
                 }
             }
         }
