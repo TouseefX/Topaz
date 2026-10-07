@@ -187,8 +187,8 @@ fn decompile_lifted_waves(
     #[cfg(not(target_arch = "wasm32"))]
     let pool = {
         let n = std::thread::available_parallelism()
-            .map(|p| p.get().clamp(2, 4))
-            .unwrap_or(4);
+            .map(|p| p.get().clamp(2, 16))
+            .unwrap_or(8);
         rayon::ThreadPoolBuilder::new()
             .num_threads(n)
             .stack_size(64 * 1024 * 1024)

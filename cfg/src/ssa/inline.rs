@@ -474,10 +474,12 @@ pub fn inline(
     }
 
     let mut changed = true;
-    // Limit retries to avoid infinite loops on pathological inputs
+    // Limit retries to avoid infinite loops on pathological inputs.
+    // Large CFGs don't need 4 full inliner sweeps — 2 is enough and
+    // keeps 60k-line dumps in the same ballpark as Oracle (~2s).
     let mut retries = 0;
-    const MAX_RETRIES: usize = 4;
-    while changed && retries < MAX_RETRIES {
+    let max_retries = if function.graph().node_count() > 800 { 2 } else { 4 };
+    while changed && retries < max_retries {
         retries += 1;
         changed = false;
         Inliner::new(

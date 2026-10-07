@@ -183,25 +183,6 @@ fn lvalue_object_is(stmt: &Statement, local: &RcLocal) -> bool {
     })
 }
 
-fn stmt_mentions(stmt: &Statement, local: &RcLocal) -> bool {
-    if stmt.values_read().iter().any(|l| *l == local)
-        || stmt.values_written().iter().any(|l| *l == local)
-    {
-        return true;
-    }
-    match stmt {
-        Statement::If(s) => {
-            s.then_block.lock().iter().any(|t| stmt_mentions(t, local))
-                || s.else_block.lock().iter().any(|t| stmt_mentions(t, local))
-        }
-        Statement::While(s) => s.block.lock().iter().any(|t| stmt_mentions(t, local)),
-        Statement::Repeat(s) => s.block.lock().iter().any(|t| stmt_mentions(t, local)),
-        Statement::NumericFor(s) => s.block.lock().iter().any(|t| stmt_mentions(t, local)),
-        Statement::GenericFor(s) => s.block.lock().iter().any(|t| stmt_mentions(t, local)),
-        _ => false,
-    }
-}
-
 fn replace_local_in_stmt(stmt: &mut Statement, from: &RcLocal, to: RValue) {
     stmt.traverse_rvalues(&mut |rv| {
         if let RValue::Local(l) = rv {
@@ -223,10 +204,32 @@ fn assigned_local(stmt: &Statement) -> Option<(RcLocal, RValue)> {
     Some((local, a.right[0].clone()))
 }
 
-fn inline_consecutive(block: &mut Block) -> bool {
+fn collect_read_counts(block: &Block, counts: &mut HashMap<RcLocal, usize>) {
+    for s in &block.0 {
+        for l in s.values_read() {
+            *counts.entry(l.clone()).or_insert(0) += 1;
+        }
+        match s {
+            Statement::If(st) => {
+                collect_read_counts(&st.then_block.lock(), counts);
+                collect_read_counts(&st.else_block.lock(), counts);
+            }
+            Statement::While(st) => collect_read_counts(&st.block.lock(), counts),
+            Statement::Repeat(st) => collect_read_counts(&st.block.lock(), counts),
+            Statement::NumericFor(st) => collect_read_counts(&st.block.lock(), counts),
+            Statement::GenericFor(st) => collect_read_counts(&st.block.lock(), counts),
+            _ => {}
+        }
+    }
+}
+
+/// O(n) single-use inlining. The previous “scan every other statement
+/// for each assign” was O(n²) and made 60k-line dumps take minutes
+/// (Oracle finishes those in ~2s).
+fn inline_consecutive(block: &mut Block, counts: &HashMap<RcLocal, usize>) -> bool {
     let mut changed = false;
     for_nested_blocks(block, &mut |b| {
-        changed |= inline_consecutive(b);
+        changed |= inline_consecutive(b, counts);
     });
     let mut i = 0;
     while i + 1 < block.0.len() {
@@ -234,6 +237,10 @@ fn inline_consecutive(block: &mut Block) -> bool {
             i += 1;
             continue;
         };
+        if counts.get(&local).copied().unwrap_or(0) != 1 {
+            i += 1;
+            continue;
+        }
         if lvalue_object_is(&block.0[i + 1], &local) {
             i += 1;
             continue;
@@ -243,13 +250,6 @@ fn inline_consecutive(block: &mut Block) -> bool {
             .iter()
             .any(|l| *l == &local);
         if !reads_next {
-            i += 1;
-            continue;
-        }
-        let used_elsewhere = block.0.iter().enumerate().any(|(j, s)| {
-            j != i && j != i + 1 && stmt_mentions(s, &local)
-        });
-        if used_elsewhere {
             i += 1;
             continue;
         }
@@ -354,7 +354,9 @@ pub fn apply(block: &mut Block) {
     fold_loop_carried(block);
     remove_identity(block);
     for _ in 0..8 {
-        if !inline_consecutive(block) {
+        let mut counts = HashMap::new();
+        collect_read_counts(block, &mut counts);
+        if !inline_consecutive(block, &counts) {
             break;
         }
         merge_decl_assign(block);

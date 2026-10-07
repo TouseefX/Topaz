@@ -282,6 +282,9 @@ pub fn structure_conditionals(function: &mut Function) -> bool {
     while let Some(node) = dfs.next(function.graph()) {
         order.push(node);
     }
+    // One O(n) index; is_truthy_transitive used to rescan every block for
+    // every if (O(n²) — minutes on 60k-line dumps).
+    let defs = index_ssa_defs(function);
     for node in order {
         if crate::past_decompile_deadline() {
             break;
@@ -292,11 +295,11 @@ pub fn structure_conditionals(function: &mut Function) -> bool {
         if simplify_condition(function, node) {
             did_structure = true;
         }
-        if function.has_block(node) && try_constant_branch(function, node) {
+        if function.has_block(node) && try_constant_branch(function, node, &defs) {
             did_structure = true;
             continue;
         }
-        if function.has_block(node) && structure_bool_conditional(function, node) {
+        if function.has_block(node) && structure_bool_conditional(function, node, &defs) {
             did_structure = true;
         }
 
@@ -373,39 +376,43 @@ pub fn structure_conditionals(function: &mut Function) -> bool {
 }
 
 
-fn is_truthy(rvalue: ast::RValue) -> Option<bool> {
-    match rvalue.reduce_condition() {
-        
+fn is_truthy(rvalue: &ast::RValue) -> Option<bool> {
+    match rvalue {
         ast::RValue::Unary(ast::Unary {
             operation: ast::UnaryOperation::Length,
             ..
         }) => Some(true),
         ast::RValue::Literal(
-            ast::Literal::Boolean(true) | ast::Literal::Number(_) | ast::Literal::String(_),
+            ast::Literal::Boolean(true)
+            | ast::Literal::Number(_)
+            | ast::Literal::Integer(_)
+            | ast::Literal::String(_)
+            | ast::Literal::Vector(..),
         )
         | ast::RValue::Table(_)
         | ast::RValue::Closure(_) => Some(true),
         // `a .. b` is always a string, and strings are truthy in Lua.
-        // ConvertSecondsToTime compiles `x = tostring(n).."h"; if x then`
-        // after the empty-string branch; treating concat as truthy lets
-        // us drop that JUMPIF and match the real if/else instead of gotos.
         ast::RValue::Binary(ast::Binary {
             operation: ast::BinaryOperation::Concat,
             ..
         }) => Some(true),
-        ast::RValue::Literal(ast::Literal::Nil | ast::Literal::Boolean(_)) => Some(false),
-        _ => None,
+        ast::RValue::Literal(ast::Literal::Nil | ast::Literal::Boolean(false)) => Some(false),
+        ast::RValue::Local(_) => None,
+        other => match other.clone().reduce_condition() {
+            ast::RValue::Literal(ast::Literal::Boolean(b)) => Some(b),
+            ast::RValue::Literal(ast::Literal::Nil) => Some(false),
+            _ => None,
+        },
     }
 }
 
-/// Finds the single defining expression of `local` anywhere in `function`.
-/// Only valid while `function` is still in pure SSA form (i.e. before
-/// `Destructor::destruct()` runs), since that's what guarantees each local
-/// has exactly one static assignment to look for.
-fn local_defining_value<'a>(
-    function: &'a Function,
-    local: &ast::RcLocal,
-) -> Option<&'a ast::RValue> {
+enum SsaDef {
+    Copy(ast::RcLocal),
+    Known(bool),
+}
+
+fn index_ssa_defs(function: &Function) -> FxHashMap<ast::RcLocal, SsaDef> {
+    let mut defs = FxHashMap::default();
     for node in function.graph().node_indices() {
         let Some(block) = function.block(node) else {
             continue;
@@ -414,35 +421,46 @@ fn local_defining_value<'a>(
             if let Some(assign) = stat.as_assign()
                 && assign.left.len() == 1
                 && assign.right.len() == 1
-                && assign.left[0].as_local() == Some(local)
+                && let Some(local) = assign.left[0].as_local()
             {
-                return Some(&assign.right[0]);
+                let kind = if let ast::RValue::Local(src) = &assign.right[0] {
+                    SsaDef::Copy(src.clone())
+                } else if let Some(t) = is_truthy(&assign.right[0]) {
+                    SsaDef::Known(t)
+                } else {
+                    continue;
+                };
+                defs.insert(local.clone(), kind);
             }
         }
     }
-    None
+    defs
 }
 
-/// Like `is_truthy`, but when `rvalue` is just a reference to some other
-/// local (e.g. a branch of an `if` that reuses a table built earlier in the
-/// function, rather than constructing one inline), this follows the local's
-/// single SSA definition and checks that instead of giving up. Bounded and
-/// guarded against cycles since copy chains are the only thing we walk
-/// through here.
-fn is_truthy_transitive(function: &Function, mut rvalue: ast::RValue) -> Option<bool> {
-    let mut seen = std::collections::HashSet::new();
-    loop {
-        if let Some(truthy) = is_truthy(rvalue.clone()) {
-            return Some(truthy);
-        }
-        let ast::RValue::Local(local) = &rvalue else {
-            return None;
-        };
-        if !seen.insert(local.clone()) {
-            return None;
-        }
-        rvalue = local_defining_value(function, local)?.clone();
+fn is_truthy_transitive(
+    defs: &FxHashMap<ast::RcLocal, SsaDef>,
+    rvalue: &ast::RValue,
+) -> Option<bool> {
+    if let Some(truthy) = is_truthy(rvalue) {
+        return Some(truthy);
     }
+    let ast::RValue::Local(start) = rvalue else {
+        return None;
+    };
+    let mut cur = start.clone();
+    for _ in 0..64 {
+        match defs.get(&cur) {
+            Some(SsaDef::Known(t)) => return Some(*t),
+            Some(SsaDef::Copy(next)) => {
+                if next == &cur {
+                    return None;
+                }
+                cur = next.clone();
+            }
+            None => return None,
+        }
+    }
+    None
 }
 
 
@@ -451,6 +469,7 @@ fn make_bool_conditional(
     node: NodeIndex,
     mut then_value: ast::RValue,
     mut else_value: ast::RValue,
+    defs: &FxHashMap<ast::RcLocal, SsaDef>,
 ) -> Option<ast::RValue> {
     if let ast::RValue::Literal(ast::Literal::Boolean(then_bool)) = then_value
         && let ast::RValue::Literal(ast::Literal::Boolean(else_bool)) = else_value
@@ -483,7 +502,7 @@ fn make_bool_conditional(
             .condition
             .clone();
 
-        let then_truthy = match is_truthy_transitive(function, then_value.clone()) {
+        let then_truthy = match is_truthy_transitive(defs, &then_value) {
             Some(truthy) => truthy,
             None if !then_value.has_side_effects() => {
                 let value = match &condition {
@@ -499,7 +518,7 @@ fn make_bool_conditional(
             None => false,
         };
         
-        let else_truthy = is_truthy_transitive(function, else_value.clone()).is_some_and(|v| v);
+        let else_truthy = is_truthy_transitive(defs, &else_value).is_some_and(|v| v);
 
         let block = function.block_mut(node).unwrap();
         let r#if = block.last_mut().unwrap().as_if_mut().unwrap();
@@ -541,7 +560,11 @@ fn make_bool_conditional(
 }
 
 
-fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool {
+fn structure_bool_conditional(
+    function: &mut Function,
+    node: NodeIndex,
+    defs: &FxHashMap<ast::RcLocal, SsaDef>,
+) -> bool {
     let match_triangle = |assigner, next, next_args: FxHashMap<ast::RcLocal, ast::RValue>| {
         if let Some(edge_to_next) = function.unconditional_edge(assigner)
             && edge_to_next.target() == next
@@ -586,7 +609,7 @@ fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool 
                 let then_value = then_value.clone();
                 let else_value = else_value.clone();
 
-                if let Some(res) = make_bool_conditional(function, node, then_value, else_value) {
+                if let Some(res) = make_bool_conditional(function, node, then_value, else_value, defs) {
                     function
                         .graph_mut()
                         .edge_weight_mut(then_edge)
@@ -634,7 +657,7 @@ fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool 
                 else_edge.id(),
             );
             let res_local = res_local.clone();
-            if let Some(res) = make_bool_conditional(function, node, then_value, else_value) {
+            if let Some(res) = make_bool_conditional(function, node, then_value, else_value, defs) {
                 function
                     .graph_mut()
                     .edge_weight_mut(then_edge)
@@ -683,7 +706,7 @@ fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool 
                 function.unconditional_edge(else_block).unwrap().id(),
             );
             let res_local = res_local.clone();
-            if let Some(res) = make_bool_conditional(function, node, then_value, else_value) {
+            if let Some(res) = make_bool_conditional(function, node, then_value, else_value, defs) {
                 function
                     .graph_mut()
                     .edge_weight_mut(then_edge)
@@ -740,7 +763,7 @@ fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool 
                 function.unconditional_edge(then_block).unwrap().id(),
                 function.unconditional_edge(else_block).unwrap().id(),
             );
-            if let Some(res) = make_bool_conditional(function, node, then_value, else_value) {
+            if let Some(res) = make_bool_conditional(function, node, then_value, else_value, defs) {
                 function
                     .graph_mut()
                     .edge_weight_mut(then_edge)
@@ -797,7 +820,7 @@ fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool 
             let then_value = then_value.clone();
             let else_value = else_value.clone();
 
-            if let Some(res) = make_bool_conditional(function, node, then_value, else_value) {
+            if let Some(res) = make_bool_conditional(function, node, then_value, else_value, defs) {
                 function.remove_block(then_target);
                 function.remove_block(else_target);
                 let block = function.block_mut(node).unwrap();
@@ -933,14 +956,18 @@ fn skip_over_node(
 /// opposite for always-false). Luau emits `JUMPIF` on a concat result
 /// after `if s == "" then t = n.."h" else t = s.." "..n.."h"`; that extra
 /// branch is constant and blocks diamond matching, so collapse dumps gotos.
-fn try_constant_branch(function: &mut Function, node: NodeIndex) -> bool {
+fn try_constant_branch(
+    function: &mut Function,
+    node: NodeIndex,
+    defs: &FxHashMap<ast::RcLocal, SsaDef>,
+) -> bool {
     let Some(block) = function.block(node) else {
         return false;
     };
     let Some(ast::Statement::If(if_stat)) = block.last() else {
         return false;
     };
-    let Some(truthy) = is_truthy_transitive(function, if_stat.condition.clone()) else {
+    let Some(truthy) = is_truthy_transitive(defs, &if_stat.condition) else {
         return false;
     };
     let Some((then_edge, else_edge)) = function.conditional_edges(node) else {
