@@ -581,26 +581,18 @@ pub fn inline(
                 }
             }
 
-            // Fold set_list into table constructor
-            for i in 1..block.len() {
-                if let ast::Statement::SetList(set_list) = &block[i] {
-                    let object_local = set_list.object_local.clone();
-                    let mut found_idx = None;
-                    for j in (0..i).rev() {
-                        if block[j].values_read().iter().any(|&l| l == &object_local)
-                            || block[j].values_written().iter().any(|&l| l == &object_local)
-                        {
-                            if let Some(assign) = block[j].as_assign()
-                                && assign.left == [object_local.clone().into()]
-                                && assign.right.len() == 1
-                                && assign.right[0].as_table().is_some()
-                            {
-                                found_idx = Some(j);
-                            }
-                            break;
-                        }
-                    }
-                    if let Some(j) = found_idx {
+            // Fold set_list into table constructor in O(n): track the last
+            // `t = { ... }` not followed by another use of t. The old
+            // reverse scan per SETLIST was O(s²) per block.
+            let mut last_table: FxHashMap<ast::RcLocal, usize> = FxHashMap::default();
+            let mut i = 0;
+            while i < block.len() {
+                let object_local = match &block[i] {
+                    ast::Statement::SetList(set_list) => Some(set_list.object_local.clone()),
+                    _ => None,
+                };
+                if let Some(object_local) = object_local {
+                    if let Some(&j) = last_table.get(&object_local) {
                         let assign_stmt = std::mem::replace(&mut block[j], ast::Empty {}.into());
                         let set_list = std::mem::replace(&mut block[i], assign_stmt)
                             .into_set_list()
@@ -619,8 +611,31 @@ pub fn inline(
                             table.0.push((None, tail));
                         }
                         changed = true;
+                        last_table.remove(&object_local);
+                        last_table.insert(object_local, i);
                     }
+                    i += 1;
+                    continue;
                 }
+
+                let invalidate: Vec<ast::RcLocal> = block[i]
+                    .values_read()
+                    .into_iter()
+                    .chain(block[i].values_written())
+                    .cloned()
+                    .collect();
+                for l in &invalidate {
+                    last_table.remove(l);
+                }
+                if let Some(assign) = block[i].as_assign()
+                    && assign.left.len() == 1
+                    && assign.right.len() == 1
+                    && assign.right[0].as_table().is_some()
+                    && let Some(local) = assign.left[0].as_local()
+                {
+                    last_table.insert(local.clone(), i);
+                }
+                i += 1;
             }
         }
     }

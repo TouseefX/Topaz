@@ -13,6 +13,7 @@ use tuple::Map;
 use crate::{
     block::{BlockEdge, BranchType},
     function::Function,
+    DomIndex,
 };
 
 #[derive(Debug)]
@@ -1073,6 +1074,7 @@ fn is_for_next(function: &Function, node: NodeIndex) -> bool {
 
 pub fn structure_jumps(function: &mut Function, dominators: &Dominators<NodeIndex>) -> bool {
     let mut did_structure = false;
+    let dom_idx = DomIndex::build(function.graph().node_indices(), dominators);
     for node in function.graph().node_indices().collect_vec() {
         
         if function.block(node).is_some()
@@ -1100,11 +1102,7 @@ pub fn structure_jumps(function: &mut Function, dominators: &Dominators<NodeInde
                 }
             }
             if function.predecessor_blocks(jump_target).count() == 1
-                && dominators
-                    .dominators(jump_target)
-                    .map(|mut d| d.contains(&node))
-                    .unwrap_or(false)
-                
+                && dom_idx.dominates(node, jump_target)
                 && function.graph().edge_weight(jump_edge).unwrap().arguments.is_empty()
             {
                 

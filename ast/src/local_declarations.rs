@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
 
-use array_tool::vec::Intersect;
 use by_address::ByAddress;
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
 use parking_lot::Mutex;
 use petgraph::{
-    algo::dominators::simple_fast,
+    algo::dominators::{simple_fast, Dominators},
     prelude::{DiGraph, NodeIndex},
     Direction,
 };
@@ -14,6 +13,65 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use triomphe::Arc;
 
 use crate::{Assign, Block, LocalRw, RcLocal, Statement};
+
+/// Euler-tour dominates: O(n) preprocess, O(1) query. Replaces
+/// `dominators(n).collect_vec()` ∩ Intersect which was O(depth²) per local.
+struct DomIdx {
+    inn: FxHashMap<NodeIndex, u32>,
+    out: FxHashMap<NodeIndex, u32>,
+}
+
+impl DomIdx {
+    fn build(nodes: impl IntoIterator<Item = NodeIndex>, doms: &Dominators<NodeIndex>) -> Self {
+        let present: FxHashSet<NodeIndex> = nodes.into_iter().collect();
+        let mut children: FxHashMap<NodeIndex, Vec<NodeIndex>> =
+            FxHashMap::with_capacity_and_hasher(present.len(), Default::default());
+        let mut roots = Vec::new();
+        for &n in &present {
+            match doms.immediate_dominator(n) {
+                Some(p) if present.contains(&p) => children.entry(p).or_default().push(n),
+                _ => roots.push(n),
+            }
+        }
+        let mut inn = FxHashMap::with_capacity_and_hasher(present.len(), Default::default());
+        let mut out = FxHashMap::with_capacity_and_hasher(present.len(), Default::default());
+        let mut time = 0u32;
+        for root in roots {
+            let mut stack: Vec<(NodeIndex, usize)> = vec![(root, 0)];
+            inn.insert(root, time);
+            time += 1;
+            loop {
+                let Some(&(node, i)) = stack.last() else {
+                    break;
+                };
+                if let Some(&child) = children.get(&node).and_then(|v| v.get(i)) {
+                    stack.last_mut().unwrap().1 = i + 1;
+                    inn.insert(child, time);
+                    time += 1;
+                    stack.push((child, 0));
+                } else {
+                    stack.pop();
+                    out.insert(node, time);
+                    time += 1;
+                }
+            }
+        }
+        Self { inn, out }
+    }
+
+    #[inline]
+    fn dominates(&self, a: NodeIndex, b: NodeIndex) -> bool {
+        match (
+            self.inn.get(&a),
+            self.inn.get(&b),
+            self.out.get(&a),
+            self.out.get(&b),
+        ) {
+            (Some(&ain), Some(&bin), Some(&aout), Some(&bout)) => ain <= bin && bout <= aout,
+            _ => a == b,
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct LocalDeclarer {
@@ -78,6 +136,7 @@ impl LocalDeclarer {
     ) {
         let root_node = self.visit(root_block, 0);
         let dominators = simple_fast(&self.graph, root_node);
+        let dom_idx = DomIdx::build(self.graph.node_indices(), &dominators);
         for (local, usages) in self.local_usages {
             if locals_to_ignore.contains(&local) {
                 continue;
@@ -85,30 +144,41 @@ impl LocalDeclarer {
             let (mut node, mut first_stat_index) = if usages.len() == 1 {
                 usages.into_iter().next().unwrap()
             } else {
-                let node_dominators = usages
-                    .keys()
-                    .filter_map(|&n| dominators.dominators(n).map(|d| d.collect_vec()))
-                    .collect_vec();
-                let mut dom_iter = node_dominators.iter().cloned();
-                let Some(mut common_dominators) = dom_iter.next() else {
+                // LCA of usage nodes on the dominator tree. O(|uses| · depth)
+                // with O(1) dominates — not O(depth²) Intersect of ancestor lists.
+                let usage_nodes: Vec<NodeIndex> = usages.keys().copied().collect();
+                let Some((&first, rest)) = usage_nodes.split_first() else {
                     continue;
                 };
-                for node_dominators in dom_iter {
-                    common_dominators = common_dominators.intersect(node_dominators);
+                let mut cand = first;
+                let mut failed = false;
+                for &n in rest {
+                    while !dom_idx.dominates(cand, n) {
+                        match dominators.immediate_dominator(cand) {
+                            Some(p) => cand = p,
+                            None => {
+                                failed = true;
+                                break;
+                            }
+                        }
+                    }
+                    if failed {
+                        break;
+                    }
                 }
-                let Some(&common_dominator) = common_dominators.first() else {
+                if failed {
                     continue;
-                };
+                }
+                let common_dominator = cand;
                 let mut min_stat_index = usages.get(&common_dominator).copied();
                 for child in self
                     .graph
                     .neighbors_directed(common_dominator, Direction::Outgoing)
                 {
-                    for node_dominators in &node_dominators {
-                        if node_dominators.contains(&child) {
-                            if let Some((_, child_idx)) = self.graph.node_weight(child) {
-                                min_stat_index = Some(min_stat_index.map_or(*child_idx, |curr| curr.min(*child_idx)));
-                            }
+                    if usage_nodes.iter().any(|&u| dom_idx.dominates(child, u)) {
+                        if let Some((_, child_idx)) = self.graph.node_weight(child) {
+                            min_stat_index =
+                                Some(min_stat_index.map_or(*child_idx, |curr| curr.min(*child_idx)));
                         }
                     }
                 }

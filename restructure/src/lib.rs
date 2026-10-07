@@ -1,4 +1,4 @@
-use cfg::{block::BranchType, function::Function};
+use cfg::{block::BranchType, function::Function, DomIndex};
 use itertools::Itertools;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -32,74 +32,12 @@ pub fn post_dominators<N: Default, E: Default>(
     res
 }
 
-/// Euler-tour times on a dominator (or post-dominator) tree.
-/// `a` dominates `b` iff `inn[a] <= inn[b] && out[b] <= out[a]` — O(1).
-/// Walking `dominators(n).contains(&x)` was O(depth) per query and
-/// quadratic on ClientRenderer’s long diamond chain.
-#[derive(Default)]
-struct DomTimes {
-    inn: FxHashMap<NodeIndex, u32>,
-    out: FxHashMap<NodeIndex, u32>,
-}
-
-impl DomTimes {
-    fn build(function: &Function, doms: &Dominators<NodeIndex>) -> Self {
-        let present: FxHashSet<NodeIndex> = function.graph().node_indices().collect();
-        let mut children: FxHashMap<NodeIndex, Vec<NodeIndex>> =
-            FxHashMap::with_capacity_and_hasher(present.len(), Default::default());
-        let mut roots = Vec::new();
-        for &n in &present {
-            match doms.immediate_dominator(n) {
-                Some(p) if present.contains(&p) => children.entry(p).or_default().push(n),
-                _ => roots.push(n),
-            }
-        }
-        let mut inn = FxHashMap::with_capacity_and_hasher(present.len(), Default::default());
-        let mut out = FxHashMap::with_capacity_and_hasher(present.len(), Default::default());
-        let mut time = 0u32;
-        for root in roots {
-            let mut stack: Vec<(NodeIndex, usize)> = vec![(root, 0)];
-            inn.insert(root, time);
-            time += 1;
-            loop {
-                let Some(&(node, i)) = stack.last() else {
-                    break;
-                };
-                if let Some(&child) = children.get(&node).and_then(|v| v.get(i)) {
-                    stack.last_mut().unwrap().1 = i + 1;
-                    inn.insert(child, time);
-                    time += 1;
-                    stack.push((child, 0));
-                } else {
-                    stack.pop();
-                    out.insert(node, time);
-                    time += 1;
-                }
-            }
-        }
-        Self { inn, out }
-    }
-
-    #[inline]
-    fn dominates(&self, a: NodeIndex, b: NodeIndex) -> bool {
-        match (
-            self.inn.get(&a),
-            self.inn.get(&b),
-            self.out.get(&a),
-            self.out.get(&b),
-        ) {
-            (Some(&ain), Some(&bin), Some(&aout), Some(&bout)) => ain <= bin && bout <= aout,
-            _ => a == b,
-        }
-    }
-}
-
 struct GraphStructurer {
     pub function: Function,
     loop_headers: FxHashSet<NodeIndex>,
     label_to_node: FxHashMap<ast::Label, NodeIndex>,
-    dom_idx: DomTimes,
-    post_idx: DomTimes,
+    dom_idx: DomIndex,
+    post_idx: DomIndex,
 }
 
 impl GraphStructurer {
@@ -119,8 +57,8 @@ impl GraphStructurer {
             function,
             loop_headers: FxHashSet::default(),
             label_to_node: FxHashMap::default(),
-            dom_idx: DomTimes::default(),
-            post_idx: DomTimes::default(),
+            dom_idx: DomIndex::default(),
+            post_idx: DomIndex::default(),
         };
         this.find_loop_headers();
         this
@@ -186,8 +124,8 @@ impl GraphStructurer {
         self.find_loop_headers();
         let dominators = simple_fast(self.function.graph(), entry);
         let post_dom = post_dominators(self.function.graph_mut());
-        self.dom_idx = DomTimes::build(&self.function, &dominators);
-        self.post_idx = DomTimes::build(&self.function, &post_dom);
+        self.dom_idx = DomIndex::build(self.function.graph().node_indices(), &dominators);
+        self.post_idx = DomIndex::build(self.function.graph().node_indices(), &post_dom);
         let mut changed = false;
         let mut n_checked = 0u32;
 
@@ -301,7 +239,7 @@ impl GraphStructurer {
                 break;
             };
             let dominators = simple_fast(self.function.graph(), entry);
-            let dom_idx = DomTimes::build(&self.function, &dominators);
+            let dom_idx = DomIndex::build(self.function.graph().node_indices(), &dominators);
             let edges = self.function.graph().edge_indices().collect::<Vec<_>>();
 
             // Insert many gotos in one pass. Matching after every edge was

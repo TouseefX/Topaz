@@ -56,12 +56,17 @@ pub fn remove_unnecessary_params(
 ) -> bool {
     let mut changed = false;
     for node in function.blocks().map(|(i, _)| i).collect::<Vec<_>>() {
-        let mut dependency_graph = ParamDependencyGraph::new(function, node);
-        let mut removable_params = FxHashMap::default();
         let edges = function
             .graph()
             .edges_directed(node, Direction::Incoming)
             .collect::<Vec<_>>();
+        // Most CFG nodes have no phi args. Building a dependency graph
+        // for each of them was O(n) wasted work per node.
+        if edges.is_empty() || edges.iter().all(|e| e.weight().arguments.is_empty()) {
+            continue;
+        }
+        let mut dependency_graph = ParamDependencyGraph::new(function, node);
+        let mut removable_params = FxHashMap::default();
         if !edges.is_empty() {
             let params = edges[0].weight().arguments.iter().map(|(p, _)| p);
             let args_in_by_block = edges

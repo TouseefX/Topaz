@@ -1,9 +1,12 @@
 pub mod block;
+pub mod dom_index;
 pub mod dot;
 pub mod function;
 pub mod pattern;
 pub mod snapshot;
 pub mod ssa;
+
+pub use dom_index::DomIndex;
 
 pub use snapshot::{CfgEdge, CfgNode, CfgSnapshot, EdgeKind};
 
