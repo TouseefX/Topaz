@@ -442,7 +442,7 @@ impl<'a> Lifter<'a> {
                     }
                     OpCode::LOP_GETGLOBAL => {
                         let value = self.register(a as _);
-                        let global_name = self.constant(aux as _).into_string().unwrap_or_else(|| b"_".to_vec());
+                        let global_name = self.constant(aux as _).into_string().unwrap_or_else(|_| b"_".to_vec());
                         statements.push(
                             ast::Assign::new(
                                 vec![value.into()],
@@ -453,7 +453,7 @@ impl<'a> Lifter<'a> {
                     }
                     OpCode::LOP_SETGLOBAL => {
                         let value = self.register(a as _);
-                        let global_name = self.constant(aux as _).into_string().unwrap_or_else(|| b"_".to_vec());
+                        let global_name = self.constant(aux as _).into_string().unwrap_or_else(|_| b"_".to_vec());
                         statements.push(
                             ast::Assign::new(
                                 vec![ast::Global::new(global_name).into()],
@@ -1255,7 +1255,7 @@ impl<'a> Lifter<'a> {
                         let name0 = self
                             .constant(((aux >> 20) & 1023) as usize)
                             .into_string()
-                            .unwrap_or_else(|| b"_".to_vec());
+                            .unwrap_or_else(|_| b"_".to_vec());
                         let mut import_expression: ast::RValue =
                             ast::Global::new(name0).into();
                         if import_len > 1 {
