@@ -1,0 +1,1194 @@
+-- Decompiled with Topaz
+-- Created by: Andrew & TouseefX
+
+local runService = game:GetService("RunService")
+
+if not runService:IsStudio() and (game.PrivateServerOwnerId == 0 and (workspace:GetAttribute("CustomServerOwnerId") == nil and workspace:GetAttribute("VIPServer") == nil)) then
+    local v1 = os.clock() + 10
+
+    repeat
+        task.wait(1)
+    until runService:IsStudio() and true or (game.PrivateServerOwnerId ~= 0 and true or (workspace:GetAttribute("CustomServerOwnerId") ~= nil and true or workspace:GetAttribute("VIPServer") ~= nil)) or v1 < os.clock()
+
+    if not runService:IsStudio() and (game.PrivateServerOwnerId == 0 and (workspace:GetAttribute("CustomServerOwnerId") == nil and workspace:GetAttribute("VIPServer") == nil)) then
+        script:Destroy()
+        return
+    end
+end
+
+local players = game:GetService("Players")
+local replicatedStorage = game:GetService("ReplicatedStorage")
+local customMoveVFX = replicatedStorage:WaitForChild("CustomMoveVFX")
+local cast = customMoveVFX:WaitForChild("Cast")
+local livePlayCastEvent = cast:WaitForChild("LivePlayCastEvent")
+local branchActivateEvent = cast:WaitForChild("BranchActivateEvent")
+local fetchMoveData = cast:WaitForChild("FetchMoveData")
+local headlessPlayback = require(customMoveVFX:WaitForChild("HeadlessPlayback"))
+local moveContentHash = require(customMoveVFX:WaitForChild("MoveContentHash"))
+local v2 = require
+local s_u3 = "MovePreloader"
+local v_u4 = v2(customMoveVFX:WaitForChild(s_u3))
+s_u3 = "FetchMoveAssets"
+local v_u5 = cast:WaitForChild(s_u3)
+local moveEditorReq = replicatedStorage:WaitForChild("MoveEditorReq")
+s_u3 = function(p6, p7)
+    if p6 ~= "getFreshMouseWorld" then
+        return nil
+    end
+
+    local v8, v9 = pcall(function()
+        return players.LocalPlayer:GetMouse()
+    end)
+
+    if not (v8 and v9) then
+        return {
+            Ok = false,
+            Reason = "local_mouse_missing"
+        }
+    end
+
+    local hit = v9.Hit
+
+    if typeof(hit) ~= "CFrame" then
+        return {
+            Ok = false,
+            Reason = "local_mouse_hit_missing"
+        }
+    end
+
+    local t10 = {
+        Ok = true,
+        Position = nil,
+        CFrame = nil,
+        Source = "cmvfx_client_invoke",
+        RequestSource = nil
+    }
+    t10.Position = hit.Position
+    t10.CFrame = hit
+    local v11 = type(p7) == "table" and p7.RequestSource
+
+    if not v11 then
+        v11 = nil
+    end
+
+    t10.RequestSource = v11
+    return t10
+end
+moveEditorReq.OnClientInvoke = s_u3
+s_u3 = nil
+
+local function fn_u15()
+    if s_u3 ~= nil then
+        return s_u3
+    end
+
+    local schemas = replicatedStorage:FindFirstChild("Schemas")
+    local v12 = schemas or replicatedStorage:WaitForChild("Schemas", 10)
+
+    if not v12 then
+        return nil
+    end
+
+    local v13, v14 = pcall(require, v12)
+
+    if v13 and type(v14) == "table" then
+        local moveDataSchema = v14.moveDataSchema
+
+        if type(moveDataSchema) == "table" then
+            s_u3 = v14.moveDataSchema
+        end
+    end
+
+    return s_u3
+end
+
+local function fn_u21(p16)
+    if typeof(p16) ~= "buffer" then
+        return nil, "not_buffer"
+    end
+
+    local v17 = fn_u15()
+
+    if not v17 then
+        return nil, "schema_unavailable"
+    end
+
+    local v18, v19 = pcall(v17.decode, v17, p16)
+
+    if not v18 then
+        return nil, "decode_err:" .. tostring(v19)
+    end
+
+    local v20
+
+    if v19 then
+        v20 = v19[1]
+    else
+        v20 = v19
+    end
+
+    if type(v20) == "table" then
+        local data = v20.Data
+
+        if type(data) == "table" then
+            return v20
+        end
+    end
+
+    return nil, "no_move"
+end
+
+local function fn_u26(p22, p23)
+    local v24 = nil
+
+    if type(p22) == "table" then
+        local data2 = p22.Data
+
+        if data2 then
+            data2 = p22.Data.Properties
+        end
+
+        if type(data2) == "table" then
+            v24 = data2.__MoveVariantId
+        end
+
+        if v24 == nil then
+            local properties = p22.Properties
+
+            if type(properties) == "table" then
+                v24 = p22.Properties.__MoveVariantId
+            end
+        end
+
+        if v24 == nil then
+            v24 = p22.__MoveVariantId
+        end
+
+        if v24 == nil then
+            v24 = p22.MoveVariantId
+        end
+    end
+
+    local num = tonumber(v24)
+
+    if not num or num < 1 then
+        return p23
+    end
+
+    local v25 = num + 0.5
+    return math.floor(v25)
+end
+
+local function fn_u34(p27, p28)
+    if type(p27) == "table" then
+        local data3 = p27.Data
+
+        if type(data3) == "table" then
+            local t29 = {}
+
+            for _, v30 in ipairs(p27.Data) do
+                if fn_u26(v30, p28) == p28 then
+                    t29[#t29 + 1] = v30
+                end
+            end
+
+            if #t29 == #p27.Data then
+                return p27
+            end
+
+            local t31 = {}
+
+            for v32, v33 in pairs(p27) do
+                t31[v32] = v33
+            end
+
+            t31.Data = t29
+            return t31
+        end
+    end
+
+    return p27
+end
+
+task.spawn(function()
+    local moveEditorCli = customMoveVFX:FindFirstChild("MoveEditorCli")
+    local obj = moveEditorCli or customMoveVFX:WaitForChild("MoveEditorCli", 60)
+    local v35
+
+    if obj then
+        local animReplication = obj:FindFirstChild("AnimReplication")
+        v35 = animReplication or obj:WaitForChild("AnimReplication", 60)
+    else
+        v35 = obj
+    end
+
+    if not v35 then
+        return
+    end
+
+    local v36 = v35:Clone()
+    v36.Disabled = false
+    v36.Parent = players.LocalPlayer:WaitForChild("PlayerScripts")
+end)
+task.spawn(function()
+    local v37 = _G
+    -- aliased fastcall rawget (called via local/upvalue)
+
+    if rawget(v37, "playMoveEditorImpactFrames") ~= nil then
+        return
+    end
+
+    local obj2 = customMoveVFX:FindFirstChild("MoveEditorCli") or customMoveVFX:WaitForChild("MoveEditorCli", 60)
+    local v38
+
+    if obj2 then
+        v38 = obj2:FindFirstChild("MoveEditorCliHelper") or obj2:WaitForChild("MoveEditorCliHelper", 60)
+    else
+        v38 = obj2
+    end
+
+    local v39, v40 = pcall(require, v38)
+
+    if not v39 or type(v40) ~= "table" then
+        return
+    end
+
+    local newImpactFramesController = v40.newImpactFramesController
+
+    if type(newImpactFramesController) == "function" then
+        local t42 = {
+            ensureFxGui = nil,
+            ensureFxGui = function()
+                local localPlayer = players.LocalPlayer
+                local v41
+
+                if localPlayer then
+                    local playerGui = localPlayer:FindFirstChildOfClass("PlayerGui")
+                    v41 = playerGui or localPlayer:WaitForChild("PlayerGui", 10)
+                else
+                    v41 = localPlayer
+                end
+
+                if not v41 then
+                    return nil
+                end
+
+                local cMVFXImpactFramesGui = v41:FindFirstChild("CMVFXImpactFramesGui")
+
+                if not cMVFXImpactFramesGui then
+                    cMVFXImpactFramesGui = Instance.new("ScreenGui")
+                    cMVFXImpactFramesGui.Name = "CMVFXImpactFramesGui"
+                    cMVFXImpactFramesGui.ResetOnSpawn = false
+                    cMVFXImpactFramesGui.IgnoreGuiInset = true
+                    cMVFXImpactFramesGui.DisplayOrder = 10000
+                    cMVFXImpactFramesGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
+                    cMVFXImpactFramesGui.Parent = v41
+                end
+
+                return cMVFXImpactFramesGui
+            end
+        }
+        local v43, v44 = pcall(v40.newImpactFramesController, t42)
+
+        if not v43 or type(v44) ~= "table" then
+            return
+        end
+
+        local bindGlobals = v44.bindGlobals
+
+        if type(bindGlobals) == "function" then
+            v44.bindGlobals()
+            local v45 = replicatedStorage:FindFirstChild("Replication") or replicatedStorage:WaitForChild("Replication", 30)
+
+            if v45 then
+                v45.OnClientEvent:Connect(function(p46)
+                    if type(p46) ~= "table" or p46.Effect ~= "MoveEditorImpactFrames" then
+                        return
+                    end
+
+                    local v47 = _G
+                    -- aliased fastcall rawget (called via local/upvalue)
+                    local v48 = rawget(v47, "playMoveEditorImpactFrames")
+
+                    if type(v48) == "function" then
+                        pcall(v48, p46)
+                    end
+                end)
+            end
+
+            return
+        end
+
+        return
+    end
+end)
+local t_u49 = {}
+local t_u50 = {}
+
+local function fn_u54(p51)
+    for v52, v53 in ipairs(t_u50) do
+        if v53 == p51 then
+            table.remove(t_u50, v52)
+            break
+        end
+    end
+
+    t_u50[#t_u50 + 1] = p51
+end
+
+local function fn_u57(p55, p56)
+    if t_u49[p55] == nil then
+        t_u50[#t_u50 + 1] = p55
+
+        while #t_u50 > 30 do
+            t_u49[table.remove(t_u50, 1)] = nil
+        end
+    else
+        fn_u54(p55)
+    end
+
+    t_u49[p55] = p56
+end
+
+local function fn_u62(p58)
+    if type(p58) ~= "table" then
+        return p58
+    end
+
+    local t59 = {}
+
+    for v60, v61 in pairs(p58) do
+        t59[v60] = fn_u62(v61)
+    end
+
+    return t59
+end
+
+local localPlayer2 = players.LocalPlayer
+local t_u63 = {}
+local t_u64 = {}
+local t_u65 = {}
+
+local function fn_u76(p_u66, p_u67)
+    if type(p_u66) == "string" and p_u66 ~= "" then
+        local v68 = p_u67
+        p_u67 = tonumber(v68)
+
+        if p_u67 then
+            local v69 = p_u67
+            local v_u70 = tostring(v69) .. ":" .. p_u66
+
+            if t_u65[v_u70] then
+                return
+            end
+
+            t_u65[v_u70] = true
+            task.spawn(function()
+                local v71, v72 = pcall(function()
+                    return fetchMoveData:InvokeServer(p_u66, p_u67)
+                end)
+
+                if v71 and typeof(v72) == "buffer" then
+                    local v73 = moveContentHash.hashBuffer(v72)
+
+                    if not v73 then
+                        return
+                    end
+
+                    local v74 = t_u49[v73]
+
+                    if v74 ~= nil then
+                        fn_u54(v73)
+                    end
+
+                    if v74 == nil then
+                        local v75 = fn_u21(v72)
+
+                        if not v75 then
+                            return
+                        end
+
+                        fn_u57(v73, v75)
+                        v_u4.preloadMove(v75, v73)
+                        return
+                    end
+                else
+                    t_u65[v_u70] = nil
+                end
+            end)
+        else
+            return
+        end
+    else
+        return
+    end
+end
+
+local function fn_u78(obj3)
+    if typeof(obj3) == "Instance" and obj3:IsA("Tool") then
+        obj3.Equipped:Connect(function()
+            local v77 = obj3
+            local num2 = tonumber(v77:GetAttribute("MoveCreatorId"))
+
+            if num2 then
+                fn_u76(obj3.Name, num2)
+            end
+        end)
+    end
+end
+
+task.spawn(function()
+    local function fn81(p79)
+        if not p79 then
+            return
+        end
+
+        for _, obj4 in ipairs(p79:GetChildren()) do
+            if typeof(obj4) == "Instance" then
+                if obj4:IsA("Tool") then
+                    obj4.Equipped:Connect(function()
+                        local v80 = obj4
+                        local num3 = tonumber(v80:GetAttribute("MoveCreatorId"))
+
+                        if num3 then
+                            fn_u76(obj4.Name, num3)
+                        end
+                    end)
+                end
+            end
+        end
+
+        p79.ChildAdded:Connect(fn_u78)
+    end
+
+    fn81(localPlayer2:WaitForChild("Backpack", 30))
+
+    if localPlayer2.Character then
+        fn81(localPlayer2.Character)
+    end
+
+    localPlayer2.CharacterAdded:Connect(fn81)
+end)
+task.spawn(function()
+    local t_u82 = {}
+
+    local function fn_u90(p_u83, p_u84)
+        if type(p_u83) == "string" and p_u83 ~= "" then
+            local v85 = p_u84
+            p_u84 = tonumber(v85)
+
+            if p_u84 then
+                local v86 = p_u84
+                local v_u87 = tostring(v86) .. ":" .. p_u83
+
+                if t_u82[v_u87] then
+                    return
+                end
+
+                t_u82[v_u87] = true
+                task.spawn(function()
+                    local v88, v89 = pcall(function()
+                        return v_u5:InvokeServer(p_u83, p_u84)
+                    end)
+
+                    if v88 and type(v89) == "table" then
+                        v_u4.preloadList(v89)
+                    else
+                        t_u82[v_u87] = nil
+                    end
+                end)
+            else
+                return
+            end
+        else
+            return
+        end
+    end
+
+    local function fn_u92(obj5)
+        local v91 = typeof(obj5) == "Instance" and (obj5:IsA("Tool") and obj5:GetAttribute("MoveCreatorId"))
+
+        if v91 then
+            fn_u90(obj5.Name, v91)
+        end
+    end
+
+    local function fn_u94(obj6)
+        if typeof(obj6) ~= "Instance" then
+            return
+        end
+
+        for _, obj7 in ipairs(obj6:GetChildren()) do
+            if typeof(obj7) ~= "Instance" or not obj7:IsA("Tool") then
+                continue
+            end
+
+            local v93 = obj7:GetAttribute("MoveCreatorId")
+
+            if v93 then
+                fn_u90(obj7.Name, v93)
+            end
+        end
+
+        obj6.ChildAdded:Connect(fn_u92)
+    end
+
+    local function fn96(p95)
+        if p95 == localPlayer2 then
+            return
+        end
+
+        if p95.Character then
+            fn_u94(p95.Character)
+        end
+
+        p95.CharacterAdded:Connect(fn_u94)
+    end
+
+    for _, v97 in ipairs(players:GetPlayers()) do
+        if v97 == localPlayer2 then
+            continue
+        end
+
+        if v97.Character then
+            fn_u94(v97.Character)
+        end
+
+        v97.CharacterAdded:Connect(fn_u94)
+    end
+
+    players.PlayerAdded:Connect(fn96)
+end)
+task.spawn(function()
+    local function fn106(p_u98)
+        if p_u98.Character then
+            local character = p_u98.Character
+
+            if typeof(character) == "Instance" then
+                task.spawn(function()
+                    local v99 = os.clock() + 8
+
+                    while character:GetAttribute("CustomCharacter") == nil and (os.clock() < v99 and character.Parent) do
+                        task.wait(0.25)
+                    end
+
+                    local v100 = character:GetAttribute("CustomCharacter")
+
+                    if v100 == nil or v100 == "" then
+                        return
+                    end
+
+                    local preloadCharacter = v_u4.preloadCharacter
+                    local v101 = character
+                    local userId = p_u98.UserId
+                    preloadCharacter(v101, tostring(userId) .. ":" .. tostring(v100))
+                end)
+            end
+        end
+
+        p_u98.CharacterAdded:Connect(function(obj8)
+            local v_u102 = p_u98
+
+            if typeof(obj8) == "Instance" then
+                task.spawn(function()
+                    local v103 = os.clock() + 8
+
+                    while obj8:GetAttribute("CustomCharacter") == nil and (os.clock() < v103 and obj8.Parent) do
+                        task.wait(0.25)
+                    end
+
+                    local v104 = obj8:GetAttribute("CustomCharacter")
+
+                    if v104 == nil or v104 == "" then
+                        return
+                    end
+
+                    local preloadCharacter2 = v_u4.preloadCharacter
+                    local v105 = obj8
+                    local userId2 = v_u102.UserId
+                    preloadCharacter2(v105, tostring(userId2) .. ":" .. tostring(v104))
+                end)
+            end
+        end)
+    end
+
+    for _, v_u107 in ipairs(players:GetPlayers()) do
+        if v_u107.Character then
+            local character2 = v_u107.Character
+
+            if typeof(character2) == "Instance" then
+                task.spawn(function()
+                    local v108 = os.clock() + 8
+
+                    while character2:GetAttribute("CustomCharacter") == nil and (os.clock() < v108 and character2.Parent) do
+                        task.wait(0.25)
+                    end
+
+                    local v109 = character2:GetAttribute("CustomCharacter")
+
+                    if v109 == nil or v109 == "" then
+                        return
+                    end
+
+                    local preloadCharacter3 = v_u4.preloadCharacter
+                    local v110 = character2
+                    local userId3 = v_u107.UserId
+                    preloadCharacter3(v110, tostring(userId3) .. ":" .. tostring(v109))
+                end)
+            end
+        end
+
+        v_u107.CharacterAdded:Connect(function(obj9)
+            local v_u111 = v_u107
+
+            if typeof(obj9) == "Instance" then
+                task.spawn(function()
+                    local v112 = os.clock() + 8
+
+                    while obj9:GetAttribute("CustomCharacter") == nil and (os.clock() < v112 and obj9.Parent) do
+                        task.wait(0.25)
+                    end
+
+                    local v113 = obj9:GetAttribute("CustomCharacter")
+
+                    if v113 == nil or v113 == "" then
+                        return
+                    end
+
+                    local preloadCharacter4 = v_u4.preloadCharacter
+                    local v114 = obj9
+                    local userId4 = v_u111.UserId
+                    preloadCharacter4(v114, tostring(userId4) .. ":" .. tostring(v113))
+                end)
+            end
+        end)
+    end
+
+    players.PlayerAdded:Connect(fn106)
+end)
+livePlayCastEvent.OnClientEvent:Connect(function(p_u115)
+    if type(p_u115) == "table" then
+        local moveName = p_u115.moveName
+        local moveCreatorId = p_u115.moveCreatorId
+        local character3 = p_u115.character
+        local tempo = p_u115.tempo
+        local v_u116 = tonumber(tempo) or 1
+        local victim = p_u115.victim
+        local serverT0 = p_u115.serverT0
+        local num4 = tonumber(serverT0)
+        local runToken = p_u115.runToken
+
+        if type(runToken) == "string" then
+            t_u64[runToken] = num4
+        end
+
+        if typeof(character3) == "Instance" then
+            local v117 = localPlayer2
+
+            if v117 then
+                v117 = localPlayer2.Character
+            end
+
+            local _ = character3 == v117
+        end
+
+        if type(moveName) == "string" and moveName ~= "" then
+            if typeof(character3) == "Instance" and character3:IsA("Model") then
+                task.spawn(function()
+                    local bufHash = p_u115.bufHash
+                    local v118
+
+                    if type(bufHash) == "string" then
+                        v118 = p_u115.bufHash ~= "" and p_u115.bufHash
+                    else
+                        v118 = nil
+                    end
+
+                    local variantId = p_u115.variantId
+                    local v119 = tonumber(variantId) or 1
+                    local clock
+
+                    if v119 < 1 then
+                        clock = 1
+                    else
+                        local v120 = v119 + 0.5
+                        clock = math.floor(v120)
+                    end
+
+                    local v121
+
+                    if v118 then
+                        local v122 = t_u49[v118]
+
+                        if v122 ~= nil then
+                            fn_u54(v118)
+                        end
+
+                        v121 = v122
+                    else
+                        v121 = nil
+                    end
+
+                    local clock, clock, v123
+
+                    if v121 == nil then
+                        local v124
+                        v124, clock = pcall(function()
+                            return fetchMoveData:InvokeServer(moveName, moveCreatorId, character3)
+                        end)
+                        clock = clock
+                        local ty = typeof(clock)
+
+                        if not v124 then
+                            return
+                        end
+
+                        if ty == "buffer" then
+                            clock = fn_u21
+                            clock = clock(clock)
+
+                            if not clock then
+                                return
+                            end
+
+                            if v118 then
+                                fn_u57(v118, clock)
+                            end
+
+                            clock = fn_u62((fn_u34(clock, clock)))
+                            v123 = string.format("MISS-buffer(%dB)", buffer.len(clock))
+
+                            if shared.CrepCache then
+                                local CrepCache = shared.CrepCache
+                                CrepCache.movemiss += 1
+                            end
+                        else
+                            clock = type
+                            clock = clock(clock)
+
+                            if clock ~= "table" then
+                                return
+                            end
+
+                            v123 = "MISS-table(uncached)"
+                            clock = shared
+                            clock = clock.CrepCache
+
+                            if clock then
+                                clock = shared
+                                clock = clock.CrepCache
+                                clock.movemiss += 1
+                            end
+                        end
+                    else
+                        local v125 = fn_u62
+                        local v126 = fn_u34
+                        clock = clock
+                        clock = v125((v126(v121, clock)))
+                        v123 = "HIT(net~0)"
+
+                        if shared.CrepCache then
+                            local CrepCache = shared.CrepCache
+                            CrepCache.movehit += 1
+                        end
+                    end
+
+                    clock = moveName
+                    local str = tostring(clock)
+                    clock = ", bufhash "
+                    local str2 = tostring(v118)
+                    local str3 = tostring(v123)
+                    local v127 = #t_u50
+                    local _ = "cmvfx move cast, move " .. str .. clock .. str2 .. ", source " .. str3 .. ", cached moves held " .. tostring(v127)
+                    local n128 = 0
+                    local n129 = 0
+                    local n130 = 0
+                    clock = 0
+                    local n131 = 0
+                    local t132 = {}
+                    local data4 = clock.Data
+
+                    if type(data4) == "table" then
+                        local v133 = n131
+                        local v134 = n130
+
+                        for _, v135 in ipairs(clock.Data) do
+                            if type(v135) == "table" and (v135.EventType == "Particle" or v135.EventType == "Preset Mesh") then
+                                local v136 = n128 + 1
+                                local properties2 = v135.Properties
+                                local v137 = type(properties2) == "table" and v135.Properties or {}
+                                local __GeneratedParticleId = v137.__GeneratedParticleId
+                                local __GeneratedParticleSourceSnapshot = v137.__GeneratedParticleSourceSnapshot
+                                local v138
+
+                                if type(__GeneratedParticleId) == "string" then
+                                    v138 = __GeneratedParticleId ~= ""
+                                else
+                                    v138 = false
+                                end
+
+                                local v139
+
+                                if type(__GeneratedParticleSourceSnapshot) == "string" then
+                                    v139 = #__GeneratedParticleSourceSnapshot > 0
+                                else
+                                    v139 = false
+                                end
+
+                                if v138 or v139 then
+                                    local v140 = n129 + 1
+
+                                    if v139 then
+                                        n130 = v134 + 1
+                                        n129 = v140
+                                        n131 = v133
+                                        n128 = v136
+                                    else
+                                        clock += 1
+                                        local v141 = v137.__GeneratedParticleDisplayName or (v137.Name or v137.ParticleName or "?")
+
+                                        if #t132 < 12 then
+                                            local str4 = tostring(v141)
+                                            -- aliased fastcall table.insert (called via local/upvalue)
+                                            table.insert(t132, str4)
+                                            n129 = v140
+                                            n130 = v134
+                                            n131 = v133
+                                            n128 = v136
+                                        else
+                                            n129 = v140
+                                            n130 = v134
+                                            n131 = v133
+                                            n128 = v136
+                                        end
+                                    end
+                                else
+                                    n131 = v133 + 1
+                                    n130 = v134
+                                    n128 = v136
+                                end
+                            else
+                                n130 = v134
+                                n131 = v133
+                            end
+
+                            v133 = n131
+                            v134 = n130
+                        end
+                    end
+
+                    local n142 = 0
+                    local n143 = 0
+                    local n144 = 0
+                    clock = 0
+                    local n145 = 0
+                    local t146 = {}
+                    local data5 = clock.Data
+
+                    if type(data5) == "table" then
+                        for _, v147 in ipairs(clock.Data) do
+                            if type(v147) ~= "table" or v147.EventType ~= "Particle" then
+                                continue
+                            end
+
+                            local properties3 = v147.Properties
+
+                            if type(properties3) ~= "table" then
+                                continue
+                            end
+
+                            local properties4 = v147.Properties
+                            local presetName = properties4.PresetName
+
+                            if type(presetName) ~= "string" or presetName == "" then
+                                continue
+                            end
+
+                            local v148 = n142 + 1
+                            local emitterSpec = properties4.EmitterSpec
+                            local v149
+
+                            if type(emitterSpec) == "string" then
+                                v149 = #emitterSpec > 0
+                            else
+                                v149 = false
+                            end
+
+                            local __DeepSearchSourcePath = properties4.__DeepSearchSourcePath
+                            local v150
+
+                            if v149 then
+                                v150 = n143 + 1
+                            else
+                                v150 = n143
+                            end
+
+                            local v151
+
+                            if type(__DeepSearchSourcePath) == "string" and #__DeepSearchSourcePath > 0 then
+                                v151 = n144 + 1
+                            else
+                                v151 = n144
+                            end
+
+                            local v152 = properties4.PresetRootFolder or ""
+
+                            if tostring(v152) == "MoveEditorCustomPresetAttachments" then
+                                clock += 1
+                            end
+
+                            local __MoveEditorCompositePresetPayload = properties4.__MoveEditorCompositePresetPayload
+                            local v153
+
+                            if type(__MoveEditorCompositePresetPayload) == "string" and #__MoveEditorCompositePresetPayload > 0 then
+                                v153 = n145 + 1
+                            else
+                                v153 = n145
+                            end
+
+                            if v149 or #t146 >= 14 then
+                                n143 = v150
+                                n144 = v151
+                                n145 = v153
+                                n142 = v148
+                            else
+                                local str5 = tostring(presetName)
+                                table.insert(t146, str5:sub(1, 28))
+                                n143 = v150
+                                n144 = v151
+                                n145 = v153
+                                n142 = v148
+                            end
+                        end
+                    end
+
+                    local t_u154 = {}
+                    local t_u155 = {}
+                    clock = function(p156, p157)
+                        if p157 > 8 then
+                            return
+                        end
+
+                        local ty2 = type(p156)
+
+                        if ty2 == "string" then
+                            for v158 in p156:gmatch("rbxassetid://%d+") do
+                                if t_u154[v158] then
+                                    continue
+                                end
+
+                                t_u154[v158] = true
+
+                                if #t_u155 < 500 then
+                                    t_u155[#t_u155 + 1] = v158
+                                end
+                            end
+
+                            for v159 in p156:gmatch("rbxasset://[%w%./_%-]+") do
+                                if t_u154[v159] then
+                                    continue
+                                end
+
+                                t_u154[v159] = true
+
+                                if #t_u155 < 500 then
+                                    t_u155[#t_u155 + 1] = v159
+                                end
+                            end
+                        elseif ty2 == "table" then
+                            for v160, v161 in pairs(p156) do
+                                clock(v160, p157 + 1)
+                                clock(v161, p157 + 1)
+                            end
+                        end
+                    end
+                    local data6 = clock.Data
+
+                    if type(data6) == "table" then
+                        for _, v162 in ipairs(clock.Data) do
+                            clock(v162, 0)
+                        end
+                    end
+
+                    local contentProvider = game:GetService("ContentProvider")
+                    local n163 = 0
+                    local n164 = 0
+                    local v165 = n164
+                    local v166 = n163
+
+                    for _, v167 in ipairs(t_u155) do
+                        local v_u168
+
+                        if v167:match("^%d+$") then
+                            v_u168 = "rbxassetid://" .. v167 or v167
+                        else
+                            v_u168 = v167
+                        end
+
+                        local v169, v170 = pcall(function()
+                            return contentProvider:GetAssetFetchStatus(v_u168)
+                        end)
+
+                        if v169 and v170 == Enum.AssetFetchStatus.Success then
+                            n164 = v165 + 1
+                            n163 = v166
+                        else
+                            n163 = v166 + 1
+                            n164 = v165
+                        end
+
+                        v165 = n164
+                        v166 = n163
+                    end
+
+                    local v171 = moveName
+                    local str6 = tostring(v171)
+                    local v172 = #t_u155
+                    local _ = "cmvfx assets this cast, move " .. str6 .. ", distinct " .. tostring(v172) .. ", cold " .. tostring(v166) .. ", warm " .. tostring(v165)
+                    v_u4.preloadMove(clock, v118 or moveName)
+                    local instanceCount = game:GetService("Stats").InstanceCount
+                    local v173 = moveName
+                    clock = tostring(v173)
+                    local _ = "instance accounting, move " .. clock .. " START count " .. tostring(instanceCount)
+                    local start = headlessPlayback.start
+                    clock = character3
+                    start(clock, clock, victim, v_u116, clock.Metadata or clock.Settings, num4, runToken)
+                    local v174 = runToken
+
+                    if type(v174) == "string" then
+                        local v175 = t_u63
+                        local v176 = runToken
+                        clock = os.clock
+                        clock = clock()
+                        v175[v176] = clock
+                    end
+
+                    local v177 = runToken
+
+                    if type(v177) ~= "string" or runToken == "" then
+                        return
+                    end
+
+                    local v178 = nil
+                    clock = os.clock
+                    clock = clock()
+                    local v179 = clock + 3
+
+                    while true do
+                        clock = ipairs
+                        local v180, v181
+                        clock, v180, v181 = clock(character3:GetChildren())
+
+                        for _, v182 in clock, v180, v181 do
+                            if v182.Name == "__CMVFXMoveBind" and tostring(v182:GetAttribute("RunToken")) == runToken then
+                                v178 = v182
+                                break
+                            end
+                        end
+
+                        if v178 then
+                            break
+                        end
+
+                        clock = task.wait
+                        clock(0.05)
+                        clock = os.clock
+                        clock = clock()
+
+                        if v179 < clock then
+                            break
+                        end
+                    end
+
+                    if not v178 then
+                        return
+                    end
+
+                    clock = nil
+                    clock = v178.AncestryChanged:Connect(function(_, p183)
+                        if p183 ~= nil then
+                            return
+                        end
+
+                        if clock then
+                            clock:Disconnect()
+                        end
+
+                        local v184 = character3
+                        local v185
+
+                        if typeof(v184) == "Instance" then
+                            if character3.Parent == nil then
+                                v185 = false
+                            else
+                                v185 = true
+                            end
+                        else
+                            v185 = false
+                        end
+
+                        headlessPlayback.stop(runToken, not v185)
+                        task.spawn(function()
+                            local stats = game:GetService("Stats")
+                            local instanceCount2 = stats.InstanceCount
+                            task.wait(5)
+                            local instanceCount3 = stats.InstanceCount
+                            local v186 = moveName
+                            local str7 = tostring(v186)
+                            local str8 = tostring(instanceCount2)
+                            local v187 = instanceCount2 - instanceCount
+                            local str9 = tostring(v187)
+                            local str10 = tostring(instanceCount3)
+                            local v188 = instanceCount3 - instanceCount
+                            local _ = "instance accounting, move " .. str7 .. " END count " .. str8 .. " (spawned " .. str9 .. "), 5s after end count " .. str10 .. " (net leaked since start " .. tostring(v188) .. ")"
+                        end)
+                    end)
+                end)
+            end
+        else
+            return
+        end
+    else
+        return
+    end
+end)
+branchActivateEvent.OnClientEvent:Connect(function(p189)
+    if type(p189) == "table" then
+        local runToken2 = p189.runToken
+        local branchName = p189.branchName
+        local serverTime = p189.serverTime
+        local num5 = tonumber(serverTime)
+        local branchStartTime = p189.branchStartTime
+        local num6 = tonumber(branchStartTime)
+        local activeSet = p189.activeSet
+        local v190 = type(activeSet) == "table" and p189.activeSet
+        local branchOrdinal = p189.branchOrdinal
+        local num7 = tonumber(branchOrdinal)
+
+        if type(runToken2) ~= "string" or type(branchName) ~= "string" then
+            return
+        end
+
+        local collisionPos = p189.collisionPos
+        local proxyCF = p189.proxyCF
+        local v191 = p189.isExplosion == true
+        local v192 = p189.isProjectile == true
+        local v193 = (typeof(collisionPos) == "Vector3" or (typeof(proxyCF) == "CFrame" or (v191 or (v192 or p189.victim ~= nil)))) and {
+            ForcedCollisionPosition = nil,
+            ProxyCF = nil,
+            IsExplosion = nil,
+            IsProjectile = nil,
+            ProjectileVfxId = nil,
+            Victim = nil,
+            ForcedCollisionPosition = typeof(collisionPos) == "Vector3" and collisionPos and collisionPos or typeof(proxyCF) == "CFrame" and proxyCF.Position,
+            ProxyCF = typeof(proxyCF) == "CFrame" and proxyCF and proxyCF,
+            IsExplosion = v191,
+            IsProjectile = v192,
+            ProjectileVfxId = p189.projVfxId,
+            Victim = p189.victim
+        }
+        headlessPlayback.activateBranch(runToken2, branchName, num5, v193, num6, v190, num7)
+    else
+        return
+    end
+end)
