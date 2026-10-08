@@ -24,10 +24,7 @@ pub fn apply_all(block: &mut Block) {
     
     // Context-based variable naming (extract names from GetService, string literals, etc.)
     context_naming::apply_context_naming(block);
-    
-    // Clean up table constructors with duplicate keys
-    table_cleanup::cleanup_table_constructors(block);
-    
+
     // Mark unused variables with "_"
     unused_vars::mark_unused_variables(block);
     

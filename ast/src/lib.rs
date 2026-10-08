@@ -345,11 +345,20 @@ pub struct Block(pub Vec<Statement>);
 /// `a and a` folding and cond-expr matching see equal control-flow, not
 /// `PartialEq => false` on every If/While/Repeat.
 pub(crate) fn shared_blocks_equal(left: &Arc<Mutex<Block>>, right: &Arc<Mutex<Block>>) -> bool {
-    Arc::ptr_eq(left, right) || *left.lock() == *right.lock()
-}
-
-pub(crate) fn block_has_side_effects(block: &Arc<Mutex<Block>>) -> bool {
-    block.lock().iter().any(SideEffects::has_side_effects)
+    if Arc::ptr_eq(left, right) {
+        return true;
+    }
+    let a = left.lock();
+    let b = right.lock();
+    if a.len() != b.len() {
+        return false;
+    }
+    // Deep-comparing 10k-stmt if-bodies during `a and a` folding is
+    // worse than missing the fold.
+    if a.len() > 48 {
+        return false;
+    }
+    *a == *b
 }
 
 

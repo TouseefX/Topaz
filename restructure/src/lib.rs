@@ -202,9 +202,14 @@ impl GraphStructurer {
         // of full dominator solves. Large graphs: one match per outer
         // with fresh dominators, then gotos. Small graphs keep the old
         // inner recompute (cheap when n is tiny).
+        // Nested diamonds collapse one layer per outer. Sequential diamonds
+        // all collapse in one match_blocks pass. Huge CFGs: fewer CHK
+        // solves, more gotos, still full SSA before we get here.
         let large = n > 2000;
-        let (outer_cap, inner_cap, insert_cap) = if large {
-            (12u32, 1u32, 256u32)
+        let (outer_cap, inner_cap, insert_cap) = if n > 8000 {
+            (4u32, 1u32, 1024u32)
+        } else if large {
+            (6u32, 1u32, 512u32)
         } else if n > 400 {
             (16u32, 6u32, 96u32)
         } else {
@@ -225,7 +230,11 @@ impl GraphStructurer {
                 break;
             };
             let mut dominators = compute_idoms(self.function.graph(), entry);
-            let mut post_dom = post_dominators(self.function.graph());
+            let mut post_dom = if self.loop_headers.is_empty() {
+                IDom::dummy(entry)
+            } else {
+                post_dominators(self.function.graph())
+            };
             self.dom_idx = DomIndex::build(self.function.graph().node_indices(), &dominators);
             self.post_idx = DomIndex::build(self.function.graph().node_indices(), &post_dom);
 
@@ -234,7 +243,11 @@ impl GraphStructurer {
             while inner < inner_cap {
                 if inner > 0 && !large {
                     dominators = compute_idoms(self.function.graph(), entry);
-                    post_dom = post_dominators(self.function.graph());
+                    post_dom = if self.loop_headers.is_empty() {
+                        IDom::dummy(entry)
+                    } else {
+                        post_dominators(self.function.graph())
+                    };
                     self.dom_idx =
                         DomIndex::build(self.function.graph().node_indices(), &dominators);
                     self.post_idx =

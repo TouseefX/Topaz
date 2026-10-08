@@ -369,31 +369,37 @@ fn calculate(function: &Function) -> LivenessResult {
         }
     }
 
+    // Reuse two scratch sets. Allocating a fresh Dense/Sparse vector per
+    // node per iteration was gigabytes of churn on 20k-block CFGs.
+    let mut scratch_out = LiveBits::new(nbits);
+    let mut scratch_in = LiveBits::new(nbits);
     let mut changed = true;
     let mut iters = 0u32;
+    let max_iters = if node_count > 2000 { 8 } else { 32 };
     while changed {
         changed = false;
         iters += 1;
-        if iters > 32 || crate::past_decompile_deadline() {
+        if iters > max_iters || crate::past_decompile_deadline() {
             break;
         }
         for &node in &order {
-            let mut new_live_out = LiveBits::new(nbits);
+            scratch_out.clear();
             for succ in function.successor_blocks(node) {
                 if let Some(succ_live) = result.get(&succ) {
-                    new_live_out.or_and_not(&succ_live.live_in, &params[&succ]);
+                    scratch_out.or_and_not(&succ_live.live_in, &params[&succ]);
                 }
             }
-            new_live_out.union_with(&uses[&node]);
+            scratch_out.union_with(&uses[&node]);
 
-            let mut new_live_in = params[&node].clone();
-            new_live_in.union_with(&uses[&node]);
-            new_live_in.or_and_not(&new_live_out, &defs[&node]);
+            scratch_in.clear();
+            scratch_in.union_with(&params[&node]);
+            scratch_in.union_with(&uses[&node]);
+            scratch_in.or_and_not(&scratch_out, &defs[&node]);
 
             let old = result.get_mut(&node).unwrap();
-            if old.live_out != new_live_out || old.live_in != new_live_in {
-                old.live_out = new_live_out;
-                old.live_in = new_live_in;
+            if old.live_out != scratch_out || old.live_in != scratch_in {
+                std::mem::swap(&mut old.live_out, &mut scratch_out);
+                std::mem::swap(&mut old.live_in, &mut scratch_in);
                 changed = true;
             }
         }

@@ -151,11 +151,23 @@ impl<'a> Inliner<'a> {
             }
 
             
+            // Full lookback is O(stmts²) per block. After jump folding a
+            // 60k-line function can be a few thousand-stmt blocks.
+            let lookback = if self.function.graph().node_count() > 800 {
+                24usize
+            } else {
+                usize::MAX
+            };
             let mut index = 0;
             'w: while index < block.len() {
                 let mut groups_written = FxHashSet::default();
                 let mut allow_side_effects = true;
-                for stat_index in (0..index).rev() {
+                let lo = if lookback == usize::MAX {
+                    0
+                } else {
+                    index.saturating_sub(lookback)
+                };
+                for stat_index in (lo..index).rev() {
                     let mut values_read = stat_to_values_read[index]
                         .iter_mut()
                         .filter(|l| l.is_some())
@@ -352,7 +364,13 @@ impl<'a> Inliner<'a> {
                 let mut index = 0;
                 'w: while index < arg_to_values_read.len() {
                     let mut groups_written = FxHashSet::default();
-                    for stat_index in (0..self.function.block(node).unwrap().len()).rev() {
+                    let blen = self.function.block(node).unwrap().len();
+                    let lo = if lookback == usize::MAX {
+                        0
+                    } else {
+                        blen.saturating_sub(lookback)
+                    };
+                    for stat_index in (lo..blen).rev() {
                         let mut values_read = arg_to_values_read[index]
                             .iter_mut()
                             .filter(|l| l.is_some())
@@ -478,7 +496,13 @@ pub fn inline(
     // Large CFGs don't need 4 full inliner sweeps — 2 is enough and
     // keeps 60k-line dumps in the same ballpark as Oracle (~2s).
     let mut retries = 0;
-    let max_retries = if function.graph().node_count() > 800 { 2 } else { 4 };
+    let max_retries = if function.graph().node_count() > 2000 {
+        1
+    } else if function.graph().node_count() > 800 {
+        2
+    } else {
+        4
+    };
     while changed && retries < max_retries {
         retries += 1;
         changed = false;

@@ -487,6 +487,10 @@ impl<'a> Destructor<'a> {
 
     
     fn try_coalesce_copy_by_sharing(&mut self, local_a: &RcLocal, local_b: &RcLocal) -> bool {
+        // Walks the whole value class. On 20k-phi CFGs that is O(|SSA|²).
+        if self.function.graph().node_count() > 2000 {
+            return false;
+        }
         let con_class_x = self.get_congruence_class(local_a.clone()).clone();
         let con_class_y = self.get_congruence_class(local_b.clone()).clone();
 

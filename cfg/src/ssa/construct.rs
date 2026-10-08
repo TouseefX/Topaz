@@ -141,6 +141,12 @@ pub fn remove_unnecessary_params(
             }
         }
 
+        // Degree-zero chase is extra copy-prop. Identical-arg phis above
+        // already dropped. Skip the walk on huge CFGs.
+        if function.graph().node_count() > 2000 {
+            continue;
+        }
+
         let mut removable_params_degree_zero = removable_params
             .iter()
             .map(|(p, a)| (p.clone(), a))

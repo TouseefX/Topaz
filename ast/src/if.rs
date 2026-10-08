@@ -2,8 +2,7 @@ use parking_lot::Mutex;
 use triomphe::Arc;
 
 use crate::{
-    LocalRw, RcLocal, SideEffects, Traverse, block_has_side_effects, formatter::Formatter,
-    shared_blocks_equal,
+    LocalRw, RcLocal, SideEffects, Traverse, formatter::Formatter, shared_blocks_equal,
 };
 
 use super::{Block, RValue};
@@ -47,9 +46,12 @@ impl Traverse for If {
 
 impl SideEffects for If {
     fn has_side_effects(&self) -> bool {
+        // Do not walk then/else. Nested ifs made that O(n²) on 60k-line
+        // ASTs. Non-empty bodies are treated as effecting; empty ones
+        // still fold when the condition is pure.
         self.condition.has_side_effects()
-            || block_has_side_effects(&self.then_block)
-            || block_has_side_effects(&self.else_block)
+            || !self.then_block.lock().is_empty()
+            || !self.else_block.lock().is_empty()
     }
 }
 

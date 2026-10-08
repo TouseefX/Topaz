@@ -295,7 +295,7 @@ fn strip_fastcall_comments(block: &mut Block) {
 
 pub fn apply(block: &mut Block) {
     strip_fastcall_comments(block);
-    for _ in 0..4 {
+    for _ in 0..2 {
         let a = collapse_if_assign(block);
         let b = fold_typeof_default(block);
         if !a && !b {

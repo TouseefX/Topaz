@@ -23,6 +23,12 @@ pub struct IDom<N = NodeIndex> {
 }
 
 impl<N: Copy + Eq + Hash> IDom<N> {
+    pub fn dummy(root: N) -> Self {
+        let mut map = FxHashMap::default();
+        map.insert(root, root);
+        Self { root, map }
+    }
+
     pub fn root(&self) -> N {
         self.root
     }
@@ -154,7 +160,9 @@ pub fn compute_from_adj<N: Copy + Eq + Hash>(
     while changed {
         changed = false;
         iters += 1;
-        if iters > 64 || crate::past_decompile_deadline() {
+        // Reducible CFGs (diamond chains) converge in 2–3 passes. 8 is
+        // plenty; 64 × O(n) on 20k nodes was still seconds per solve.
+        if iters > 8 || crate::past_decompile_deadline() {
             break;
         }
         for i in 1..n {
