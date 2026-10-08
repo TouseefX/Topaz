@@ -3,7 +3,6 @@ use cfg::block::{BlockEdge, BranchType};
 use either::Either;
 
 use itertools::Itertools;
-use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
 use ast::{RcLocal, Statement};
@@ -26,7 +25,7 @@ pub struct Lifter<'a, 'b> {
     constants: FxHashMap<usize, ast::Literal>,
     function: Function,
     upvalues: Vec<RcLocal>,
-    lifted_functions: &'b mut Vec<(Arc<Mutex<ast::Function>>, Function, Vec<RcLocal>)>,
+    lifted_functions: &'b mut Vec<(ast::SharedFunction, Function, Vec<RcLocal>)>,
 }
 
 impl<'a, 'b> Lifter<'a, 'b> {
@@ -668,7 +667,7 @@ impl<'a, 'b> Lifter<'a, 'b> {
                         upvalues_passed.push(local);
                     }
 
-                    let ast_function = Arc::<Mutex<ast::Function>>::default();
+                    let ast_function = ast::share_function(ast::Function::default());
                     ast_function.lock().line = Some(closure.line_defined as usize);
 
                     let (function, upvalues) = Lifter::lift(closure, self.lifted_functions);
@@ -938,7 +937,7 @@ impl<'a, 'b> Lifter<'a, 'b> {
 
     pub fn lift(
         bytecode: &'a BytecodeFunction,
-        lifted_functions: &'b mut Vec<(Arc<Mutex<ast::Function>>, Function, Vec<RcLocal>)>,
+        lifted_functions: &'b mut Vec<(ast::SharedFunction, Function, Vec<RcLocal>)>,
     ) -> (Function, Vec<RcLocal>) {
         let mut context = Self {
             bytecode,

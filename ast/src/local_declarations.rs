@@ -3,16 +3,14 @@ use std::collections::BTreeMap;
 use by_address::ByAddress;
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
-use parking_lot::Mutex;
 use petgraph::{
     algo::dominators::{simple_fast, Dominators},
     prelude::{DiGraph, NodeIndex},
     Direction,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
-use triomphe::Arc;
 
-use crate::{Assign, Block, LocalRw, RcLocal, Statement};
+use crate::{Assign, Block, LocalRw, RcLocal, SharedBlock, Statement};
 
 /// Euler-tour dominates: O(n) preprocess, O(1) query. Replaces
 /// `dominators(n).collect_vec()` ∩ Intersect which was O(depth²) per local.
@@ -75,15 +73,15 @@ impl DomIdx {
 
 #[derive(Default)]
 pub struct LocalDeclarer {
-    block_to_node: FxHashMap<ByAddress<Arc<Mutex<Block>>>, NodeIndex>,
-    graph: DiGraph<(Option<Arc<Mutex<Block>>>, usize), ()>,
+    block_to_node: FxHashMap<ByAddress<SharedBlock>, NodeIndex>,
+    graph: DiGraph<(Option<SharedBlock>, usize), ()>,
     local_usages: IndexMap<RcLocal, FxHashMap<NodeIndex, usize>>,
-    declarations: FxHashMap<ByAddress<Arc<Mutex<Block>>>, BTreeMap<usize, IndexSet<RcLocal>>>,
+    declarations: FxHashMap<ByAddress<SharedBlock>, BTreeMap<usize, IndexSet<RcLocal>>>,
 }
 
 impl LocalDeclarer {
-    fn visit(&mut self, block: Arc<Mutex<Block>>, stat_index: usize) -> NodeIndex {
-        // Shared / cyclic `Arc<Mutex<Block>>` (half-destructed CFG) used
+    fn visit(&mut self, block: SharedBlock, stat_index: usize) -> NodeIndex {
+        // Shared / cyclic `SharedBlock` (half-destructed CFG) used
         // to re-enter `block.lock()` and sleep forever on parking_lot.
         if let Some(&existing) = self.block_to_node.get(&ByAddress(block.clone())) {
             return existing;
@@ -94,12 +92,12 @@ impl LocalDeclarer {
         enum Nested {
             If {
                 stat_index: usize,
-                then_b: Arc<Mutex<Block>>,
-                else_b: Arc<Mutex<Block>>,
+                then_b: SharedBlock,
+                else_b: SharedBlock,
             },
             One {
                 stat_index: usize,
-                child: Arc<Mutex<Block>>,
+                child: SharedBlock,
             },
         }
         let mut nested = Vec::new();
@@ -168,7 +166,7 @@ impl LocalDeclarer {
 
     pub fn declare_locals(
         mut self,
-        root_block: Arc<Mutex<Block>>,
+        root_block: SharedBlock,
         locals_to_ignore: &FxHashSet<RcLocal>,
     ) {
         let root_node = self.visit(root_block, 0);

@@ -39,7 +39,7 @@ fn is_identity(stmt: &Statement) -> bool {
     }
 }
 
-fn loop_body_arc(stmt: &Statement) -> Option<triomphe::Arc<parking_lot::Mutex<Block>>> {
+fn loop_body_arc(stmt: &Statement) -> Option<crate::SharedBlock> {
     match stmt {
         Statement::NumericFor(s) => Some(s.block.clone()),
         Statement::GenericFor(s) => Some(s.block.clone()),
@@ -484,7 +484,7 @@ mod tests {
             body: Block::default(),
         };
         let closure = crate::Closure {
-            function: by_address::ByAddress(triomphe::Arc::new(parking_lot::Mutex::new(inner))),
+            function: by_address::ByAddress(crate::share_function(inner)),
             upvalues: vec![crate::Upvalue::Ref(cb.clone())],
         };
         let call = Call::new(

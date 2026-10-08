@@ -1,11 +1,9 @@
 use crate::{
-    has_side_effects, shared_blocks_equal, Assign, Block, LValue, LocalRw, RValue, RcLocal,
-    SideEffects, Traverse,
+    has_side_effects, share_block, shared_blocks_equal, Assign, Block, LValue, LocalRw, RValue,
+    RcLocal, SharedBlock, SideEffects, Traverse,
 };
 use itertools::Itertools;
-use parking_lot::Mutex;
 use std::fmt;
-use triomphe::Arc;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct NumForInit {
@@ -179,7 +177,7 @@ pub struct NumericFor {
     pub step: RValue,
     
     pub counter: RcLocal,
-    pub block: Arc<Mutex<Block>>,
+    pub block: SharedBlock,
 }
 
 impl PartialEq for NumericFor {
@@ -207,7 +205,7 @@ impl NumericFor {
             limit,
             step,
             counter,
-            block: Arc::new(block.into()),
+            block: share_block(block),
         }
     }
 }
@@ -422,7 +420,7 @@ impl fmt::Display for GenericForNext {
 pub struct GenericFor {
     pub res_locals: Vec<RcLocal>,
     pub right: Vec<RValue>,
-    pub block: Arc<Mutex<Block>>,
+    pub block: SharedBlock,
 }
 
 impl PartialEq for GenericFor {
@@ -438,7 +436,7 @@ impl GenericFor {
         Self {
             res_locals,
             right,
-            block: Arc::new(block.into()),
+            block: share_block(block),
         }
     }
 }

@@ -9,7 +9,6 @@ use cfg::ssa::{
 };
 use indexmap::IndexMap;
 use lifter::Lifter;
-use parking_lot::Mutex;
 use rustc_hash::{FxHashMap, FxHashSet};
 use triomphe::Arc;
 
@@ -38,7 +37,7 @@ pub fn decompile_bytecode(bytecode: &[u8]) -> String {
     let chunk = Chunk::parse(bytecode).unwrap().1;
     let mut lifted = Vec::new();
     let (function, upvalues) = Lifter::lift(&chunk.function, &mut lifted);
-    lifted.push((Arc::<Mutex<_>>::default(), function, upvalues));
+    lifted.push((ast::share_function(ast::Function::default()), function, upvalues));
     lifted.reverse();
 
     let (main, ..) = lifted.first().unwrap().clone();
@@ -93,7 +92,7 @@ pub fn decompile_bytecode(bytecode: &[u8]) -> String {
             let params = std::mem::take(&mut function.parameters);
             let is_variadic = function.is_variadic;
             let func_line = function.line;
-            let block = Arc::new(restructure::lift(function).into());
+            let block = ast::share_block(restructure::lift(function));
             LocalDeclarer::default().declare_locals(
                 Arc::clone(&block),
                 &upvalues_in.iter().chain(params.iter()).cloned().collect(),
@@ -258,7 +257,7 @@ fn propagate_names_block(block: &mut ast::Block, captured: &FxHashSet<ast::RcLoc
 
 fn link_upvalues(
     body: &mut ast::Block,
-    upvalues: &mut FxHashMap<ByAddress<Arc<Mutex<ast::Function>>>, Vec<ast::RcLocal>>,
+    upvalues: &mut FxHashMap<ByAddress<ast::SharedFunction>, Vec<ast::RcLocal>>,
 ) {
     for stat in &mut body.0 {
         stat.traverse_rvalues(&mut |rvalue| {

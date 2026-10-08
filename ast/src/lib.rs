@@ -3,7 +3,7 @@ use enum_as_inner::EnumAsInner;
 use enum_dispatch::enum_dispatch;
 use formatter::Formatter;
 use itertools::Either;
-use parking_lot::Mutex;
+use parking_lot::ReentrantMutex;
 use triomphe::Arc;
 
 use std::{
@@ -341,10 +341,27 @@ impl fmt::Display for Statement {
 #[derive(Debug, PartialEq, Clone, Default, From)]
 pub struct Block(pub Vec<Statement>);
 
+/// `if`/`while`/`function` bodies. `parking_lot::Mutex` is **not**
+/// reentrant: a 8k-block elseif dispatcher aliases child `Arc`s via
+/// `Statement::clone()`, then lock-then-recurse self-deadlocks. Same
+/// thread may now re-enter.
+pub type SharedBlock = Arc<ReentrantMutex<Block>>;
+pub type SharedFunction = Arc<ReentrantMutex<Function>>;
+
+#[inline]
+pub fn share_block(block: Block) -> SharedBlock {
+    Arc::new(ReentrantMutex::new(block))
+}
+
+#[inline]
+pub fn share_function(function: Function) -> SharedFunction {
+    Arc::new(ReentrantMutex::new(function))
+}
+
 /// Medal-improved: compare shared `if`/`while` bodies by pointer first so
 /// `a and a` folding and cond-expr matching see equal control-flow, not
 /// `PartialEq => false` on every If/While/Repeat.
-pub(crate) fn shared_blocks_equal(left: &Arc<Mutex<Block>>, right: &Arc<Mutex<Block>>) -> bool {
+pub(crate) fn shared_blocks_equal(left: &SharedBlock, right: &SharedBlock) -> bool {
     if Arc::ptr_eq(left, right) {
         return true;
     }

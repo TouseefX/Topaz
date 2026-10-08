@@ -1,9 +1,7 @@
 use ast::Reduce;
 use cfg::block::{BlockEdge, BranchType};
 use itertools::Itertools;
-use parking_lot::Mutex;
 use petgraph::visit::EdgeRef;
-use triomphe::Arc;
 use tuple::Map;
 
 use crate::GraphStructurer;
@@ -109,11 +107,11 @@ impl GraphStructurer {
                     if let Some(if_stat) = block.last_mut().unwrap().as_if_mut() {
                         if then_target == entry {
                             if_stat.then_block =
-                                Arc::new(Mutex::new(vec![ast::Continue {}.into()].into()));
+                                ast::share_block(vec![ast::Continue {}.into()].into());
                             true
                         } else if else_target == entry {
                             if_stat.else_block =
-                                Arc::new(Mutex::new(vec![ast::Continue {}.into()].into()));
+                                ast::share_block(vec![ast::Continue {}.into()].into());
                             true
                         } else {
                             false
@@ -150,8 +148,8 @@ impl GraphStructurer {
         let block = self.function.block_mut(entry).unwrap();
         
         let if_stat = block.last_mut().unwrap().as_if_mut().unwrap();
-        if_stat.then_block = Arc::new(then_block.into());
-        if_stat.else_block = Arc::new(else_block.into());
+        if_stat.then_block = ast::share_block(then_block);
+        if_stat.else_block = ast::share_block(else_block);
         Self::simplify_if(if_stat);
 
         let after = Self::expand_if(if_stat);
@@ -206,7 +204,7 @@ impl GraphStructurer {
 
             let block = self.function.block_mut(entry).unwrap();
             let if_stat = block.last_mut().unwrap().as_if_mut().unwrap();
-            if_stat.then_block = Arc::new(then_block.into());
+            if_stat.then_block = ast::share_block(then_block);
 
             if inverted {
                 if_stat.condition =
@@ -284,17 +282,17 @@ impl GraphStructurer {
         let block = self.function.block_mut(entry).unwrap();
         if let Some(if_stat) = block.last_mut().unwrap().as_if_mut() {
             if then_node == header && !header_successors.contains(&entry) && then_main_cont {
-                if_stat.then_block = Arc::new(Mutex::new(vec![ast::Continue {}.into()].into()));
+                if_stat.then_block = ast::share_block(vec![ast::Continue {}.into()].into());
                 changed = true;
             } else if Some(then_node) == next {
-                if_stat.then_block = Arc::new(Mutex::new(vec![ast::Break {}.into()].into()));
+                if_stat.then_block = ast::share_block(vec![ast::Break {}.into()].into());
                 changed = true;
             }
             if else_node == header && !header_successors.contains(&entry) && else_main_cont {
-                if_stat.else_block = Arc::new(Mutex::new(vec![ast::Continue {}.into()].into()));
+                if_stat.else_block = ast::share_block(vec![ast::Continue {}.into()].into());
                 changed = true;
             } else if Some(else_node) == next {
-                if_stat.else_block = Arc::new(Mutex::new(vec![ast::Break {}.into()].into()));
+                if_stat.else_block = ast::share_block(vec![ast::Break {}.into()].into());
                 changed = true;
             }
             if !if_stat.then_block.lock().is_empty() && if_stat.else_block.lock().is_empty() {

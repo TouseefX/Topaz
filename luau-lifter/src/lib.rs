@@ -23,11 +23,11 @@ use indexmap::IndexMap;
 
 use lifter::Lifter;
 
-use parking_lot::Mutex;
 use petgraph::visit::Dfs;
 
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use triomphe::Arc;
 
@@ -149,16 +149,16 @@ fn decompile_from_chunk(chunk: deserializer::chunk::Chunk, encode_key: u8) -> St
 }
 
 struct LiftedItem {
-    ast_function: Arc<Mutex<ast::Function>>,
+    ast_function: ast::SharedFunction,
     function: Function,
     upvalues_in: Vec<ast::RcLocal>,
-    child_asts: Vec<ByAddress<Arc<Mutex<ast::Function>>>>,
+    child_asts: Vec<ByAddress<ast::SharedFunction>>,
 }
 
 fn decompile_one(
     item: LiftedItem,
     deadline: Instant,
-) -> (ByAddress<Arc<Mutex<ast::Function>>>, Vec<ast::RcLocal>) {
+) -> (ByAddress<ast::SharedFunction>, Vec<ast::RcLocal>) {
     // Rayon workers do not inherit the parent thread_local deadline.
     cfg::set_decompile_deadline(Some(deadline));
     let ast_clone = item.ast_function.clone();
@@ -189,8 +189,8 @@ fn decompile_one(
 fn decompile_lifted_waves(
     mut lifted: Vec<LiftedItem>,
     deadline: Instant,
-) -> FxHashMap<ByAddress<Arc<Mutex<ast::Function>>>, Vec<ast::RcLocal>> {
-    let mut done: FxHashSet<ByAddress<Arc<Mutex<ast::Function>>>> = FxHashSet::default();
+) -> FxHashMap<ByAddress<ast::SharedFunction>, Vec<ast::RcLocal>> {
+    let mut done: FxHashSet<ByAddress<ast::SharedFunction>> = FxHashSet::default();
     let mut upvalues = FxHashMap::default();
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -207,7 +207,7 @@ fn decompile_lifted_waves(
     };
 
     let run_wave = |ready: Vec<LiftedItem>| -> Vec<(
-        ByAddress<Arc<Mutex<ast::Function>>>,
+        ByAddress<ast::SharedFunction>,
         Vec<ast::RcLocal>,
     )> {
         if ready.len() <= 1 {
@@ -271,7 +271,7 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8
         d
     });
     let mut lifted = Vec::new();
-    let mut stack = vec![(Arc::<Mutex<ast::Function>>::default(), chunk.main)];
+    let mut stack = vec![(ast::share_function(ast::Function::default()), chunk.main)];
     while let Some((ast_func, func_id)) = stack.pop() {
         if Instant::now() >= deadline {
             ast_func.lock().body.push(
@@ -324,23 +324,173 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8
 
     let main = ByAddress(main);
     upvalues.remove(&main);
-    let mut body = Arc::try_unwrap(main.0).unwrap().into_inner().body;
-    link_upvalues(&mut body, &mut upvalues);
-    // 60k+ source lines. Do not drop naming/goto-fold at 8k.
+    let body = Arc::try_unwrap(main.0).unwrap().into_inner().body;
+
+    // Post-wave used to self-deadlock on aliased elseif Arcs. ReentrantMutex
+    // plus this recv_timeout means a hang still returns instead of sitting
+    // at 0% CPU until the client is killed.
+    let wait = deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_secs(15));
+    let (tx, rx) = mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("topaz-post".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            let _ = tx.send(run_post_wave(body, upvalues));
+        });
+    match spawned {
+        Ok(_) => match rx.recv_timeout(wait) {
+            Ok(s) => s,
+            Err(_) => {
+                "-- Decompiled with Topaz\n-- Error: post-process timed out\n".into()
+            }
+        },
+        Err(_) => {
+            "-- Decompiled with Topaz\n-- Error: failed to spawn post-process thread\n"
+                .into()
+        }
+    }
+}
+
+fn run_post_wave(
+    mut body: ast::Block,
+    mut upvalues: FxHashMap<ByAddress<ast::SharedFunction>, Vec<ast::RcLocal>>,
+) -> String {
+    let dbg = std::env::var_os("TOPAZ_DEBUG_CYCLES").is_some();
+    macro_rules! step {
+        ($name:expr, $e:expr) => {{
+            if dbg {
+                eprintln!("[post] entering {}", $name);
+            }
+            $e;
+            if dbg {
+                eprintln!("[post] after {}: {}", $name, report_cycles(&mut body));
+            }
+        }};
+    }
+    if dbg {
+        eprintln!("[post] start: {}", report_cycles(&mut body));
+    }
+    step!("link_upvalues", link_upvalues(&mut body, &mut upvalues));
     const QUALITY_STMT_CAP: usize = 250_000;
     if body.0.len() >= 8 && body.0.len() < QUALITY_STMT_CAP {
-        ast::context_naming::apply_context_naming(&mut body);
-        propagate_names(&mut body);
-        inline_short_gotos(&mut body);
-        ast::guard_clauses::apply_guard_clauses(&mut body);
+        step!(
+            "apply_context_naming",
+            ast::context_naming::apply_context_naming(&mut body)
+        );
+        step!("propagate_names", propagate_names(&mut body));
+        step!("inline_short_gotos", inline_short_gotos(&mut body));
+        step!(
+            "apply_guard_clauses",
+            ast::guard_clauses::apply_guard_clauses(&mut body)
+        );
     }
     if body.0.len() < QUALITY_STMT_CAP {
-        name_locals(&mut body, true);
+        step!("name_locals", name_locals(&mut body, true));
     }
-
     format!(
         "-- Decompiled with Topaz\n-- Created by: Andrew and TouseefX\n\n{}",
         body
+    )
+}
+
+/// `TOPAZ_DEBUG_CYCLES=1`: report blocks reachable from themselves
+/// (would self-deadlock a non-reentrant mutex) and Arcs shared by more
+/// than one parent (shallow `Statement::clone()`).
+fn walk_block(
+    block: &mut ast::Block,
+    on_path: &mut Vec<*const ()>,
+    seen: &mut FxHashSet<*const ()>,
+    shared: &mut usize,
+    trail: &mut Vec<&'static str>,
+) -> Option<String> {
+    for stat in &mut block.0 {
+        let mut found: Option<String> = None;
+        stat.traverse_rvalues(&mut |rvalue| {
+            if found.is_some() {
+                return;
+            }
+            if let ast::RValue::Closure(c) = rvalue {
+                let ptr = Arc::as_ptr(&c.function.0) as *const ();
+                if on_path.contains(&ptr) {
+                    found = Some("closure function reached again".into());
+                } else if seen.insert(ptr) {
+                    if let Some(mut g) = c.function.try_lock() {
+                        on_path.push(ptr);
+                        trail.push("closure");
+                        found = walk_block(&mut g.body, on_path, seen, shared, trail);
+                        trail.pop();
+                        on_path.pop();
+                    } else {
+                        found = Some("closure function already locked".into());
+                    }
+                } else {
+                    *shared += 1;
+                }
+            }
+        });
+        if found.is_some() {
+            return found;
+        }
+
+        let kids: Vec<(&'static str, ast::SharedBlock)> = match stat {
+            ast::Statement::If(i) => vec![
+                ("then", i.then_block.clone()),
+                ("else", i.else_block.clone()),
+            ],
+            ast::Statement::While(w) => vec![("while", w.block.clone())],
+            ast::Statement::Repeat(r) => vec![("repeat", r.block.clone())],
+            ast::Statement::NumericFor(f) => vec![("for", f.block.clone())],
+            ast::Statement::GenericFor(f) => vec![("for-in", f.block.clone())],
+            _ => continue,
+        };
+        for (tag, m) in kids {
+            let ptr = Arc::as_ptr(&m) as *const ();
+            if on_path.contains(&ptr) {
+                let start = trail.len().saturating_sub(12);
+                return Some(format!(
+                    "CYCLE at depth {} via ...{:?} -> {}",
+                    trail.len(),
+                    &trail[start..],
+                    tag
+                ));
+            }
+            if !seen.insert(ptr) {
+                *shared += 1;
+                continue;
+            }
+            let Some(mut guard) = m.try_lock() else {
+                return Some(format!(
+                    "block already locked at depth {} ({})",
+                    trail.len(),
+                    tag
+                ));
+            };
+            on_path.push(ptr);
+            trail.push(tag);
+            let r = walk_block(&mut guard, on_path, seen, shared, trail);
+            trail.pop();
+            on_path.pop();
+            if r.is_some() {
+                return r;
+            }
+        }
+    }
+    None
+}
+
+fn report_cycles(body: &mut ast::Block) -> String {
+    let mut on_path = Vec::new();
+    let mut seen = FxHashSet::default();
+    let mut shared = 0usize;
+    let mut trail = Vec::new();
+    let cyc = walk_block(body, &mut on_path, &mut seen, &mut shared, &mut trail);
+    format!(
+        "{} blocks, {} shared, {}",
+        seen.len(),
+        shared,
+        cyc.unwrap_or_else(|| "no cycle".into())
     )
 }
 
@@ -633,14 +783,14 @@ fn flatten_cfg(function: &Function) -> ast::Block {
 }
 
 fn finish_function(
-    ast_function: Arc<Mutex<ast::Function>>,
+    ast_function: ast::SharedFunction,
     body: ast::Block,
     params: Vec<ast::RcLocal>,
     is_variadic: bool,
     func_line: Option<usize>,
     upvalues_in: Vec<ast::RcLocal>,
     post: bool,
-) -> (ByAddress<Arc<Mutex<ast::Function>>>, Vec<ast::RcLocal>) {
+) -> (ByAddress<ast::SharedFunction>, Vec<ast::RcLocal>) {
     {
         let mut ast_function = ast_function.lock();
         ast_function.body = body;
@@ -655,11 +805,11 @@ fn finish_function(
 }
 
 fn decompile_function(
-    ast_function: Arc<Mutex<ast::Function>>,
+    ast_function: ast::SharedFunction,
     mut function: Function,
     upvalues_in: Vec<ast::RcLocal>,
     deadline: Instant,
-) -> (ByAddress<Arc<Mutex<ast::Function>>>, Vec<ast::RcLocal>) {
+) -> (ByAddress<ast::SharedFunction>, Vec<ast::RcLocal>) {
     let params = function.parameters.clone();
     let is_variadic = function.is_variadic;
     let func_line = function.line;
@@ -787,7 +937,7 @@ fn decompile_function(
         Ok(b) => b,
         Err(_) => ast::Block::default(),
     };
-    let block = Arc::new(body.into());
+    let block = ast::share_block(body);
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         LocalDeclarer::default().declare_locals(
             Arc::clone(&block),
@@ -809,7 +959,7 @@ fn decompile_function(
 
 fn link_upvalues(
     body: &mut ast::Block,
-    upvalues: &mut FxHashMap<ByAddress<Arc<Mutex<ast::Function>>>, Vec<ast::RcLocal>>,
+    upvalues: &mut FxHashMap<ByAddress<ast::SharedFunction>, Vec<ast::RcLocal>>,
 ) {
     if cfg::past_decompile_deadline() {
         return;

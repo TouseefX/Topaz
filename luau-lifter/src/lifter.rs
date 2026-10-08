@@ -3,11 +3,9 @@ use anyhow::Result;
 use by_address::ByAddress;
 
 use itertools::Itertools;
-use parking_lot::Mutex;
 use petgraph::stable_graph::NodeIndex;
 
 use rustc_hash::FxHashMap;
-use triomphe::Arc;
 
 use super::{
     deserializer::{
@@ -36,7 +34,7 @@ pub struct Lifter<'a> {
     /// disambiguate nested/sibling numeric-for loops.
     for_loops: FxHashMap<usize, usize>,
     function: Function,
-    child_functions: FxHashMap<ByAddress<Arc<Mutex<ast::Function>>>, usize>,
+    child_functions: FxHashMap<ByAddress<ast::SharedFunction>, usize>,
     register_map: FxHashMap<usize, ast::RcLocal>,
     constant_map: FxHashMap<usize, ast::Literal>,
     current_node: Option<NodeIndex>,
@@ -53,7 +51,7 @@ impl<'a> Lifter<'a> {
     ) -> (
         Function,
         Vec<ast::RcLocal>,
-        FxHashMap<ByAddress<Arc<Mutex<ast::Function>>>, usize>,
+        FxHashMap<ByAddress<ast::SharedFunction>, usize>,
     ) {
         let bytecode_func = &f_list[function_id];
         let mut debug_register_names = FxHashMap::default();
@@ -1794,7 +1792,7 @@ impl<'a> Lifter<'a> {
                                 }
                             }
 
-                            let function = Arc::<Mutex<_>>::default();
+                            let function = ast::share_function(ast::Function::default());
                             self.child_functions
                                 .insert(ByAddress(function.clone()), func_index as usize);
                             {

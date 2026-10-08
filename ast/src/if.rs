@@ -1,8 +1,6 @@
-use parking_lot::Mutex;
-use triomphe::Arc;
-
 use crate::{
-    LocalRw, RcLocal, SideEffects, Traverse, formatter::Formatter, shared_blocks_equal,
+    LocalRw, RcLocal, SharedBlock, SideEffects, Traverse, formatter::Formatter, share_block,
+    shared_blocks_equal,
 };
 
 use super::{Block, RValue};
@@ -12,8 +10,8 @@ use std::fmt;
 #[derive(Debug, Clone)]
 pub struct If {
     pub condition: RValue,
-    pub then_block: Arc<Mutex<Block>>,
-    pub else_block: Arc<Mutex<Block>>,
+    pub then_block: SharedBlock,
+    pub else_block: SharedBlock,
 }
 
 impl PartialEq for If {
@@ -28,8 +26,8 @@ impl If {
     pub fn new(condition: RValue, then_block: Block, else_block: Block) -> Self {
         Self {
             condition,
-            then_block: Arc::new(then_block.into()),
-            else_block: Arc::new(else_block.into()),
+            then_block: share_block(then_block),
+            else_block: share_block(else_block),
         }
     }
 }
