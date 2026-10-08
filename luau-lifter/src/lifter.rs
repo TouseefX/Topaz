@@ -164,7 +164,10 @@ impl<'a> Lifter<'a> {
 
         self.function.is_variadic = self.function_list[self.function.id].is_vararg;
 
-        for (start_pc, end_pc) in block_ranges {
+        for (i, (start_pc, end_pc)) in block_ranges.into_iter().enumerate() {
+            if i & 31 == 0 && cfg::past_decompile_deadline() {
+                break;
+            }
             self.current_node = Some(self.block_to_node(start_pc));
             let (statements, edges) = self.lift_block(start_pc, end_pc);
             let block = self.function.block_mut(self.current_node.unwrap()).unwrap();
@@ -200,6 +203,9 @@ impl<'a> Lifter<'a> {
         // works regardless of CFG shape.
         let mut open_for_preps: Vec<usize> = Vec::new();
         for (insn_index, insn) in instructions.iter().enumerate() {
+            if insn_index & 4095 == 0 && cfg::past_decompile_deadline() {
+                anyhow::bail!("lift timed out (discover_blocks)");
+            }
             if let Instruction::AD { op_code: OpCode::LOP_FORNPREP, .. } = insn {
                 open_for_preps.push(insn_index);
             } else if let Instruction::AD { op_code: OpCode::LOP_FORNLOOP, .. } = insn {
@@ -217,6 +223,9 @@ impl<'a> Lifter<'a> {
 
         for (insn_index, insn) in instructions.iter().enumerate()
         {
+            if insn_index & 4095 == 0 && cfg::past_decompile_deadline() {
+                anyhow::bail!("lift timed out (discover_blocks)");
+            }
             match insn {
                 Instruction::BC { op_code, c, .. } => match op_code {
                     OpCode::LOP_LOADB if *c != 0 => {

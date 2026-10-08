@@ -50,6 +50,7 @@ use triomphe::Arc;
 pub fn decompile_bytecode_via_luaur(bytecode: &[u8], encode_key: u8) -> String {
     // Force loadsafe_ir (luaur-aligned raw IR). Key 0 → 1 (plain).
     let key = if encode_key == 0 { 1 } else { encode_key };
+    begin_decompile_deadline();
     match deserializer::loadsafe_ir::decode_chunk(bytecode, key) {
         Ok(c) => decompile_from_chunk(c, key),
         Err(e) => format!("failed to deserialize bytecode: {e}"),
@@ -79,6 +80,7 @@ pub fn decompile_bytecode_via_ruau(bytecode: &[u8], encode_key: u8) -> String {
 /// tables and constant payloads are not keyed.
 pub fn decompile_bytecode_default(bytecode: &[u8], encode_key: u8) -> String {
     ast::reset_local_id_counter();
+    begin_decompile_deadline();
     match decode_best(bytecode, encode_key) {
         Ok((c, key)) => decompile_from_chunk(c, key),
         Err(e) => format!("failed to deserialize bytecode: {e}"),
@@ -109,7 +111,13 @@ fn looks_like_luaur_plain_bytecode(bytecode: &[u8]) -> bool {
 fn decompile_from_chunk(chunk: deserializer::chunk::Chunk, encode_key: u8) -> String {
     const PANIC_MSG: &str =
         "-- Decompiled with Topaz\n-- Error: decompilation panicked\n";
+    // thread_local deadline does not follow us onto the 64 MB lift
+    // thread — copy the Instant so decode + lift share one 180s budget.
+    let inherited = cfg::decompile_deadline();
     let job = move || {
+        if let Some(d) = inherited {
+            cfg::set_decompile_deadline(Some(d));
+        }
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             decompile_from_chunk_inner(chunk, encode_key)
         }))
@@ -151,6 +159,8 @@ fn decompile_one(
     item: LiftedItem,
     deadline: Instant,
 ) -> (ByAddress<Arc<Mutex<ast::Function>>>, Vec<ast::RcLocal>) {
+    // Rayon workers do not inherit the parent thread_local deadline.
+    cfg::set_decompile_deadline(Some(deadline));
     let ast_clone = item.ast_function.clone();
     if Instant::now() >= deadline {
         ast_clone.lock().body.push(
@@ -253,11 +263,13 @@ fn decompile_lifted_waves(
 }
 
 fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8) -> String {
-    // Budget covers lift + SSA. 60k-line scripts used to hang forever in
-    // Lifter::lift / construct before the old deadline was even created.
-    // 60k-line body, 16 MB decoded IR. SSA still runs; flatten only if late.
-    let deadline = Instant::now() + Duration::from_secs(180);
-    cfg::set_decompile_deadline(Some(deadline));
+    // Budget covers decode + lift + SSA. Armed before decode_best so a
+    // 21 MB AUX-expanded dump cannot hang in the loader forever.
+    let deadline = cfg::decompile_deadline().unwrap_or_else(|| {
+        let d = Instant::now() + Duration::from_secs(180);
+        cfg::set_decompile_deadline(Some(d));
+        d
+    });
     let mut lifted = Vec::new();
     let mut stack = vec![(Arc::<Mutex<ast::Function>>::default(), chunk.main)];
     while let Some((ast_func, func_id)) = stack.pop() {
@@ -362,6 +374,9 @@ fn decode_best(
     }
     let mut last = None;
     for candidate in candidates {
+        if cfg::past_decompile_deadline() {
+            return Err("decode timed out".into());
+        }
         match deserializer::loadsafe_ir::decode_chunk(bytecode, candidate) {
             Ok(c) => return Ok((c, candidate)),
             Err(e) => last = Some(e),
@@ -423,10 +438,19 @@ pub fn dump_cfgs(bytecode: &[u8], encode_key: u8) -> Vec<cfg::CfgSnapshot> {
 
 pub fn decompile_bytecode(bytecode: &[u8], encode_key: u8) -> String {
     ast::reset_local_id_counter();
+    begin_decompile_deadline();
     match decode_best(bytecode, encode_key) {
         Ok((c, key)) => decompile_from_chunk(c, key),
         Err(e) => format!("failed to deserialize bytecode: {e}"),
     }
+}
+
+fn begin_decompile_deadline() {
+    // Must start *before* decode_best. A desynced varint used to
+    // `with_capacity` hundreds of millions of slots while "reading
+    // bytecode" — the 180s budget lived only after decode, so that
+    // hang never timed out.
+    cfg::set_decompile_deadline(Some(Instant::now() + Duration::from_secs(180)));
 }
 
 fn propagate_names(body: &mut ast::Block) {

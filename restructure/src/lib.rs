@@ -206,7 +206,9 @@ impl GraphStructurer {
         // all collapse in one match_blocks pass. Huge CFGs: fewer CHK
         // solves, more gotos, still full SSA before we get here.
         let large = n > 2000;
-        let (outer_cap, inner_cap, insert_cap) = if n > 8000 {
+        let (outer_cap, inner_cap, insert_cap) = if n > 25000 {
+            (2u32, 1u32, 2048u32)
+        } else if n > 8000 {
             (4u32, 1u32, 1024u32)
         } else if large {
             (6u32, 1u32, 512u32)

@@ -25,6 +25,11 @@ pub fn set_decompile_deadline(deadline: Option<Instant>) {
 }
 
 #[inline]
+pub fn decompile_deadline() -> Option<Instant> {
+    DECOMPILE_DEADLINE.with(|c| c.get())
+}
+
+#[inline]
 pub fn past_decompile_deadline() -> bool {
     DECOMPILE_DEADLINE.with(|c| c.get().is_some_and(|t| Instant::now() >= t))
 }

@@ -30,8 +30,8 @@ impl Instruction {
         let op_code_raw = op_code_raw.wrapping_mul(encode_key);
         
         let op_code = match OpCode::try_from(op_code_raw) {
+            Ok(OpCode::LOP__COUNT) | Err(_) => return Err(nom::error::ErrorKind::Tag),
             Ok(op) => op,
-            Err(_) => return Err(nom::error::ErrorKind::Tag),
         };
 
         match op_code {
