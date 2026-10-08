@@ -407,6 +407,57 @@ impl fmt::Display for Block {
     }
 }
 
+impl Block {
+    /// Clone `if`/`while`/`for` bodies into **new** mutexes.
+    ///
+    /// `Statement::clone()` is shallow (`Arc` clone). Inlining a tail that
+    /// way aliases nested blocks; the next walker locks a body it already
+    /// holds and parking_lot sleeps forever. Snapshots taken before a
+    /// mutating pass must use this so the original tree stays independent.
+    pub fn deep_clone(&self) -> Block {
+        Block(self.0.iter().map(deep_clone_statement).collect())
+    }
+}
+
+fn deep_clone_shared(block: &SharedBlock) -> SharedBlock {
+    match block.try_lock() {
+        Some(g) => share_block(g.deep_clone()),
+        // Already locked: sharing is the only option that does not drop code.
+        None => block.clone(),
+    }
+}
+
+pub(crate) fn deep_clone_statement(stmt: &Statement) -> Statement {
+    match stmt {
+        Statement::If(r#if) => Statement::If(If {
+            condition: r#if.condition.clone(),
+            then_block: deep_clone_shared(&r#if.then_block),
+            else_block: deep_clone_shared(&r#if.else_block),
+        }),
+        Statement::While(w) => Statement::While(While {
+            condition: w.condition.clone(),
+            block: deep_clone_shared(&w.block),
+        }),
+        Statement::Repeat(r) => Statement::Repeat(Repeat {
+            condition: r.condition.clone(),
+            block: deep_clone_shared(&r.block),
+        }),
+        Statement::NumericFor(n) => Statement::NumericFor(NumericFor {
+            initial: n.initial.clone(),
+            limit: n.limit.clone(),
+            step: n.step.clone(),
+            counter: n.counter.clone(),
+            block: deep_clone_shared(&n.block),
+        }),
+        Statement::GenericFor(g) => Statement::GenericFor(GenericFor {
+            res_locals: g.res_locals.clone(),
+            right: g.right.clone(),
+            block: deep_clone_shared(&g.block),
+        }),
+        other => other.clone(),
+    }
+}
+
 // New modules for Oracle-quality features
 pub mod compound_assign;
 pub mod cond_expr;

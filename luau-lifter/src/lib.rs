@@ -326,9 +326,10 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8
     upvalues.remove(&main);
     let body = Arc::try_unwrap(main.0).unwrap().into_inner().body;
 
-    // Post-wave used to self-deadlock on aliased elseif Arcs. ReentrantMutex
-    // plus this recv_timeout means a hang still returns instead of sitting
-    // at 0% CPU until the client is killed.
+    // Post-wave can still self-deadlock on aliased elseif Arcs inside
+    // `inline_short_gotos`. recv_timeout plus a deep-cloned snapshot taken
+    // *before* that pass means a hang still returns structured Lua instead
+    // of 58 bytes of error.
     let wait = deadline
         .saturating_duration_since(Instant::now())
         .max(Duration::from_secs(15));
@@ -337,15 +338,10 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8
         .name("topaz-post".into())
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
-            let _ = tx.send(run_post_wave(body, upvalues));
+            run_post_wave(body, upvalues, tx);
         });
     match spawned {
-        Ok(_) => match rx.recv_timeout(wait) {
-            Ok(s) => s,
-            Err(_) => {
-                "-- Decompiled with Topaz\n-- Error: post-process timed out\n".into()
-            }
-        },
+        Ok(_) => recv_post_wave(rx, wait),
         Err(_) => {
             "-- Decompiled with Topaz\n-- Error: failed to spawn post-process thread\n"
                 .into()
@@ -353,10 +349,40 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8
     }
 }
 
+enum PostEvent {
+    /// Deep clone of the AST after naming, before `inline_short_gotos`.
+    Snapshot(ast::Block),
+    Done(String),
+}
+
+fn recv_post_wave(rx: mpsc::Receiver<PostEvent>, wait: Duration) -> String {
+    let deadline = Instant::now() + wait;
+    let mut fallback: Option<ast::Block> = None;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(PostEvent::Snapshot(b)) => fallback = Some(b),
+            Ok(PostEvent::Done(s)) => return s,
+            Err(_) => break,
+        }
+    }
+    match fallback {
+        Some(b) => format!(
+            "-- Decompiled with Topaz\n-- Created by: Andrew and TouseefX\n-- post-process timed out; skipped goto inlining\n\n{}",
+            b
+        ),
+        None => "-- Decompiled with Topaz\n-- Error: post-process timed out\n".into(),
+    }
+}
+
 fn run_post_wave(
     mut body: ast::Block,
     mut upvalues: FxHashMap<ByAddress<ast::SharedFunction>, Vec<ast::RcLocal>>,
-) -> String {
+    tx: mpsc::Sender<PostEvent>,
+) {
     let dbg = std::env::var_os("TOPAZ_DEBUG_CYCLES").is_some();
     macro_rules! step {
         ($name:expr, $e:expr) => {{
@@ -380,6 +406,7 @@ fn run_post_wave(
             ast::context_naming::apply_context_naming(&mut body)
         );
         step!("propagate_names", propagate_names(&mut body));
+        let _ = tx.send(PostEvent::Snapshot(body.deep_clone()));
         step!("inline_short_gotos", inline_short_gotos(&mut body));
         step!(
             "apply_guard_clauses",
@@ -389,10 +416,10 @@ fn run_post_wave(
     if body.0.len() < QUALITY_STMT_CAP {
         step!("name_locals", name_locals(&mut body, true));
     }
-    format!(
+    let _ = tx.send(PostEvent::Done(format!(
         "-- Decompiled with Topaz\n-- Created by: Andrew and TouseefX\n\n{}",
         body
-    )
+    )));
 }
 
 /// `TOPAZ_DEBUG_CYCLES=1`: report blocks reachable from themselves

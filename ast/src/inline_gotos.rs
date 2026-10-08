@@ -32,8 +32,79 @@
 use rustc_hash::FxHashMap;
 
 use crate::{
-    Binary, BinaryOperation, Block, If, RValue, Statement, Traverse, Unary, UnaryOperation,
+    deep_clone_statement, Binary, BinaryOperation, Block, If, Literal, RValue, Repeat, Statement,
+    Traverse, Unary, UnaryOperation, While,
 };
+
+/// Recurse into nested `if`/`while`/`for` bodies without re-entering a
+/// mutex this thread already holds (parking_lot `Mutex` is not reentrant).
+fn for_each_nested(stmt: &Statement, f: &mut impl FnMut(&Block)) {
+    match stmt {
+        Statement::If(r#if) => {
+            if let Some(b) = r#if.then_block.try_lock() {
+                f(&b);
+            }
+            if let Some(b) = r#if.else_block.try_lock() {
+                f(&b);
+            }
+        }
+        Statement::While(w) => {
+            if let Some(b) = w.block.try_lock() {
+                f(&b);
+            }
+        }
+        Statement::Repeat(r) => {
+            if let Some(b) = r.block.try_lock() {
+                f(&b);
+            }
+        }
+        Statement::NumericFor(n) => {
+            if let Some(b) = n.block.try_lock() {
+                f(&b);
+            }
+        }
+        Statement::GenericFor(g) => {
+            if let Some(b) = g.block.try_lock() {
+                f(&b);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn for_each_nested_mut(stmt: &mut Statement, f: &mut impl FnMut(&mut Block)) {
+    match stmt {
+        Statement::If(r#if) => {
+            if let Some(mut b) = r#if.then_block.try_lock() {
+                f(&mut b);
+            }
+            if let Some(mut b) = r#if.else_block.try_lock() {
+                f(&mut b);
+            }
+        }
+        Statement::While(w) => {
+            if let Some(mut b) = w.block.try_lock() {
+                f(&mut b);
+            }
+        }
+        Statement::Repeat(r) => {
+            if let Some(mut b) = r.block.try_lock() {
+                f(&mut b);
+            }
+        }
+        Statement::NumericFor(n) => {
+            if let Some(mut b) = n.block.try_lock() {
+                f(&mut b);
+            }
+        }
+        Statement::GenericFor(g) => {
+            if let Some(mut b) = g.block.try_lock() {
+                f(&mut b);
+            }
+        }
+        _ => {}
+    }
+}
 
 pub fn inline_short_gotos(block: &mut Block) {
     let rounds = if block.0.len() > 20_000 {
@@ -43,11 +114,15 @@ pub fn inline_short_gotos(block: &mut Block) {
     } else {
         16
     };
-    for _ in 0..rounds {
+    for _round in 0..rounds {
         let mut changed = false;
         changed |= eliminate_join_gotos(block);
         changed |= rewrite_skip_rest_gotos(block);
+        changed |= rewrite_back_edge_loops(block);
         let tails = collect_short_tails(block);
+        if std::env::var_os("TOPAZ_DEBUG_CYCLES").is_some() {
+            eprintln!("[goto] round {}: {} tails", _round, tails.len());
+        }
         if !tails.is_empty() {
             replace_gotos(block, &tails, &mut changed);
         }
@@ -74,17 +149,7 @@ fn collect_label_names(block: &Block, labels: &mut std::collections::HashSet<Str
         if let Statement::Label(l) = s {
             labels.insert(l.0.clone());
         }
-        match s {
-            Statement::If(r#if) => {
-                collect_label_names(&r#if.then_block.lock(), labels);
-                collect_label_names(&r#if.else_block.lock(), labels);
-            }
-            Statement::While(w) => collect_label_names(&w.block.lock(), labels),
-            Statement::Repeat(r) => collect_label_names(&r.block.lock(), labels),
-            Statement::NumericFor(n) => collect_label_names(&n.block.lock(), labels),
-            Statement::GenericFor(g) => collect_label_names(&g.block.lock(), labels),
-            _ => {}
-        }
+        for_each_nested(s, &mut |b| collect_label_names(b, labels));
     }
 }
 
@@ -94,17 +159,7 @@ fn strip_gotos_not_in(block: &mut Block, labels: &std::collections::HashSet<Stri
         _ => true,
     });
     for s in block.0.iter_mut() {
-        match s {
-            Statement::If(r#if) => {
-                strip_gotos_not_in(&mut r#if.then_block.lock(), labels);
-                strip_gotos_not_in(&mut r#if.else_block.lock(), labels);
-            }
-            Statement::While(w) => strip_gotos_not_in(&mut w.block.lock(), labels),
-            Statement::Repeat(r) => strip_gotos_not_in(&mut r.block.lock(), labels),
-            Statement::NumericFor(n) => strip_gotos_not_in(&mut n.block.lock(), labels),
-            Statement::GenericFor(g) => strip_gotos_not_in(&mut g.block.lock(), labels),
-            _ => {}
-        }
+        for_each_nested_mut(s, &mut |b| strip_gotos_not_in(b, labels));
     }
 }
 
@@ -112,20 +167,12 @@ fn descend_into_closures(block: &mut Block) {
     for statement in block.0.iter_mut() {
         statement.traverse_rvalues(&mut |rv: &mut RValue| {
             if let RValue::Closure(closure) = rv {
-                inline_short_gotos(&mut closure.function.lock().body);
+                if let Some(mut f) = closure.function.try_lock() {
+                    inline_short_gotos(&mut f.body);
+                }
             }
         });
-        match statement {
-            Statement::If(r#if) => {
-                descend_into_closures(&mut r#if.then_block.lock());
-                descend_into_closures(&mut r#if.else_block.lock());
-            }
-            Statement::While(r#while) => descend_into_closures(&mut r#while.block.lock()),
-            Statement::Repeat(repeat) => descend_into_closures(&mut repeat.block.lock()),
-            Statement::NumericFor(nf) => descend_into_closures(&mut nf.block.lock()),
-            Statement::GenericFor(gf) => descend_into_closures(&mut gf.block.lock()),
-            _ => {}
-        }
+        for_each_nested_mut(statement, &mut |b| descend_into_closures(b));
     }
 }
 
@@ -134,25 +181,9 @@ fn eliminate_join_gotos(block: &mut Block) -> bool {
     let mut changed = false;
     // Recurse first for else/fallthrough patterns (nested joins).
     for statement in block.0.iter_mut() {
-        match statement {
-            Statement::If(r#if) => {
-                changed |= eliminate_join_gotos(&mut r#if.then_block.lock());
-                changed |= eliminate_join_gotos(&mut r#if.else_block.lock());
-            }
-            Statement::While(r#while) => {
-                changed |= eliminate_join_gotos(&mut r#while.block.lock());
-            }
-            Statement::Repeat(repeat) => {
-                changed |= eliminate_join_gotos(&mut repeat.block.lock());
-            }
-            Statement::NumericFor(nf) => {
-                changed |= eliminate_join_gotos(&mut nf.block.lock());
-            }
-            Statement::GenericFor(gf) => {
-                changed |= eliminate_join_gotos(&mut gf.block.lock());
-            }
-            _ => {}
-        }
+        for_each_nested_mut(statement, &mut |b| {
+            changed |= eliminate_join_gotos(b);
+        });
     }
 
     changed |= rewrite_else_join_labels(block);
@@ -195,11 +226,16 @@ fn strip_trailing_goto_deep(stmts: &mut Vec<Statement>, name: &str) -> bool {
     let mut changed = strip_trailing_goto(stmts, name);
     // Walk from the end: if last stmt is if with empty else ending in goto name, strip there.
     if let Some(Statement::If(r#if)) = stmts.last_mut() {
-        let else_empty = r#if.else_block.lock().0.is_empty();
+        let else_empty = r#if
+            .else_block
+            .try_lock()
+            .map(|b| b.0.is_empty())
+            .unwrap_or(false);
         if else_empty {
-            let mut then_b = r#if.then_block.lock();
-            if strip_trailing_goto_deep(&mut then_b.0, name) {
-                changed = true;
+            if let Some(mut then_b) = r#if.then_block.try_lock() {
+                if strip_trailing_goto_deep(&mut then_b.0, name) {
+                    changed = true;
+                }
             }
         }
     }
@@ -378,14 +414,15 @@ fn rewrite_fallthrough_joins(block: &mut Block) -> bool {
         };
 
         if let Statement::If(r#if) = &mut block.0[i] {
-            let mut then_b = r#if.then_block.lock();
-            // 1) Preserve skip-forward semantics for every remaining goto L.
-            while rewrite_one_skip_forward_to_label(&mut then_b.0, &label) {
-                changed = true;
-            }
-            // 2) Only now remove the trailing join jump at end of then.
-            if strip_trailing_goto(&mut then_b.0, &label) {
-                changed = true;
+            if let Some(mut then_b) = r#if.then_block.try_lock() {
+                // 1) Preserve skip-forward semantics for every remaining goto L.
+                while rewrite_one_skip_forward_to_label(&mut then_b.0, &label) {
+                    changed = true;
+                }
+                // 2) Only now remove the trailing join jump at end of then.
+                if strip_trailing_goto(&mut then_b.0, &label) {
+                    changed = true;
+                }
             }
         }
 
@@ -450,10 +487,16 @@ fn rewrite_one_skip_forward_to_label(stmts: &mut Vec<Statement>, label: &str) ->
         if else_empty && then_ends && then_len >= 1 && i + 1 < stmts.len() {
             let rest: Vec<Statement> = stmts.drain(i + 1..).collect();
             if let Statement::If(r#if) = &mut stmts[i] {
-                strip_trailing_goto(&mut r#if.then_block.lock().0, label);
-                r#if.else_block.lock().0 = rest;
+                if let Some(mut then_b) = r#if.then_block.try_lock() {
+                    strip_trailing_goto(&mut then_b.0, label);
+                }
+                if let Some(mut else_b) = r#if.else_block.try_lock() {
+                    else_b.0 = rest;
+                    return true;
+                }
             }
-            return true;
+            stmts.extend(rest);
+            return false;
         }
     }
 
@@ -464,11 +507,17 @@ fn rewrite_one_skip_forward_to_label(stmts: &mut Vec<Statement>, label: &str) ->
             let Statement::If(outer) = &stmts[i] else {
                 continue;
             };
-            let else_b = outer.else_block.lock();
-            if !else_b.0.is_empty() {
+            let else_empty = outer
+                .else_block
+                .try_lock()
+                .map(|b| b.0.is_empty())
+                .unwrap_or(false);
+            if !else_empty {
                 continue;
             }
-            let then_b = outer.then_block.lock();
+            let Some(then_b) = outer.then_block.try_lock() else {
+                continue;
+            };
             if then_b.0.is_empty() {
                 continue;
             }
@@ -482,34 +531,48 @@ fn rewrite_one_skip_forward_to_label(stmts: &mut Vec<Statement>, label: &str) ->
             let Some(inner_else) = inner.else_block.try_lock() else {
                 continue;
             };
-            let ok = inner_else.0.is_empty() && ends_with_goto_named(&inner_then.0, label);
-            ok
+            inner_else.0.is_empty() && ends_with_goto_named(&inner_then.0, label)
         };
         if !nested || i + 1 >= stmts.len() {
             continue;
         }
         let rest: Vec<Statement> = stmts.drain(i + 1..).collect();
         if let Statement::If(outer) = &mut stmts[i] {
-            // Outer false path must still run rest.
-            outer.else_block.lock().0 = rest.clone();
-            let mut then_b = outer.then_block.lock();
-            // Inner if is last in then: absorb rest into its else, strip goto.
-            if let Some(Statement::If(inner)) = then_b.0.last_mut() {
-                strip_trailing_goto(&mut inner.then_block.lock().0, label);
-                inner.else_block.lock().0 = rest;
+            // Outer false path must still run rest. Detach so the two else
+            // arms do not share nested `Arc<Mutex<Block>>`s — a shallow
+            // `rest.clone()` aliased them and the next walker self-deadlocked.
+            if let Some(mut else_b) = outer.else_block.try_lock() {
+                else_b.0 = rest.iter().map(deep_clone_statement).collect();
+            }
+            if let Some(mut then_b) = outer.then_block.try_lock() {
+                // Inner if is last in then: absorb rest into its else, strip goto.
+                if let Some(Statement::If(inner)) = then_b.0.last_mut() {
+                    if let Some(mut inner_then) = inner.then_block.try_lock() {
+                        strip_trailing_goto(&mut inner_then.0, label);
+                    }
+                    if let Some(mut inner_else) = inner.else_block.try_lock() {
+                        inner_else.0 = rest;
+                        return true;
+                    }
+                }
             }
         }
-        return true;
+        stmts.extend(rest);
+        return false;
     }
 
     // Recurse into nested if bodies for deeper skip-forward gotos.
     for s in stmts.iter_mut() {
         if let Statement::If(r#if) = s {
-            if rewrite_one_skip_forward_to_label(&mut r#if.then_block.lock().0, label) {
-                return true;
+            if let Some(mut then_b) = r#if.then_block.try_lock() {
+                if rewrite_one_skip_forward_to_label(&mut then_b.0, label) {
+                    return true;
+                }
             }
-            if rewrite_one_skip_forward_to_label(&mut r#if.else_block.lock().0, label) {
-                return true;
+            if let Some(mut else_b) = r#if.else_block.try_lock() {
+                if rewrite_one_skip_forward_to_label(&mut else_b.0, label) {
+                    return true;
+                }
             }
         }
     }
@@ -526,12 +589,16 @@ fn find_join_after_if(block: &Block, if_idx: usize) -> Option<(String, usize, bo
     let Statement::If(r#if) = &block.0[if_idx] else {
         return None;
     };
-    let then_b = r#if.then_block.lock();
-    let else_b = r#if.else_block.lock();
-    // Allow empty else; if else is non-empty this is not a fallthrough join.
-    if !else_b.0.is_empty() {
+    // Never hold then and else together: aliased branches deadlock.
+    let else_empty = r#if
+        .else_block
+        .try_lock()
+        .map(|b| b.0.is_empty())
+        .unwrap_or(false);
+    if !else_empty {
         return None;
     }
+    let then_b = r#if.then_block.try_lock()?;
     let label = goto_name(then_b.0.last()?)?.to_string();
 
     // then must end with goto L; optionally allow nested structure that ends that way.
@@ -539,7 +606,6 @@ fn find_join_after_if(block: &Block, if_idx: usize) -> Option<(String, usize, bo
         return None;
     }
     drop(then_b);
-    drop(else_b);
 
     // Find ::L:: after if_idx. Prefer the first label L that is only targeted
     // by the then-arm and optional single goto L just before the label.
@@ -609,13 +675,18 @@ fn rewrite_skip_rest_gotos(block: &mut Block) -> bool {
         // Case: if D then ...; goto L end; rest...
         // where L is not defined later in this block → goto meant "skip rest".
         if let Statement::If(r#if) = &block.0[i] {
-            let then_b = r#if.then_block.lock();
-            let else_b = r#if.else_block.lock();
-            let else_empty = else_b.0.is_empty();
-            let label = then_b.0.last().and_then(goto_name).map(|s| s.to_string());
-            let then_len = then_b.0.len();
-            drop(then_b);
-            drop(else_b);
+            let else_empty = r#if
+                .else_block
+                .try_lock()
+                .map(|b| b.0.is_empty())
+                .unwrap_or(false);
+            let (label, then_len) = match r#if.then_block.try_lock() {
+                Some(then_b) => (
+                    then_b.0.last().and_then(goto_name).map(|s| s.to_string()),
+                    then_b.0.len(),
+                ),
+                None => (None, 0),
+            };
 
             if else_empty {
                 if let Some(label) = label {
@@ -626,22 +697,26 @@ fn rewrite_skip_rest_gotos(block: &mut Block) -> bool {
                     let goto_later = block.0[i + 1..]
                         .iter()
                         .any(|s| goto_name(s) == Some(label.as_str()));
+                    // A label *before* this if is a back-edge (loop), not
+                    // "skip the rest". Leave it for `rewrite_back_edge_loops`.
+                    let label_earlier = block.0[..i]
+                        .iter()
+                        .any(|s| label_name(s) == Some(label.as_str()));
 
-                    if !label_later && !goto_later && then_len >= 1 {
+                    if !label_earlier && !label_later && !goto_later && then_len >= 1 {
                         // Move statements after this if into the else-arm; strip goto from then.
                         let rest: Vec<Statement> = block.0.drain(i + 1..).collect();
                         if let Statement::If(r#if) = &mut block.0[i] {
-                            {
-                                let mut then_b = r#if.then_block.lock();
+                            if let Some(mut then_b) = r#if.then_block.try_lock() {
                                 strip_trailing_goto(&mut then_b.0, &label);
                             }
-                            {
-                                let mut else_b = r#if.else_block.lock();
+                            if let Some(mut else_b) = r#if.else_block.try_lock() {
                                 else_b.0 = rest;
+                                changed = true;
+                                break;
                             }
                         }
-                        changed = true;
-                        // done with this block scan; rest was absorbed
+                        block.0.extend(rest);
                         break;
                     }
                 }
@@ -655,20 +730,150 @@ fn rewrite_skip_rest_gotos(block: &mut Block) -> bool {
 
     // Then recurse into nested blocks.
     for statement in block.0.iter_mut() {
-        match statement {
-            Statement::If(r#if) => {
-                changed |= rewrite_skip_rest_gotos(&mut r#if.then_block.lock());
-                changed |= rewrite_skip_rest_gotos(&mut r#if.else_block.lock());
-            }
-            Statement::While(w) => changed |= rewrite_skip_rest_gotos(&mut w.block.lock()),
-            Statement::Repeat(r) => changed |= rewrite_skip_rest_gotos(&mut r.block.lock()),
-            Statement::NumericFor(n) => changed |= rewrite_skip_rest_gotos(&mut n.block.lock()),
-            Statement::GenericFor(g) => changed |= rewrite_skip_rest_gotos(&mut g.block.lock()),
-            _ => {}
-        }
+        for_each_nested_mut(statement, &mut |b| {
+            changed |= rewrite_skip_rest_gotos(b);
+        });
     }
 
     changed
+}
+
+/// Turn remaining back-edges into `while`/`repeat` so we never inline a
+/// loop tail into itself (the shallow-clone deadlock) and so the output
+/// is valid Luau (no `goto`).
+///
+/// ```text
+/// ::L:: body; goto L                 →  while true do body end
+/// ::L:: if c then B; goto L end      →  while c do B end
+/// ::L:: A; if c then goto L end      →  repeat A until not c
+/// ```
+fn rewrite_back_edge_loops(block: &mut Block) -> bool {
+    let mut changed = false;
+    for statement in block.0.iter_mut() {
+        for_each_nested_mut(statement, &mut |b| {
+            changed |= rewrite_back_edge_loops(b);
+        });
+    }
+
+    let mut i = 0;
+    while i < block.0.len() {
+        let Some(label) = label_name(&block.0[i]).map(str::to_owned) else {
+            i += 1;
+            continue;
+        };
+        let mut region_end = i + 1;
+        while region_end < block.0.len() && label_name(&block.0[region_end]).is_none() {
+            region_end += 1;
+        }
+
+        let mut edge: Option<(usize, bool)> = None;
+        for j in (i + 1..region_end).rev() {
+            if goto_name(&block.0[j]) == Some(label.as_str()) {
+                edge = Some((j, true));
+                break;
+            }
+            if trailing_if_back_edge(&block.0[j], &label) {
+                edge = Some((j, false));
+                break;
+            }
+        }
+        let Some((j, bare_goto)) = edge else {
+            i += 1;
+            continue;
+        };
+
+        let prefix_has_goto = block.0[i + 1..j].iter().any(|s| stmt_contains_goto(s, &label));
+        if prefix_has_goto {
+            i += 1;
+            continue;
+        }
+
+        let loop_stmts: Vec<Statement> = if bare_goto {
+            let body: Vec<Statement> = block.0[i + 1..j].iter().map(deep_clone_statement).collect();
+            vec![Statement::While(While::new(
+                Literal::Boolean(true).into(),
+                body.into(),
+            ))]
+        } else {
+            let prefix: Vec<Statement> =
+                block.0[i + 1..j].iter().map(deep_clone_statement).collect();
+            match if_back_edge_to_loop(&block.0[j], &label, &prefix) {
+                Some(stmts) => stmts,
+                None => {
+                    i += 1;
+                    continue;
+                }
+            }
+        };
+        let n = loop_stmts.len();
+        block.0.splice(i + 1..=j, loop_stmts);
+        changed = true;
+        i += 1 + n;
+    }
+    changed
+}
+
+fn trailing_if_back_edge(stmt: &Statement, label: &str) -> bool {
+    let Statement::If(r#if) = stmt else {
+        return false;
+    };
+    let else_empty = r#if
+        .else_block
+        .try_lock()
+        .map(|b| b.0.is_empty())
+        .unwrap_or(false);
+    if !else_empty {
+        return false;
+    }
+    r#if.then_block
+        .try_lock()
+        .map(|b| ends_with_goto_named(&b.0, label))
+        .unwrap_or(false)
+}
+
+fn if_back_edge_to_loop(
+    stmt: &Statement,
+    label: &str,
+    prefix: &[Statement],
+) -> Option<Vec<Statement>> {
+    let Statement::If(r#if) = stmt else {
+        return None;
+    };
+    let else_empty = r#if
+        .else_block
+        .try_lock()
+        .map(|b| b.0.is_empty())
+        .unwrap_or(false);
+    if !else_empty {
+        return None;
+    }
+    let then_b = r#if.then_block.try_lock()?;
+    if !ends_with_goto_named(&then_b.0, label) {
+        return None;
+    }
+    let then_prefix = &then_b.0[..then_b.0.len() - 1];
+    if then_prefix.iter().any(|s| stmt_contains_goto(s, label)) {
+        return None;
+    }
+    let cond = r#if.condition.clone();
+    let then_body: Vec<Statement> = then_prefix.iter().map(deep_clone_statement).collect();
+    drop(then_b);
+
+    if prefix.is_empty() {
+        Some(vec![Statement::While(While::new(cond, then_body.into()))])
+    } else if then_body.is_empty() {
+        Some(vec![Statement::Repeat(Repeat::new(
+            make_not(cond),
+            prefix.to_vec().into(),
+        ))])
+    } else {
+        // ::L:: A; if c then B; goto L end  →  A; while c do B; A end
+        let mut while_body = then_body;
+        while_body.extend(prefix.iter().map(deep_clone_statement));
+        let mut out = prefix.to_vec();
+        out.push(Statement::While(While::new(cond, while_body.into())));
+        Some(out)
+    }
 }
 
 fn remove_orphan_labels(block: &mut Block) {
@@ -679,17 +884,7 @@ fn remove_orphan_labels(block: &mut Block) {
         _ => true,
     });
     for statement in block.0.iter_mut() {
-        match statement {
-            Statement::If(r#if) => {
-                remove_orphan_labels(&mut r#if.then_block.lock());
-                remove_orphan_labels(&mut r#if.else_block.lock());
-            }
-            Statement::While(r#while) => remove_orphan_labels(&mut r#while.block.lock()),
-            Statement::Repeat(repeat) => remove_orphan_labels(&mut repeat.block.lock()),
-            Statement::NumericFor(nf) => remove_orphan_labels(&mut nf.block.lock()),
-            Statement::GenericFor(gf) => remove_orphan_labels(&mut gf.block.lock()),
-            _ => {}
-        }
+        for_each_nested_mut(statement, &mut |b| remove_orphan_labels(b));
     }
 }
 
@@ -705,20 +900,44 @@ fn walk_for_tails(block: &Block, out: &mut FxHashMap<String, Vec<Statement>>) {
     for (idx, statement) in block.0.iter().enumerate() {
         if let Statement::Label(label) = statement {
             if let Some(tail) = extract_short_tail(&block.0, idx + 1) {
-                out.entry(label.0.clone()).or_insert(tail);
+                // A tail that jumps back to its own label is a loop, not a
+                // terminating copy. Inlining it splices the `If` into its
+                // own `then_block` (shallow `Statement::clone()`) and the
+                // next walker deadlocks on parking_lot.
+                if !stmts_contain_goto(&tail, &label.0) {
+                    out.entry(label.0.clone()).or_insert(tail);
+                }
             }
         }
-        match statement {
-            Statement::If(r#if) => {
-                walk_for_tails(&r#if.then_block.lock(), out);
-                walk_for_tails(&r#if.else_block.lock(), out);
-            }
-            Statement::While(r#while) => walk_for_tails(&r#while.block.lock(), out),
-            Statement::Repeat(repeat) => walk_for_tails(&repeat.block.lock(), out),
-            Statement::NumericFor(numeric_for) => walk_for_tails(&numeric_for.block.lock(), out),
-            Statement::GenericFor(generic_for) => walk_for_tails(&generic_for.block.lock(), out),
-            _ => {}
+        for_each_nested(statement, &mut |b| walk_for_tails(b, out));
+    }
+}
+
+fn stmts_contain_goto(stmts: &[Statement], name: &str) -> bool {
+    stmts.iter().any(|s| stmt_contains_goto(s, name))
+}
+
+fn nested_has_goto(block: &crate::SharedBlock, name: &str) -> bool {
+    match block.try_lock() {
+        Some(b) => stmts_contain_goto(&b.0, name),
+        // Already locked: assume a back-edge so we refuse the tail.
+        None => true,
+    }
+}
+
+fn stmt_contains_goto(stmt: &Statement, name: &str) -> bool {
+    if goto_name(stmt) == Some(name) {
+        return true;
+    }
+    match stmt {
+        Statement::If(r#if) => {
+            nested_has_goto(&r#if.then_block, name) || nested_has_goto(&r#if.else_block, name)
         }
+        Statement::While(w) => nested_has_goto(&w.block, name),
+        Statement::Repeat(r) => nested_has_goto(&r.block, name),
+        Statement::NumericFor(n) => nested_has_goto(&n.block, name),
+        Statement::GenericFor(g) => nested_has_goto(&g.block, name),
+        _ => false,
     }
 }
 
@@ -768,17 +987,9 @@ fn replace_gotos(block: &mut Block, tails: &FxHashMap<String, Vec<Statement>>, c
             *changed = true;
             continue;
         }
-        match &mut block.0[i] {
-            Statement::If(r#if) => {
-                replace_gotos(&mut r#if.then_block.lock(), tails, changed);
-                replace_gotos(&mut r#if.else_block.lock(), tails, changed);
-            }
-            Statement::While(r#while) => replace_gotos(&mut r#while.block.lock(), tails, changed),
-            Statement::Repeat(repeat) => replace_gotos(&mut repeat.block.lock(), tails, changed),
-            Statement::NumericFor(nf) => replace_gotos(&mut nf.block.lock(), tails, changed),
-            Statement::GenericFor(gf) => replace_gotos(&mut gf.block.lock(), tails, changed),
-            _ => {}
-        }
+        for_each_nested_mut(&mut block.0[i], &mut |b| {
+            replace_gotos(b, tails, changed);
+        });
         i += 1;
     }
 }
@@ -797,17 +1008,7 @@ fn prune_unused_labels(block: &mut Block, tails: &FxHashMap<String, Vec<Statemen
         _ => true,
     });
     for statement in block.0.iter_mut() {
-        match statement {
-            Statement::If(r#if) => {
-                prune_unused_labels(&mut r#if.then_block.lock(), tails);
-                prune_unused_labels(&mut r#if.else_block.lock(), tails);
-            }
-            Statement::While(r#while) => prune_unused_labels(&mut r#while.block.lock(), tails),
-            Statement::Repeat(repeat) => prune_unused_labels(&mut repeat.block.lock(), tails),
-            Statement::NumericFor(nf) => prune_unused_labels(&mut nf.block.lock(), tails),
-            Statement::GenericFor(gf) => prune_unused_labels(&mut gf.block.lock(), tails),
-            _ => {}
-        }
+        for_each_nested_mut(statement, &mut |b| prune_unused_labels(b, tails));
     }
 }
 
@@ -817,15 +1018,7 @@ fn count_remaining_gotos(block: &Block, counts: &mut FxHashMap<String, usize>) {
             Statement::Goto(goto) => {
                 *counts.entry(goto.0 .0.clone()).or_insert(0) += 1;
             }
-            Statement::If(r#if) => {
-                count_remaining_gotos(&r#if.then_block.lock(), counts);
-                count_remaining_gotos(&r#if.else_block.lock(), counts);
-            }
-            Statement::While(r#while) => count_remaining_gotos(&r#while.block.lock(), counts),
-            Statement::Repeat(repeat) => count_remaining_gotos(&repeat.block.lock(), counts),
-            Statement::NumericFor(nf) => count_remaining_gotos(&nf.block.lock(), counts),
-            Statement::GenericFor(gf) => count_remaining_gotos(&gf.block.lock(), counts),
-            _ => {}
+            other => for_each_nested(other, &mut |b| count_remaining_gotos(b, counts)),
         }
     }
 }
@@ -1067,6 +1260,48 @@ mod tests {
         assert!(!s.contains("::l81::"), "label remains: {s}");
         // Must have else so E is not unconditional after B
         assert!(s.contains("else"), "expected else for skipped E: {s}");
+    }
+
+    #[test]
+    fn back_edge_if_becomes_while() {
+        // ::L:: if c then goto L end; return  →  while c do end; return
+        let mut body = Block(vec![
+            Statement::Label(Label("l1".into())),
+            Statement::If(If::new(
+                lit_true(),
+                Block(vec![Statement::Goto(Goto::new(Label("l1".into())))]),
+                Block::default(),
+            )),
+            Statement::Return(crate::Return::new(vec![])),
+        ]);
+        inline_short_gotos(&mut body);
+        let s = body.to_string();
+        assert!(!s.contains("goto"), "gotos remain: {s}");
+        assert!(s.contains("while"), "expected while from back-edge: {s}");
+    }
+
+    #[test]
+    fn inlining_back_edge_tail_does_not_deadlock() {
+        // goto L before ::L:: if c then goto L end; return
+        // Without skipping self-tails, replace_gotos splices the If into
+        // its own then_block (shallow clone) and parking_lot hangs.
+        let mut body = Block(vec![
+            Statement::If(If::new(
+                lit_true(),
+                Block(vec![Statement::Goto(Goto::new(Label("l1".into())))]),
+                Block::default(),
+            )),
+            Statement::Label(Label("l1".into())),
+            Statement::If(If::new(
+                lit_true(),
+                Block(vec![Statement::Goto(Goto::new(Label("l1".into())))]),
+                Block::default(),
+            )),
+            Statement::Return(crate::Return::new(vec![])),
+        ]);
+        inline_short_gotos(&mut body);
+        let s = body.to_string();
+        assert!(!s.contains("goto"), "gotos remain: {s}");
     }
 
 }
