@@ -348,8 +348,14 @@ pub(crate) fn shared_blocks_equal(left: &Arc<Mutex<Block>>, right: &Arc<Mutex<Bl
     if Arc::ptr_eq(left, right) {
         return true;
     }
-    let a = left.lock();
-    let b = right.lock();
+    // try_lock: parking_lot is not reentrant. Comparing if-bodies while
+    // a parent then/else guard is live used to futex-wait forever.
+    let Some(a) = left.try_lock() else {
+        return false;
+    };
+    let Some(b) = right.try_lock() else {
+        return false;
+    };
     if a.len() != b.len() {
         return false;
     }

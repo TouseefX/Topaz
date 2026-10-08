@@ -359,7 +359,9 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     }
 
     fn format_closure_parameters(&mut self, closure: &Closure) -> fmt::Result {
-        let function = closure.function.lock();
+        let Some(function) = closure.function.try_lock() else {
+            return write!(self.output, "...");
+        };
         write!(
             self.output,
             "{}",
@@ -390,7 +392,9 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         // their statements at the wrong indent and made the trailing
         // `end` look detached from the `function(...)` header — exactly
         // the broken shape in the Welcome-badge screenshot.
-        let function = closure.function.lock();
+        let Some(function) = closure.function.try_lock() else {
+            return write!(self.output, " ");
+        };
         if !function.body.is_empty() {
             writeln!(self.output)?;
             self.indentation_level += 1;
@@ -407,10 +411,11 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 		write!(self.output, "function(")?;
 		self.format_closure_parameters(closure)?;
 		write!(self.output, ")")?;
-		let is_empty = {
-			let function = closure.function.lock();
-			function.body.is_empty()
-		};
+		let is_empty = closure
+			.function
+			.try_lock()
+			.map(|f| f.body.is_empty())
+			.unwrap_or(true);
 		if is_empty {
 			write!(self.output, " ")?;
 		} else {
@@ -423,10 +428,11 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 		write!(self.output, "function {}(", name)?;
 		self.format_closure_parameters(closure)?;
 		write!(self.output, ")")?;
-		let is_empty = {
-			let function = closure.function.lock();
-			function.body.is_empty()
-		};
+		let is_empty = closure
+			.function
+			.try_lock()
+			.map(|f| f.body.is_empty())
+			.unwrap_or(true);
 		if is_empty {
 			write!(self.output, " ")?;
 		} else {
@@ -648,39 +654,65 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     }
 
     pub(crate) fn format_if(&mut self, r#if: &If) -> fmt::Result {
-        let then_block = r#if.then_block.lock();
-        let else_block = r#if.else_block.lock();
-        if then_block.is_empty() && !else_block.is_empty() {
+        // Never hold then and else together, and never recurse into
+        // `else if` while those guards are live. parking_lot::Mutex is
+        // not reentrant: aliased branches (or elseif-in-else) deadlocked
+        // the 64 MB lift thread at 0% CPU after SSA destruct.
+        let then_empty = r#if
+            .then_block
+            .try_lock()
+            .map(|b| b.is_empty())
+            .unwrap_or(true);
+        let else_empty = r#if
+            .else_block
+            .try_lock()
+            .map(|b| b.is_empty())
+            .unwrap_or(true);
+
+        if then_empty && !else_empty {
             write!(self.output, "if ")?;
             let cond = Unary::new(r#if.condition.clone(), UnaryOperation::Not).reduce_condition();
             self.format_rvalue(&cond)?;
             writeln!(self.output, " then")?;
-            self.format_block(&else_block)?;
-            writeln!(self.output)?;
+            if let Some(else_block) = r#if.else_block.try_lock() {
+                self.format_block(&else_block)?;
+                writeln!(self.output)?;
+            }
             self.indent()?;
             return write!(self.output, "end");
         }
 
         write!(self.output, "if ")?;
-
         self.format_rvalue(&r#if.condition)?;
-
         writeln!(self.output, " then")?;
 
-        if !then_block.is_empty() {
-            self.format_block(&then_block)?;
-            writeln!(self.output)?;
+        if !then_empty {
+            if let Some(then_block) = r#if.then_block.try_lock() {
+                self.format_block(&then_block)?;
+                writeln!(self.output)?;
+            }
         }
 
-        if !else_block.is_empty() {
-            self.indent()?;
-            if let Some(else_if) = else_block.iter().exactly_one().ok().and_then(|s| s.as_if()) {
+        if !else_empty {
+            let else_if = r#if.else_block.try_lock().and_then(|else_block| {
+                else_block
+                    .iter()
+                    .exactly_one()
+                    .ok()
+                    .and_then(|s| s.as_if())
+                    .cloned()
+            });
+            if let Some(else_if) = else_if {
+                self.indent()?;
                 write!(self.output, "else")?;
-                return self.format_if(else_if);
+                return self.format_if(&else_if);
             }
+            self.indent()?;
             writeln!(self.output, "else")?;
-            self.format_block(&else_block)?;
-            writeln!(self.output)?;
+            if let Some(else_block) = r#if.else_block.try_lock() {
+                self.format_block(&else_block)?;
+                writeln!(self.output)?;
+            }
         }
 
         self.indent()?;
@@ -754,7 +786,9 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 
         writeln!(self.output, " do")?;
 
-        self.format_block(&r#while.block.lock())?;
+        if let Some(body) = r#while.block.try_lock() {
+            self.format_block(&body)?;
+        }
         writeln!(self.output)?;
         self.indent()?;
         write!(self.output, "end")
@@ -762,7 +796,9 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 
     pub(crate) fn format_repeat(&mut self, r#repeat: &Repeat) -> fmt::Result {
         writeln!(self.output, "repeat")?;
-        self.format_block(&repeat.block.lock())?;
+        if let Some(body) = repeat.block.try_lock() {
+            self.format_block(&body)?;
+        }
         writeln!(self.output)?;
         self.indent()?;
 
@@ -786,7 +822,9 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             self.format_rvalue(&numeric_for.step)?;
         }
         writeln!(self.output, " do")?;
-        self.format_block(&numeric_for.block.lock())?;
+        if let Some(body) = numeric_for.block.try_lock() {
+            self.format_block(&body)?;
+        }
         writeln!(self.output)?;
         self.indent()?;
         write!(self.output, "end")
@@ -816,7 +854,9 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             self.format_rvalue(rvalue)?;
         }
         writeln!(self.output, " do")?;
-        self.format_block(&generic_for.block.lock())?;
+        if let Some(body) = generic_for.block.try_lock() {
+            self.format_block(&body)?;
+        }
         writeln!(self.output)?;
         self.indent()?;
         write!(self.output, "end")

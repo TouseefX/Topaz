@@ -22,26 +22,40 @@ pub fn replace_locals<H: std::hash::BuildHasher>(
         
         statement.post_traverse_values(&mut |value| -> Option<()> {
             if let Either::Right(RValue::Closure(closure)) = value {
-                replace_locals(&mut closure.function.lock().body, map)
+                if let Some(mut function) = closure.function.try_lock() {
+                    replace_locals(&mut function.body, map)
+                }
             };
             None
         });
         match statement {
             Statement::If(r#if) => {
-                replace_locals(&mut r#if.then_block.lock(), map);
-                replace_locals(&mut r#if.else_block.lock(), map);
+                if let Some(mut b) = r#if.then_block.try_lock() {
+                    replace_locals(&mut b, map);
+                }
+                if let Some(mut b) = r#if.else_block.try_lock() {
+                    replace_locals(&mut b, map);
+                }
             }
             Statement::While(r#while) => {
-                replace_locals(&mut r#while.block.lock(), map);
+                if let Some(mut b) = r#while.block.try_lock() {
+                    replace_locals(&mut b, map);
+                }
             }
             Statement::Repeat(repeat) => {
-                replace_locals(&mut repeat.block.lock(), map);
+                if let Some(mut b) = repeat.block.try_lock() {
+                    replace_locals(&mut b, map);
+                }
             }
             Statement::NumericFor(numeric_for) => {
-                replace_locals(&mut numeric_for.block.lock(), map);
+                if let Some(mut b) = numeric_for.block.try_lock() {
+                    replace_locals(&mut b, map);
+                }
             }
             Statement::GenericFor(generic_for) => {
-                replace_locals(&mut generic_for.block.lock(), map);
+                if let Some(mut b) = generic_for.block.try_lock() {
+                    replace_locals(&mut b, map);
+                }
             }
             _ => {}
         }

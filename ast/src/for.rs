@@ -260,10 +260,13 @@ impl fmt::Display for NumericFor {
             self.limit,
             self.step,
             self.block
-                .lock()
-                .iter()
-                .map(|n| n.to_string().replace('\n', "\n\t"))
-                .join("\n\t")
+                .try_lock()
+                .map(|b| {
+                    b.iter()
+                        .map(|n| n.to_string().replace('\n', "\n\t"))
+                        .join("\n\t")
+                })
+                .unwrap_or_default()
         )
     }
 }
@@ -481,10 +484,13 @@ impl fmt::Display for GenericFor {
             self.res_locals.iter().join(", "),
             self.right.iter().join(", "),
             self.block
-                .lock()
-                .iter()
-                .map(|n| n.to_string().replace('\n', "\n\t"))
-                .join("\n\t")
+                .try_lock()
+                .map(|b| {
+                    b.iter()
+                        .map(|n| n.to_string().replace('\n', "\n\t"))
+                        .join("\n\t")
+                })
+                .unwrap_or_default()
         )
     }
 }

@@ -83,47 +83,84 @@ pub struct LocalDeclarer {
 
 impl LocalDeclarer {
     fn visit(&mut self, block: Arc<Mutex<Block>>, stat_index: usize) -> NodeIndex {
+        // Shared / cyclic `Arc<Mutex<Block>>` (half-destructed CFG) used
+        // to re-enter `block.lock()` and sleep forever on parking_lot.
+        if let Some(&existing) = self.block_to_node.get(&ByAddress(block.clone())) {
+            return existing;
+        }
         let node = self.graph.add_node((Some(block.clone()), stat_index));
         self.block_to_node.insert(block.clone().into(), node);
-        for (stat_index, stat) in block.lock().iter().enumerate() {
-            
-            if !matches!(stat, Statement::GenericFor(_) | Statement::NumericFor(_)) {
-                
-                
-                for local in stat.values_written() {
-                    self.local_usages
-                        .entry(local.clone())
-                        .or_default()
-                        .entry(node)
-                        .or_insert(stat_index);
+
+        enum Nested {
+            If {
+                stat_index: usize,
+                then_b: Arc<Mutex<Block>>,
+                else_b: Arc<Mutex<Block>>,
+            },
+            One {
+                stat_index: usize,
+                child: Arc<Mutex<Block>>,
+            },
+        }
+        let mut nested = Vec::new();
+        {
+            let Some(guard) = block.try_lock() else {
+                return node;
+            };
+            for (stat_index, stat) in guard.iter().enumerate() {
+                if !matches!(stat, Statement::GenericFor(_) | Statement::NumericFor(_)) {
+                    for local in stat.values_written() {
+                        self.local_usages
+                            .entry(local.clone())
+                            .or_default()
+                            .entry(node)
+                            .or_insert(stat_index);
+                    }
+                }
+                match stat {
+                    Statement::If(r#if) => nested.push(Nested::If {
+                        stat_index,
+                        then_b: r#if.then_block.clone(),
+                        else_b: r#if.else_block.clone(),
+                    }),
+                    Statement::While(r#while) => nested.push(Nested::One {
+                        stat_index,
+                        child: r#while.block.clone(),
+                    }),
+                    Statement::Repeat(repeat) => nested.push(Nested::One {
+                        stat_index,
+                        child: repeat.block.clone(),
+                    }),
+                    Statement::NumericFor(numeric_for) => nested.push(Nested::One {
+                        stat_index,
+                        child: numeric_for.block.clone(),
+                    }),
+                    Statement::GenericFor(generic_for) => nested.push(Nested::One {
+                        stat_index,
+                        child: generic_for.block.clone(),
+                    }),
+                    _ => {}
                 }
             }
-            match stat {
-                Statement::If(r#if) => {
+        }
+        for n in nested {
+            match n {
+                Nested::If {
+                    stat_index,
+                    then_b,
+                    else_b,
+                } => {
                     let if_node = self.graph.add_node((None, stat_index));
                     self.graph.add_edge(node, if_node, ());
-                    let then_node = self.visit(r#if.then_block.clone(), stat_index);
+                    let then_node = self.visit(then_b, stat_index);
                     self.graph.add_edge(if_node, then_node, ());
-                    let else_node = self.visit(r#if.else_block.clone(), stat_index);
+                    let else_node = self.visit(else_b, stat_index);
                     self.graph.add_edge(if_node, else_node, ());
                 }
-                Statement::While(r#while) => {
-                    let child = self.visit(r#while.block.clone(), stat_index);
+                Nested::One { stat_index, child } => {
+                    let child = self.visit(child, stat_index);
                     self.graph.add_edge(node, child, ());
                 }
-                Statement::Repeat(repeat) => {
-                    let child = self.visit(r#repeat.block.clone(), stat_index);
-                    self.graph.add_edge(node, child, ());
-                }
-                Statement::NumericFor(numeric_for) => {
-                    let child = self.visit(r#numeric_for.block.clone(), stat_index);
-                    self.graph.add_edge(node, child, ());
-                }
-                Statement::GenericFor(generic_for) => {
-                    let child = self.visit(r#generic_for.block.clone(), stat_index);
-                    self.graph.add_edge(node, child, ());
-                }
-                _ => {}
             }
         }
         node
@@ -228,7 +265,9 @@ impl LocalDeclarer {
         }
 
         for (ByAddress(block), declarations) in self.declarations {
-            let mut block = block.lock();
+            let Some(mut block) = block.try_lock() else {
+                continue;
+            };
             for (stat_index, mut locals) in declarations.into_iter().rev() {
                 match &mut block[stat_index] {
                     Statement::Assign(assign)

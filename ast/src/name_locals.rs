@@ -323,7 +323,9 @@ impl Namer {
         for statement in &mut block.0 {
             statement.post_traverse_values(&mut |value| -> Option<()> {
                 if let itertools::Either::Right(RValue::Closure(closure)) = value {
-                    let mut function = closure.function.lock();
+                    let Some(mut function) = closure.function.try_lock() else {
+                        return None;
+                    };
                     for param in &function.parameters {
                         self.name_local_with_prefix("p", param);
                     }
@@ -364,20 +366,30 @@ impl Namer {
                     }
                 }
                 Statement::If(r#if) => {
-                    self.name_locals(&mut r#if.then_block.lock());
-                    self.name_locals(&mut r#if.else_block.lock());
+                    if let Some(mut b) = r#if.then_block.try_lock() {
+                        self.name_locals(&mut b);
+                    }
+                    if let Some(mut b) = r#if.else_block.try_lock() {
+                        self.name_locals(&mut b);
+                    }
                 }
                 Statement::While(r#while) => {
-                    self.name_locals(&mut r#while.block.lock());
+                    if let Some(mut b) = r#while.block.try_lock() {
+                        self.name_locals(&mut b);
+                    }
                 }
                 Statement::Repeat(repeat) => {
-                    self.name_locals(&mut repeat.block.lock());
+                    if let Some(mut b) = repeat.block.try_lock() {
+                        self.name_locals(&mut b);
+                    }
                 }
                 Statement::NumericFor(numeric_for) => {
                     let letter = self.for_letter();
                     self.name_local_fixed(letter, &numeric_for.counter);
                     self.numeric_for_depth += 1;
-                    self.name_locals(&mut numeric_for.block.lock());
+                    if let Some(mut b) = numeric_for.block.try_lock() {
+                        self.name_locals(&mut b);
+                    }
                     self.numeric_for_depth -= 1;
                 }
                 Statement::GenericFor(generic_for) => {
@@ -397,7 +409,9 @@ impl Namer {
                             self.name_local_with_prefix("v", res_local);
                         }
                     }
-                    self.name_locals(&mut generic_for.block.lock());
+                    if let Some(mut b) = generic_for.block.try_lock() {
+                        self.name_locals(&mut b);
+                    }
                 }
                 _ => {}
             }
@@ -417,26 +431,40 @@ impl Namer {
                             })
                             .cloned(),
                     );
-                    self.find_upvalues(&mut closure.function.lock().body);
+                    if let Some(mut function) = closure.function.try_lock() {
+                        self.find_upvalues(&mut function.body);
+                    }
                 };
                 None
             });
             match statement {
                 Statement::If(r#if) => {
-                    self.find_upvalues(&mut r#if.then_block.lock());
-                    self.find_upvalues(&mut r#if.else_block.lock());
+                    if let Some(mut b) = r#if.then_block.try_lock() {
+                        self.find_upvalues(&mut b);
+                    }
+                    if let Some(mut b) = r#if.else_block.try_lock() {
+                        self.find_upvalues(&mut b);
+                    }
                 }
                 Statement::While(r#while) => {
-                    self.find_upvalues(&mut r#while.block.lock());
+                    if let Some(mut b) = r#while.block.try_lock() {
+                        self.find_upvalues(&mut b);
+                    }
                 }
                 Statement::Repeat(repeat) => {
-                    self.find_upvalues(&mut repeat.block.lock());
+                    if let Some(mut b) = repeat.block.try_lock() {
+                        self.find_upvalues(&mut b);
+                    }
                 }
                 Statement::NumericFor(numeric_for) => {
-                    self.find_upvalues(&mut numeric_for.block.lock());
+                    if let Some(mut b) = numeric_for.block.try_lock() {
+                        self.find_upvalues(&mut b);
+                    }
                 }
                 Statement::GenericFor(generic_for) => {
-                    self.find_upvalues(&mut generic_for.block.lock());
+                    if let Some(mut b) = generic_for.block.try_lock() {
+                        self.find_upvalues(&mut b);
+                    }
                 }
                 _ => {}
             }

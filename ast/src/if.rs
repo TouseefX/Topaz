@@ -50,8 +50,16 @@ impl SideEffects for If {
         // ASTs. Non-empty bodies are treated as effecting; empty ones
         // still fold when the condition is pure.
         self.condition.has_side_effects()
-            || !self.then_block.lock().is_empty()
-            || !self.else_block.lock().is_empty()
+            || self
+                .then_block
+                .try_lock()
+                .map(|b| !b.is_empty())
+                .unwrap_or(true)
+            || self
+                .else_block
+                .try_lock()
+                .map(|b| !b.is_empty())
+                .unwrap_or(true)
     }
 }
 

@@ -241,8 +241,8 @@ fn rewrite_else_join_labels(block: &mut Block) -> bool {
 }
 
 fn try_rewrite_if_else_join(r#if: &If) -> Option<Vec<Statement>> {
-    let then_block = r#if.then_block.lock();
-    let else_block = r#if.else_block.lock();
+    let then_block = r#if.then_block.try_lock()?;
+    let else_block = r#if.else_block.try_lock()?;
 
     // else must start with ::L::
     let label = label_name(else_block.0.first()?)?;
@@ -265,8 +265,8 @@ fn try_rewrite_if_else_join(r#if: &If) -> Option<Vec<Statement>> {
     // Case 2: then is only `if D then goto L end` (empty else on inner)
     if then_block.0.len() == 1 {
         if let Statement::If(inner) = &then_block.0[0] {
-            let inner_then = inner.then_block.lock();
-            let inner_else = inner.else_block.lock();
+            let inner_then = inner.then_block.try_lock()?;
+            let inner_else = inner.else_block.try_lock()?;
             let only_goto = inner_then.0.len() == 1
                 && goto_name(&inner_then.0[0]) == Some(label.as_str())
                 && inner_else.0.is_empty();
@@ -307,8 +307,14 @@ fn try_rewrite_if_else_join(r#if: &If) -> Option<Vec<Statement>> {
             let mut skip_conds: Vec<RValue> = Vec::new();
             for stmt in &then_prefix {
                 if let Statement::If(inner) = stmt {
-                    let inner_then = inner.then_block.lock();
-                    let inner_else = inner.else_block.lock();
+                    let Some(inner_then) = inner.then_block.try_lock() else {
+                        a_stmts.push(stmt.clone());
+                        continue;
+                    };
+                    let Some(inner_else) = inner.else_block.try_lock() else {
+                        a_stmts.push(stmt.clone());
+                        continue;
+                    };
                     let pure_skip = inner_then.0.len() == 1
                         && goto_name(&inner_then.0[0]) == Some(label.as_str())
                         && inner_else.0.is_empty();
@@ -429,8 +435,12 @@ fn rewrite_one_skip_forward_to_label(stmts: &mut Vec<Statement>, label: &str) ->
             let Statement::If(r#if) = &stmts[i] else {
                 continue;
             };
-            let then_b = r#if.then_block.lock();
-            let else_b = r#if.else_block.lock();
+            let Some(then_b) = r#if.then_block.try_lock() else {
+                continue;
+            };
+            let Some(else_b) = r#if.else_block.try_lock() else {
+                continue;
+            };
             (
                 else_b.0.is_empty(),
                 ends_with_goto_named(&then_b.0, label),
@@ -466,8 +476,12 @@ fn rewrite_one_skip_forward_to_label(stmts: &mut Vec<Statement>, label: &str) ->
             let Statement::If(inner) = last else {
                 continue;
             };
-            let inner_then = inner.then_block.lock();
-            let inner_else = inner.else_block.lock();
+            let Some(inner_then) = inner.then_block.try_lock() else {
+                continue;
+            };
+            let Some(inner_else) = inner.else_block.try_lock() else {
+                continue;
+            };
             let ok = inner_else.0.is_empty() && ends_with_goto_named(&inner_then.0, label);
             ok
         };

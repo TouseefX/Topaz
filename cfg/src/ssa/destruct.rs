@@ -112,6 +112,10 @@ impl<'a> Destructor<'a> {
         let _ = &self.liveness;
     }
 
+    fn def_of(&self, local: &RcLocal) -> Option<(usize, NodeIndex, ParamOrStatIndex)> {
+        self.local_defs.get(local).copied()
+    }
+
     fn coalesce_upvalues(&mut self) {
         for (upvalue, group) in self
             .upvalue_to_group
@@ -119,8 +123,10 @@ impl<'a> Destructor<'a> {
             .map(|(u, g)| (u.clone(), g.clone()))
             .collect::<Vec<_>>()
         {
+            let Some((upval_dom_index, _, upval_stat_index)) = self.def_of(&upvalue) else {
+                continue;
+            };
             let con_class = self.get_congruence_class(group.clone()).clone();
-            let (upval_dom_index, _, upval_stat_index) = self.local_defs[&upvalue];
             con_class
                 .borrow_mut()
                 .insert((upval_dom_index, upval_stat_index), upvalue.clone());
@@ -332,9 +338,12 @@ impl<'a> Destructor<'a> {
 
     
     fn check_pre_dom_order(&self, a: &RcLocal, b: &RcLocal) -> bool {
-        let (a_dom_index, _, a_stat_index) = self.local_defs[a];
-        let (b_dom_index, _, b_stat_index) = self.local_defs[b];
-        (a_dom_index, a_stat_index) < (b_dom_index, b_stat_index)
+        match (self.def_of(a), self.def_of(b)) {
+            (Some((a_dom_index, _, a_stat_index)), Some((b_dom_index, _, b_stat_index))) => {
+                (a_dom_index, a_stat_index) < (b_dom_index, b_stat_index)
+            }
+            _ => false,
+        }
     }
 
     
@@ -357,10 +366,13 @@ impl<'a> Destructor<'a> {
                 );
 
                 for (param, arg) in args {
-                    let arg = arg.into_local().unwrap();
+                    let Some(arg) = arg.as_local().cloned() else {
+                        continue;
+                    };
+                    let Some((dominator_index, _, stat_index)) = self.def_of(&arg) else {
+                        continue;
+                    };
                     let congruence_class = self.get_congruence_class(param).clone();
-
-                    let (dominator_index, _, stat_index) = self.local_defs[&arg];
                     congruence_class
                         .borrow_mut()
                         .insert((dominator_index, stat_index), arg.clone());
@@ -371,14 +383,21 @@ impl<'a> Destructor<'a> {
     }
 
     fn get_congruence_class(&mut self, local: RcLocal) -> &Rc<RefCell<CongruenceClass>> {
-        self.congruence_classes
-            .entry(local.clone())
-            .or_insert_with(|| {
-                let mut congruence_class = BTreeMap::default();
-                let (dominator_index, _, stat_index) = self.local_defs[&local];
-                congruence_class.insert((dominator_index, stat_index), local);
-                Rc::new(RefCell::new(congruence_class))
-            })
+        if !self.congruence_classes.contains_key(&local) {
+            let mut congruence_class = BTreeMap::default();
+            // Incomplete SSA (deadline abort, lift_params temps) used to
+            // panic here (`local_defs[&local]`) and leave the CFG half
+            // destructed. catch_unwind then ran restructure + format on
+            // that graph, which deadlocked parking_lot on aliased if-bodies.
+            let key = match self.local_defs.get(&local).copied() {
+                Some((dominator_index, _, stat_index)) => (dominator_index, stat_index),
+                None => (usize::MAX, ParamOrStatIndex::Param(0)),
+            };
+            congruence_class.insert(key, local.clone());
+            self.congruence_classes
+                .insert(local.clone(), Rc::new(RefCell::new(congruence_class)));
+        }
+        self.congruence_classes.get(&local).unwrap()
     }
 
     fn is_for_next(&self, node: NodeIndex) -> bool {
@@ -563,8 +582,10 @@ impl<'a> Destructor<'a> {
         {
             true
         } else {
+            let Some((dom_index_b, _, stat_index_b)) = self.def_of(&local_b) else {
+                return true;
+            };
             self.equal_ancestor_in.insert(local_a, local_b.clone());
-            let (dom_index_b, _, stat_index_b) = self.local_defs[&local_b];
             red.borrow_mut()
                 .insert((dom_index_b, stat_index_b), local_b.clone());
             self.congruence_classes.insert(local_b, red.clone());
@@ -576,8 +597,12 @@ impl<'a> Destructor<'a> {
         assert!(local_a != local_b);
         assert!(!self.dominates(local_a, local_b));
 
-        let (_, block_a, _) = self.local_defs[local_a];
-        let (_, block_b, _) = self.local_defs[local_b];
+        let Some((_, block_a, _)) = self.def_of(local_a) else {
+            return false;
+        };
+        let Some((_, block_b, _)) = self.def_of(local_b) else {
+            return false;
+        };
         if self.liveness.live_out_contains(block_a, local_b) {
             true
         } else if !self.liveness.live_in_contains(block_a, local_b) && block_a != block_b {
@@ -587,7 +612,9 @@ impl<'a> Destructor<'a> {
             .get(local_b)
             .and_then(|m| m.get(&block_a))
         {
-            let (def_dom_index, _, def_stat_index) = self.local_defs[local_a];
+            let Some((def_dom_index, _, def_stat_index)) = self.def_of(local_a) else {
+                return false;
+            };
             dom_use_index > &(def_dom_index, def_stat_index)
         } else {
             false
@@ -595,8 +622,12 @@ impl<'a> Destructor<'a> {
     }
 
     fn dominates(&self, local_a: &RcLocal, local_b: &RcLocal) -> bool {
-        let (a_dom_index, block_a, a_stat_index) = self.local_defs[local_a];
-        let (b_dom_index, block_b, b_stat_index) = self.local_defs[local_b];
+        let Some((a_dom_index, block_a, a_stat_index)) = self.def_of(local_a) else {
+            return false;
+        };
+        let Some((b_dom_index, block_b, b_stat_index)) = self.def_of(local_b) else {
+            return false;
+        };
         if block_a == block_b {
             
             (a_dom_index, a_stat_index) < (b_dom_index, b_stat_index)

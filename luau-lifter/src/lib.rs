@@ -479,25 +479,39 @@ fn collect_captured_upvalues(block: &mut ast::Block, out: &mut FxHashSet<ast::Rc
                 out.extend(closure.upvalues.iter().map(|u| match u {
                     ast::Upvalue::Copy(l) | ast::Upvalue::Ref(l) => l.clone(),
                 }));
-                collect_captured_upvalues(&mut closure.function.lock().body, out);
+                if let Some(mut function) = closure.function.try_lock() {
+                    collect_captured_upvalues(&mut function.body, out);
+                }
             }
         });
         match stat {
             ast::Statement::If(r#if) => {
-                collect_captured_upvalues(&mut r#if.then_block.lock(), out);
-                collect_captured_upvalues(&mut r#if.else_block.lock(), out);
+                if let Some(mut b) = r#if.then_block.try_lock() {
+                    collect_captured_upvalues(&mut b, out);
+                }
+                if let Some(mut b) = r#if.else_block.try_lock() {
+                    collect_captured_upvalues(&mut b, out);
+                }
             }
             ast::Statement::While(r#while) => {
-                collect_captured_upvalues(&mut r#while.block.lock(), out);
+                if let Some(mut b) = r#while.block.try_lock() {
+                    collect_captured_upvalues(&mut b, out);
+                }
             }
             ast::Statement::Repeat(repeat) => {
-                collect_captured_upvalues(&mut repeat.block.lock(), out);
+                if let Some(mut b) = repeat.block.try_lock() {
+                    collect_captured_upvalues(&mut b, out);
+                }
             }
             ast::Statement::NumericFor(numeric_for) => {
-                collect_captured_upvalues(&mut numeric_for.block.lock(), out);
+                if let Some(mut b) = numeric_for.block.try_lock() {
+                    collect_captured_upvalues(&mut b, out);
+                }
             }
             ast::Statement::GenericFor(generic_for) => {
-                collect_captured_upvalues(&mut generic_for.block.lock(), out);
+                if let Some(mut b) = generic_for.block.try_lock() {
+                    collect_captured_upvalues(&mut b, out);
+                }
             }
             _ => {}
         }
@@ -558,25 +572,39 @@ fn propagate_names_block(block: &mut ast::Block, captured: &FxHashSet<ast::RcLoc
     for stat in &mut block.0 {
         stat.traverse_rvalues(&mut |rvalue| {
             if let ast::RValue::Closure(closure) = rvalue {
-                propagate_names_block(&mut closure.function.lock().body, captured);
+                if let Some(mut function) = closure.function.try_lock() {
+                    propagate_names_block(&mut function.body, captured);
+                }
             }
         });
         match stat {
             ast::Statement::If(r#if) => {
-                propagate_names_block(&mut r#if.then_block.lock(), captured);
-                propagate_names_block(&mut r#if.else_block.lock(), captured);
+                if let Some(mut b) = r#if.then_block.try_lock() {
+                    propagate_names_block(&mut b, captured);
+                }
+                if let Some(mut b) = r#if.else_block.try_lock() {
+                    propagate_names_block(&mut b, captured);
+                }
             }
             ast::Statement::While(r#while) => {
-                propagate_names_block(&mut r#while.block.lock(), captured);
+                if let Some(mut b) = r#while.block.try_lock() {
+                    propagate_names_block(&mut b, captured);
+                }
             }
             ast::Statement::Repeat(repeat) => {
-                propagate_names_block(&mut repeat.block.lock(), captured);
+                if let Some(mut b) = repeat.block.try_lock() {
+                    propagate_names_block(&mut b, captured);
+                }
             }
             ast::Statement::NumericFor(numeric_for) => {
-                propagate_names_block(&mut numeric_for.block.lock(), captured);
+                if let Some(mut b) = numeric_for.block.try_lock() {
+                    propagate_names_block(&mut b, captured);
+                }
             }
             ast::Statement::GenericFor(generic_for) => {
-                propagate_names_block(&mut generic_for.block.lock(), captured);
+                if let Some(mut b) = generic_for.block.try_lock() {
+                    propagate_names_block(&mut b, captured);
+                }
             }
             _ => {}
         }
@@ -725,7 +753,7 @@ fn decompile_function(
         }
     }));
 
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let destruct_ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ssa::Destructor::new(
             &mut function,
             upvalue_to_group,
@@ -733,7 +761,22 @@ fn decompile_function(
             local_count,
         )
         .destruct();
-    }));
+    }))
+    .is_ok();
+    if !destruct_ok {
+        // Half-destructed CFG: do not restructure or format it. That is
+        // what deadlocked parking_lot after `local_defs[&local]` panicked.
+        let body = flatten_cfg(&function);
+        return finish_function(
+            ast_function,
+            body,
+            params,
+            is_variadic,
+            func_line,
+            upvalues_in,
+            false,
+        );
+    }
 
     let params = std::mem::take(&mut function.parameters);
     let is_variadic = function.is_variadic;
@@ -769,11 +812,18 @@ fn link_upvalues(
     body: &mut ast::Block,
     upvalues: &mut FxHashMap<ByAddress<Arc<Mutex<ast::Function>>>, Vec<ast::RcLocal>>,
 ) {
+    if cfg::past_decompile_deadline() {
+        return;
+    }
     for stat in &mut body.0 {
         stat.traverse_rvalues(&mut |rvalue| {
             if let ast::RValue::Closure(closure) = rvalue {
-                let old_upvalues = &upvalues[&closure.function];
-                let mut function = closure.function.lock();
+                let Some(old_upvalues) = upvalues.get(&closure.function).cloned() else {
+                    return;
+                };
+                let Some(mut function) = closure.function.try_lock() else {
+                    return;
+                };
 
                 let mut local_map =
                     FxHashMap::with_capacity_and_hasher(old_upvalues.len(), Default::default());
@@ -807,20 +857,32 @@ fn link_upvalues(
         });
         match stat {
             ast::Statement::If(r#if) => {
-                link_upvalues(&mut r#if.then_block.lock(), upvalues);
-                link_upvalues(&mut r#if.else_block.lock(), upvalues);
+                if let Some(mut b) = r#if.then_block.try_lock() {
+                    link_upvalues(&mut b, upvalues);
+                }
+                if let Some(mut b) = r#if.else_block.try_lock() {
+                    link_upvalues(&mut b, upvalues);
+                }
             }
             ast::Statement::While(r#while) => {
-                link_upvalues(&mut r#while.block.lock(), upvalues);
+                if let Some(mut b) = r#while.block.try_lock() {
+                    link_upvalues(&mut b, upvalues);
+                }
             }
             ast::Statement::Repeat(repeat) => {
-                link_upvalues(&mut repeat.block.lock(), upvalues);
+                if let Some(mut b) = repeat.block.try_lock() {
+                    link_upvalues(&mut b, upvalues);
+                }
             }
             ast::Statement::NumericFor(numeric_for) => {
-                link_upvalues(&mut numeric_for.block.lock(), upvalues);
+                if let Some(mut b) = numeric_for.block.try_lock() {
+                    link_upvalues(&mut b, upvalues);
+                }
             }
             ast::Statement::GenericFor(generic_for) => {
-                link_upvalues(&mut generic_for.block.lock(), upvalues);
+                if let Some(mut b) = generic_for.block.try_lock() {
+                    link_upvalues(&mut b, upvalues);
+                }
             }
             _ => {}
         }
