@@ -126,6 +126,10 @@ impl<'a> Inliner<'a> {
     
     fn inline_rvalues(self) {
         let node_indices = self.function.graph().node_indices().collect::<Vec<_>>();
+        let graph_n = self.function.graph().node_count();
+        // Full lookback is O(stmts²) per block. After jump folding a
+        // 60k-line function can be a few thousand-stmt blocks.
+        let lookback = if graph_n > 800 { 24usize } else { usize::MAX };
         for node in node_indices {
             let block = self.function.block_mut(node).unwrap();
 
@@ -151,13 +155,6 @@ impl<'a> Inliner<'a> {
             }
 
             
-            // Full lookback is O(stmts²) per block. After jump folding a
-            // 60k-line function can be a few thousand-stmt blocks.
-            let lookback = if self.function.graph().node_count() > 800 {
-                24usize
-            } else {
-                usize::MAX
-            };
             let mut index = 0;
             'w: while index < block.len() {
                 let mut groups_written = FxHashSet::default();
