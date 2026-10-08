@@ -625,7 +625,6 @@ fn flatten_cfg(function: &Function) -> ast::Block {
     for n in order {
         if let Some(b) = function.block(n) {
             if !b.0.is_empty() {
-                body.push(ast::Comment::new(format!("block {}", n.index())).into());
                 body.extend(b.0.iter().cloned());
             }
         }

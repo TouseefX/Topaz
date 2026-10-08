@@ -236,9 +236,9 @@ impl<'a> Destructor<'a> {
         let mut map = FxHashMap::default();
         for (local, con_class) in &self.congruence_classes {
             let con_class = con_class.borrow();
-            let new_local = con_class.iter().next().unwrap().1;
-            
-            
+            let Some(new_local) = con_class.iter().next().map(|(_, l)| l) else {
+                continue;
+            };
             if local != new_local {
                 map.insert(local.clone(), new_local.clone());
             }
@@ -391,7 +391,13 @@ impl<'a> Destructor<'a> {
             // that graph, which deadlocked parking_lot on aliased if-bodies.
             let key = match self.local_defs.get(&local).copied() {
                 Some((dominator_index, _, stat_index)) => (dominator_index, stat_index),
-                None => (usize::MAX, ParamOrStatIndex::Param(0)),
+                // Unique dummy: a shared (MAX, Param(0)) let merge's
+                // `take()` orphan HashMap keys onto an empty BTreeMap, which
+                // then panicked at `red_iter.peek().unwrap()` (line 658).
+                None => (
+                    usize::MAX,
+                    ParamOrStatIndex::Param(self.congruence_classes.len()),
+                ),
             };
             congruence_class.insert(key, local.clone());
             self.congruence_classes
@@ -569,8 +575,12 @@ impl<'a> Destructor<'a> {
         red: &Rc<RefCell<CongruenceClass>>,
         blue: &Rc<RefCell<CongruenceClass>>,
     ) -> bool {
-        let mut local_a = red.borrow().values().next().unwrap().clone();
-        let mut local_b = blue.borrow().values().next().unwrap().clone();
+        let Some(mut local_a) = red.borrow().values().next().cloned() else {
+            return false;
+        };
+        let Some(mut local_b) = blue.borrow().values().next().cloned() else {
+            return false;
+        };
         
         
         if self.check_pre_dom_order(&local_a, &local_b) {
@@ -655,8 +665,13 @@ impl<'a> Destructor<'a> {
         let mut red_count = 0;
         let mut blue_count = 0;
 
-        self.equal_ancestor_out.remove(red_iter.peek().unwrap().1);
-        self.equal_ancestor_out.remove(blue_iter.peek().unwrap().1);
+        let red_first = red_iter.peek().map(|(_, l)| (*l).clone());
+        let blue_first = blue_iter.peek().map(|(_, l)| (*l).clone());
+        let (Some(red_first), Some(blue_first)) = (red_first, blue_first) else {
+            return false;
+        };
+        self.equal_ancestor_out.remove(&red_first);
+        self.equal_ancestor_out.remove(&blue_first);
         loop {
             let (curr, curr_class) = if blue_iter.peek().is_none()
                 || (red_iter.peek().is_some()
