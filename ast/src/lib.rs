@@ -3,7 +3,7 @@ use enum_as_inner::EnumAsInner;
 use enum_dispatch::enum_dispatch;
 use formatter::Formatter;
 use itertools::Either;
-use parking_lot::ReentrantMutex;
+use parking_lot::Mutex;
 use triomphe::Arc;
 
 use std::{
@@ -341,21 +341,23 @@ impl fmt::Display for Statement {
 #[derive(Debug, PartialEq, Clone, Default, From)]
 pub struct Block(pub Vec<Statement>);
 
-/// `if`/`while`/`function` bodies. `parking_lot::Mutex` is **not**
-/// reentrant: a 8k-block elseif dispatcher aliases child `Arc`s via
-/// `Statement::clone()`, then lock-then-recurse self-deadlocks. Same
-/// thread may now re-enter.
-pub type SharedBlock = Arc<ReentrantMutex<Block>>;
-pub type SharedFunction = Arc<ReentrantMutex<Function>>;
+/// Shared `if`/`while`/`function` bodies.
+///
+/// `parking_lot::ReentrantMutex` is **not** usable here: its guard is
+/// `Deref` only (no `DerefMut`), because two nested locks on the same
+/// thread would alias `&mut`. Keep a normal `Mutex` so passes can mutate
+/// the body; re-entry is avoided with `try_lock` / the post-wave timeout.
+pub type SharedBlock = Arc<Mutex<Block>>;
+pub type SharedFunction = Arc<Mutex<Function>>;
 
 #[inline]
 pub fn share_block(block: Block) -> SharedBlock {
-    Arc::new(ReentrantMutex::new(block))
+    Arc::new(Mutex::new(block))
 }
 
 #[inline]
 pub fn share_function(function: Function) -> SharedFunction {
-    Arc::new(ReentrantMutex::new(function))
+    Arc::new(Mutex::new(function))
 }
 
 /// Medal-improved: compare shared `if`/`while` bodies by pointer first so

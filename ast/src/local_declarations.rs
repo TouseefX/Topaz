@@ -10,7 +10,7 @@ use petgraph::{
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::{Assign, Block, LocalRw, RcLocal, SharedBlock, Statement};
+use crate::{Assign, LocalRw, RcLocal, SharedBlock, Statement};
 
 /// Euler-tour dominates: O(n) preprocess, O(1) query. Replaces
 /// `dominators(n).collect_vec()` ∩ Intersect which was O(depth²) per local.
