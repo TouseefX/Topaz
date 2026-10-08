@@ -266,10 +266,11 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8
     // Budget covers decode + lift + SSA. Armed before decode_best so a
     // 21 MB AUX-expanded dump cannot hang in the loader forever.
     let deadline = cfg::decompile_deadline().unwrap_or_else(|| {
-        let d = Instant::now() + Duration::from_secs(180);
+        let d = Instant::now() + cfg::decompile_budget();
         cfg::set_decompile_deadline(Some(d));
         d
     });
+    let n_funcs = chunk.functions.len().max(1);
     let mut lifted = Vec::new();
     let mut stack = vec![(ast::share_function(ast::Function::default()), chunk.main)];
     while let Some((ast_func, func_id)) = stack.pop() {
@@ -326,55 +327,77 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8
     upvalues.remove(&main);
     let body = Arc::try_unwrap(main.0).unwrap().into_inner().body;
 
-    // Post-wave can still self-deadlock on aliased elseif Arcs inside
-    // `inline_short_gotos`. recv_timeout plus a deep-cloned snapshot taken
-    // *before* that pass means a hang still returns structured Lua instead
-    // of 58 bytes of error.
-    let wait = deadline
-        .saturating_duration_since(Instant::now())
-        .max(Duration::from_secs(15));
+    // Post-wave can still spin on aliased elseif Arcs. recv_timeout plus
+    // deep-cloned snapshots (closures detached) mean a hang still returns
+    // structured, *valid* Luau instead of 58 bytes or a `goto` dump.
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let wait = if cfg::decompile_budget_secs() >= 30 {
+        remaining.max(Duration::from_secs(15))
+    } else {
+        remaining
+    };
     let (tx, rx) = mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("topaz-post".into())
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
-            run_post_wave(body, upvalues, tx);
+            cfg::set_decompile_deadline(Some(deadline));
+            ast::set_post_deadline(Some(deadline));
+            run_post_wave(body, upvalues, tx, n_funcs);
         });
     match spawned {
-        Ok(_) => recv_post_wave(rx, wait),
+        Ok(_) => recv_post_wave(rx, wait, n_funcs),
         Err(_) => {
-            "-- Decompiled with Topaz\n-- Error: failed to spawn post-process thread\n"
+            "-- Decompiled with Topaz\n-- TOPAZ_INCOMPLETE\n-- Error: failed to spawn post-process thread\n"
                 .into()
         }
     }
 }
 
 enum PostEvent {
-    /// Deep clone of the AST after naming, before `inline_short_gotos`.
-    Snapshot(ast::Block),
+    Entering(&'static str),
+    /// Deep clone of the AST after the named pass completed.
+    Snapshot { body: ast::Block, pass: &'static str },
     Done(String),
 }
 
-fn recv_post_wave(rx: mpsc::Receiver<PostEvent>, wait: Duration) -> String {
+fn render_complete(body: &mut ast::Block) -> String {
+    let _ = ast::sanitize_for_luau(body);
+    format!("-- Decompiled with Topaz\n-- Created by: Andrew and TouseefX\n\n{body}")
+}
+
+fn render_incomplete(body: &mut ast::Block, pass: &str, n_total: usize) -> String {
+    let n_printed = ast::sanitize_for_luau(body);
+    let budget = cfg::decompile_budget_secs();
+    format!(
+        "-- Decompiled with Topaz\n-- Created by: Andrew and TouseefX\n-- {INCOMPLETE_MARK}\n-- ERROR: time budget {budget}s expired in pass {pass}\n-- functions printed: {n_printed}/{n_total} (incomplete)\n\n{body}"
+    )
+}
+
+fn recv_post_wave(rx: mpsc::Receiver<PostEvent>, wait: Duration, n_funcs: usize) -> String {
     let deadline = Instant::now() + wait;
     let mut fallback: Option<ast::Block> = None;
+    let mut current_pass = "post-process";
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             break;
         }
         match rx.recv_timeout(remaining) {
-            Ok(PostEvent::Snapshot(b)) => fallback = Some(b),
+            Ok(PostEvent::Entering(p)) => current_pass = p,
+            Ok(PostEvent::Snapshot { body, pass }) => {
+                current_pass = pass;
+                fallback = Some(body);
+            }
             Ok(PostEvent::Done(s)) => return s,
             Err(_) => break,
         }
     }
     match fallback {
-        Some(b) => format!(
-            "-- Decompiled with Topaz\n-- Created by: Andrew and TouseefX\n-- post-process timed out; skipped goto inlining\n\n{}",
-            b
+        Some(mut b) => render_incomplete(&mut b, current_pass, n_funcs),
+        None => format!(
+            "-- Decompiled with Topaz\n-- {INCOMPLETE_MARK}\n-- Error: post-process timed out in pass {current_pass}\n"
         ),
-        None => "-- Decompiled with Topaz\n-- Error: post-process timed out\n".into(),
     }
 }
 
@@ -382,21 +405,37 @@ fn run_post_wave(
     mut body: ast::Block,
     mut upvalues: FxHashMap<ByAddress<ast::SharedFunction>, Vec<ast::RcLocal>>,
     tx: mpsc::Sender<PostEvent>,
+    _n_funcs: usize,
 ) {
-    let dbg = std::env::var_os("TOPAZ_DEBUG_CYCLES").is_some();
+    let dbg = std::env::var("TOPAZ_DEBUG_CYCLES")
+        .ok()
+        .filter(|s| s != "0" && !s.eq_ignore_ascii_case("false"))
+        .is_some();
+    let post_start = Instant::now();
     macro_rules! step {
         ($name:expr, $e:expr) => {{
+            let _ = tx.send(PostEvent::Entering($name));
             if dbg {
-                eprintln!("[post] entering {}", $name);
+                eprintln!(
+                    "[post] entering {} t+{:.1}s",
+                    $name,
+                    post_start.elapsed().as_secs_f64()
+                );
             }
+            let t0 = Instant::now();
             $e;
             if dbg {
-                eprintln!("[post] after {}: {}", $name, report_cycles(&mut body));
+                eprintln!(
+                    "[post] after {} ({:.1}s): {}",
+                    $name,
+                    t0.elapsed().as_secs_f64(),
+                    report_cycles(&mut body)
+                );
             }
         }};
     }
     if dbg {
-        eprintln!("[post] start: {}", report_cycles(&mut body));
+        eprintln!("[post] start t+0.0s: {}", report_cycles(&mut body));
     }
     step!("link_upvalues", link_upvalues(&mut body, &mut upvalues));
     const QUALITY_STMT_CAP: usize = 250_000;
@@ -406,8 +445,19 @@ fn run_post_wave(
             ast::context_naming::apply_context_naming(&mut body)
         );
         step!("propagate_names", propagate_names(&mut body));
-        let _ = tx.send(PostEvent::Snapshot(body.deep_clone()));
+        if !ast::past_post_deadline() {
+            let _ = tx.send(PostEvent::Snapshot {
+                body: body.deep_clone(),
+                pass: "propagate_names",
+            });
+        }
         step!("inline_short_gotos", inline_short_gotos(&mut body));
+        if !ast::past_post_deadline() {
+            let _ = tx.send(PostEvent::Snapshot {
+                body: body.deep_clone(),
+                pass: "inline_short_gotos",
+            });
+        }
         step!(
             "apply_guard_clauses",
             ast::guard_clauses::apply_guard_clauses(&mut body)
@@ -416,10 +466,7 @@ fn run_post_wave(
     if body.0.len() < QUALITY_STMT_CAP {
         step!("name_locals", name_locals(&mut body, true));
     }
-    let _ = tx.send(PostEvent::Done(format!(
-        "-- Decompiled with Topaz\n-- Created by: Andrew and TouseefX\n\n{}",
-        body
-    )));
+    let _ = tx.send(PostEvent::Done(render_complete(&mut body)));
 }
 
 /// `TOPAZ_DEBUG_CYCLES=1`: report blocks reachable from themselves
@@ -622,12 +669,30 @@ pub fn decompile_bytecode(bytecode: &[u8], encode_key: u8) -> String {
     }
 }
 
+/// Override the wall-clock decompile budget (seconds). `0` expires immediately.
+/// CLI `--time-budget` and tests call this; otherwise `TOPAZ_TIME_BUDGET_SECS`
+/// or the 180s default applies.
+pub fn set_time_budget_secs(secs: u64) {
+    cfg::set_decompile_budget_secs(secs);
+}
+
+/// Marker grepped by the CLI to exit non-zero on truncated output.
+pub const INCOMPLETE_MARK: &str = "TOPAZ_INCOMPLETE";
+
+pub fn output_is_incomplete(out: &str) -> bool {
+    out.contains(INCOMPLETE_MARK)
+        || out.contains("-- Error: post-process timed out")
+        || out.contains("-- Error: decompilation panicked")
+        || out.contains("-- Error: failed to spawn post-process thread")
+        || out.starts_with("failed to deserialize")
+}
+
 fn begin_decompile_deadline() {
     // Must start *before* decode_best. A desynced varint used to
     // `with_capacity` hundreds of millions of slots while "reading
-    // bytecode" — the 180s budget lived only after decode, so that
-    // hang never timed out.
-    cfg::set_decompile_deadline(Some(Instant::now() + Duration::from_secs(180)));
+    // bytecode" — the budget lived only after decode, so that hang
+    // never timed out.
+    cfg::set_decompile_deadline(Some(Instant::now() + cfg::decompile_budget()));
 }
 
 fn propagate_names(body: &mut ast::Block) {
@@ -1062,5 +1127,43 @@ fn link_upvalues(
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod incomplete_output_tests {
+    use super::*;
+
+    fn assert_no_statement_goto(s: &str) {
+        for line in s.lines() {
+            let t = line.trim_start();
+            assert!(!t.starts_with("goto "), "statement goto leaked: {line}");
+            assert!(!t.starts_with("::"), "label leaked: {line}");
+        }
+    }
+
+    #[test]
+    fn incomplete_render_never_emits_statement_goto() {
+        let mut body = ast::Block(vec![
+            ast::Statement::Label(ast::Label("l93".into())),
+            ast::Statement::Goto(ast::Goto::new(ast::Label("l95".into()))),
+            ast::Statement::Label(ast::Label("l95".into())),
+        ]);
+        let s = render_incomplete(&mut body, "apply_guard_clauses", 1609);
+        assert!(s.contains(INCOMPLETE_MARK));
+        assert!(s.contains("apply_guard_clauses"));
+        assert!(s.contains("functions printed:"));
+        assert!(output_is_incomplete(&s));
+        assert_no_statement_goto(&s);
+    }
+
+    #[test]
+    fn complete_render_strips_goto() {
+        let mut body = ast::Block(vec![ast::Statement::Goto(ast::Goto::new(
+            ast::Label("l1".into()),
+        ))]);
+        let s = render_complete(&mut body);
+        assert!(!s.contains(INCOMPLETE_MARK));
+        assert_no_statement_goto(&s);
     }
 }

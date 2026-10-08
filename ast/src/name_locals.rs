@@ -473,6 +473,9 @@ impl Namer {
 }
 
 pub fn name_locals(block: &mut Block, rename: bool) {
+    if crate::past_post_deadline() {
+        return;
+    }
     let type_hints = if rename {
         // Usage-based type inference is only useful for the Luau path,
         // where `rename` enables the broader semantic-naming pipeline;

@@ -1,3 +1,4 @@
+use std::io::{Error, ErrorKind};
 use std::path::Path;
 
 use base64::prelude::*;
@@ -26,8 +27,19 @@ pub fn decompile(
     encode_key: u8,
     lua51: bool,
     luaur: bool,
-) -> Result<(), std::io::Error> {
+    time_budget: Option<u64>,
+) -> Result<(), Error> {
+    if let Some(secs) = time_budget {
+        luau_lifter::set_time_budget_secs(secs);
+    }
     let bytecode = std::fs::read(input)?;
     let out = decompile_no_io(bytecode, encode_key, lua51, luaur);
-    std::fs::write(output, out)
+    std::fs::write(output, &out)?;
+    if luau_lifter::output_is_incomplete(&out) {
+        return Err(Error::new(
+            ErrorKind::Other,
+            "decompile incomplete (see TOPAZ_INCOMPLETE in the output file)",
+        ));
+    }
+    Ok(())
 }

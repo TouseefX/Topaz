@@ -37,37 +37,18 @@ use crate::{
 };
 
 /// Recurse into nested `if`/`while`/`for` bodies without re-entering a
-/// mutex this thread already holds (parking_lot `Mutex` is not reentrant).
+/// mutex this thread already holds, and without walking an `Arc` twice
+/// (aliased `else`-chains used to expand forever).
 fn for_each_nested(stmt: &Statement, f: &mut impl FnMut(&Block)) {
     match stmt {
         Statement::If(r#if) => {
-            if let Some(b) = r#if.then_block.try_lock() {
-                f(&b);
-            }
-            if let Some(b) = r#if.else_block.try_lock() {
-                f(&b);
-            }
+            crate::visit_shared(&r#if.then_block, f);
+            crate::visit_shared(&r#if.else_block, f);
         }
-        Statement::While(w) => {
-            if let Some(b) = w.block.try_lock() {
-                f(&b);
-            }
-        }
-        Statement::Repeat(r) => {
-            if let Some(b) = r.block.try_lock() {
-                f(&b);
-            }
-        }
-        Statement::NumericFor(n) => {
-            if let Some(b) = n.block.try_lock() {
-                f(&b);
-            }
-        }
-        Statement::GenericFor(g) => {
-            if let Some(b) = g.block.try_lock() {
-                f(&b);
-            }
-        }
+        Statement::While(w) => crate::visit_shared(&w.block, f),
+        Statement::Repeat(r) => crate::visit_shared(&r.block, f),
+        Statement::NumericFor(n) => crate::visit_shared(&n.block, f),
+        Statement::GenericFor(g) => crate::visit_shared(&g.block, f),
         _ => {}
     }
 }
@@ -75,38 +56,43 @@ fn for_each_nested(stmt: &Statement, f: &mut impl FnMut(&Block)) {
 fn for_each_nested_mut(stmt: &mut Statement, f: &mut impl FnMut(&mut Block)) {
     match stmt {
         Statement::If(r#if) => {
-            if let Some(mut b) = r#if.then_block.try_lock() {
-                f(&mut b);
-            }
-            if let Some(mut b) = r#if.else_block.try_lock() {
-                f(&mut b);
-            }
+            crate::visit_shared_mut(&r#if.then_block, f);
+            crate::visit_shared_mut(&r#if.else_block, f);
         }
-        Statement::While(w) => {
-            if let Some(mut b) = w.block.try_lock() {
-                f(&mut b);
-            }
-        }
-        Statement::Repeat(r) => {
-            if let Some(mut b) = r.block.try_lock() {
-                f(&mut b);
-            }
-        }
-        Statement::NumericFor(n) => {
-            if let Some(mut b) = n.block.try_lock() {
-                f(&mut b);
-            }
-        }
-        Statement::GenericFor(g) => {
-            if let Some(mut b) = g.block.try_lock() {
-                f(&mut b);
-            }
-        }
+        Statement::While(w) => crate::visit_shared_mut(&w.block, f),
+        Statement::Repeat(r) => crate::visit_shared_mut(&r.block, f),
+        Statement::NumericFor(n) => crate::visit_shared_mut(&n.block, f),
+        Statement::GenericFor(g) => crate::visit_shared_mut(&g.block, f),
         _ => {}
     }
 }
 
+fn cycle_debug_level() -> u8 {
+    match std::env::var("TOPAZ_DEBUG_CYCLES") {
+        Ok(s) if s == "2" || s.eq_ignore_ascii_case("verbose") => 2,
+        Ok(s) if s == "0" || s.eq_ignore_ascii_case("false") || s.is_empty() => 0,
+        Ok(_) => 1,
+        Err(_) => 0,
+    }
+}
+
 pub fn inline_short_gotos(block: &mut Block) {
+    let depth = crate::goto_depth_enter();
+    struct DepthGuard(u32);
+    impl Drop for DepthGuard {
+        fn drop(&mut self) {
+            crate::goto_depth_leave(self.0);
+        }
+    }
+    let _depth_guard = DepthGuard(depth);
+    if depth == 0 {
+        crate::reset_done_funcs();
+    }
+    if crate::past_post_deadline() {
+        return;
+    }
+    let dbg = cycle_debug_level();
+    let t0 = std::time::Instant::now();
     let rounds = if block.0.len() > 20_000 {
         2
     } else if block.0.len() > 4_000 {
@@ -114,27 +100,62 @@ pub fn inline_short_gotos(block: &mut Block) {
     } else {
         16
     };
+    let mut last_round = 0usize;
+    let mut last_tails = 0usize;
     for _round in 0..rounds {
+        if crate::past_post_deadline() {
+            break;
+        }
+        last_round = _round;
         let mut changed = false;
+        crate::reset_walk_seen();
         changed |= eliminate_join_gotos(block);
+        if crate::past_post_deadline() {
+            break;
+        }
+        crate::reset_walk_seen();
         changed |= rewrite_skip_rest_gotos(block);
+        if crate::past_post_deadline() {
+            break;
+        }
+        crate::reset_walk_seen();
         changed |= rewrite_back_edge_loops(block);
+        crate::reset_walk_seen();
         let tails = collect_short_tails(block);
-        if std::env::var_os("TOPAZ_DEBUG_CYCLES").is_some() {
+        last_tails = tails.len();
+        // Level 1: one line per round on the root body only. Nested
+        // closures used to dump 569k lines *inside* the 180s budget.
+        if dbg >= 2 || (dbg >= 1 && depth == 0) {
             eprintln!("[goto] round {}: {} tails", _round, tails.len());
         }
         if !tails.is_empty() {
+            crate::reset_walk_seen();
             replace_gotos(block, &tails, &mut changed);
         }
         if !changed {
             break;
         }
     }
-    let tails = collect_short_tails(block);
-    prune_unused_labels(block, &tails);
-    remove_orphan_labels(block);
-    drop_unresolved_trailing_gotos(block);
-    descend_into_closures(block);
+    if dbg >= 1 && depth == 0 {
+        eprintln!(
+            "[goto] done: last_round={} tails={} {:.1}s",
+            last_round,
+            last_tails,
+            t0.elapsed().as_secs_f64()
+        );
+    }
+    if !crate::past_post_deadline() {
+        crate::reset_walk_seen();
+        let tails = collect_short_tails(block);
+        crate::reset_walk_seen();
+        prune_unused_labels(block, &tails);
+        crate::reset_walk_seen();
+        remove_orphan_labels(block);
+        crate::reset_walk_seen();
+        drop_unresolved_trailing_gotos(block);
+        crate::reset_walk_seen();
+        descend_into_closures(block);
+    }
 }
 
 /// Final cleanup: `goto L` with no matching `::L::` left in the function.
@@ -164,9 +185,19 @@ fn strip_gotos_not_in(block: &mut Block, labels: &std::collections::HashSet<Stri
 }
 
 fn descend_into_closures(block: &mut Block) {
+    if crate::past_post_deadline() {
+        return;
+    }
     for statement in block.0.iter_mut() {
         statement.traverse_rvalues(&mut |rv: &mut RValue| {
+            if crate::past_post_deadline() {
+                return;
+            }
             if let RValue::Closure(closure) = rv {
+                let ptr = triomphe::Arc::as_ptr(&closure.function.0) as *const ();
+                if !crate::mark_func_done(ptr) {
+                    return;
+                }
                 if let Some(mut f) = closure.function.try_lock() {
                     inline_short_gotos(&mut f.body);
                 }
@@ -178,6 +209,9 @@ fn descend_into_closures(block: &mut Block) {
 
 /// Remove join-point gotos that restructure left as structured control flow.
 fn eliminate_join_gotos(block: &mut Block) -> bool {
+    if crate::past_post_deadline() {
+        return false;
+    }
     let mut changed = false;
     // Recurse first for else/fallthrough patterns (nested joins).
     for statement in block.0.iter_mut() {
@@ -665,6 +699,9 @@ fn find_join_after_if(block: &Block, if_idx: usize) -> Option<(String, usize, bo
 /// end
 /// ```
 fn rewrite_skip_rest_gotos(block: &mut Block) -> bool {
+    if crate::past_post_deadline() {
+        return false;
+    }
     let mut changed = false;
 
     // Handle this block first so patterns like
@@ -748,6 +785,9 @@ fn rewrite_skip_rest_gotos(block: &mut Block) -> bool {
 /// ::L:: A; if c then goto L end      →  repeat A until not c
 /// ```
 fn rewrite_back_edge_loops(block: &mut Block) -> bool {
+    if crate::past_post_deadline() {
+        return false;
+    }
     let mut changed = false;
     for statement in block.0.iter_mut() {
         for_each_nested_mut(statement, &mut |b| {
@@ -974,6 +1014,9 @@ fn extract_short_tail(stmts: &[Statement], from: usize) -> Option<Vec<Statement>
 }
 
 fn replace_gotos(block: &mut Block, tails: &FxHashMap<String, Vec<Statement>>, changed: &mut bool) {
+    if crate::past_post_deadline() {
+        return;
+    }
     let mut i = 0;
     while i < block.0.len() {
         let replacement = match &block.0[i] {
