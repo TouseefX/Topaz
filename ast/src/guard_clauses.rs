@@ -177,8 +177,10 @@ fn apply_guard_clauses_ctx(block: &mut Block, exit_kind: ExitKind) {
             _ => {}
         }
 
-        // Case 1: Redundant else removal after terminator
-        let mut did_case1 = false;
+        // Case 1: Redundant else removal after terminator.
+        // Take the else-body while `r#if` is borrowed, then splice after
+        // that borrow ends (E0499: splice vs `&mut block.0[i]`).
+        let mut case1_stmts = None;
         if let Statement::If(r#if) = &mut block.0[i] {
             let ends_term = r#if
                 .then_block
@@ -192,14 +194,12 @@ fn apply_guard_clauses_ctx(block: &mut Block, exit_kind: ExitKind) {
                 .unwrap_or(false);
             if ends_term && else_not_empty {
                 if let Some(mut else_b) = r#if.else_block.try_lock() {
-                    let stmts = std::mem::take(&mut else_b.0);
-                    drop(else_b);
-                    block.0.splice(i + 1..i + 1, stmts);
-                    did_case1 = true;
+                    case1_stmts = Some(std::mem::take(&mut else_b.0));
                 }
             }
         }
-        if did_case1 {
+        if let Some(stmts) = case1_stmts {
+            block.0.splice(i + 1..i + 1, stmts);
             i += 1;
             continue;
         }
@@ -213,7 +213,7 @@ fn apply_guard_clauses_ctx(block: &mut Block, exit_kind: ExitKind) {
         // fallthrough into an incorrect early exit).
         if is_tail_position {
             if let Some(exit_stmt) = exit_kind.make_statement() {
-                let mut did_case2 = false;
+                let mut case2_stmts = None;
                 if let Statement::If(r#if) = &mut block.0[i] {
                     let else_empty = r#if
                         .else_block
@@ -251,12 +251,12 @@ fn apply_guard_clauses_ctx(block: &mut Block, exit_kind: ExitKind) {
                             then_b.0.push(exit_stmt);
                             drop(then_b);
                             r#if.condition = new_cond;
-                            block.0.splice(i + 1..i + 1, stmts);
-                            did_case2 = true;
+                            case2_stmts = Some(stmts);
                         }
                     }
                 }
-                if did_case2 {
+                if let Some(stmts) = case2_stmts {
+                    block.0.splice(i + 1..i + 1, stmts);
                     i += 1;
                     continue;
                 }
