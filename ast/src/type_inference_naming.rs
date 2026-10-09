@@ -39,6 +39,7 @@
 //!   reintroduce the captured-upvalue naming collision bug either.
 
 use rustc_hash::FxHashMap;
+use triomphe::Arc;
 
 use crate::{Block, Literal, RValue, RcLocal, Select, Statement, Traverse};
 
@@ -110,6 +111,7 @@ impl Votes {
 /// returned map simply have no confident inference; callers should treat
 /// that the same as `None`.
 pub fn collect_type_hints(block: &Block) -> FxHashMap<RcLocal, &'static str> {
+    crate::reset_walk_seen();
     let mut votes: FxHashMap<RcLocal, Votes> = FxHashMap::default();
     scan_block(block, &mut votes);
     votes
@@ -119,24 +121,40 @@ pub fn collect_type_hints(block: &Block) -> FxHashMap<RcLocal, &'static str> {
 }
 
 fn scan_block(block: &Block, votes: &mut FxHashMap<RcLocal, Votes>) {
+    if crate::past_post_deadline() {
+        return;
+    }
     for statement in &block.0 {
         for rvalue in statement.rvalues() {
             scan_rvalue(rvalue, votes);
         }
         statement.rvalues().into_iter().for_each(|rv| {
             if let RValue::Closure(closure) = rv {
-                scan_block(&closure.function.lock().body, votes);
+                let ptr = Arc::as_ptr(&closure.function.0) as *const ();
+                if crate::walk_seen_insert(ptr) {
+                    if let Some(f) = closure.function.try_lock() {
+                        scan_block(&f.body, votes);
+                    }
+                }
             }
         });
         match statement {
             Statement::If(r#if) => {
-                scan_block(&r#if.then_block.lock(), votes);
-                scan_block(&r#if.else_block.lock(), votes);
+                crate::visit_shared(&r#if.then_block, &mut |b| scan_block(b, votes));
+                crate::visit_shared(&r#if.else_block, &mut |b| scan_block(b, votes));
             }
-            Statement::While(r#while) => scan_block(&r#while.block.lock(), votes),
-            Statement::Repeat(repeat) => scan_block(&repeat.block.lock(), votes),
-            Statement::NumericFor(nf) => scan_block(&nf.block.lock(), votes),
-            Statement::GenericFor(gf) => scan_block(&gf.block.lock(), votes),
+            Statement::While(r#while) => {
+                crate::visit_shared(&r#while.block, &mut |b| scan_block(b, votes));
+            }
+            Statement::Repeat(repeat) => {
+                crate::visit_shared(&repeat.block, &mut |b| scan_block(b, votes));
+            }
+            Statement::NumericFor(nf) => {
+                crate::visit_shared(&nf.block, &mut |b| scan_block(b, votes));
+            }
+            Statement::GenericFor(gf) => {
+                crate::visit_shared(&gf.block, &mut |b| scan_block(b, votes));
+            }
             _ => {}
         }
     }

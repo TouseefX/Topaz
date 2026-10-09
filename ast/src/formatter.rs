@@ -6,10 +6,12 @@ use std::{
 
 use itertools::Itertools;
 
+use triomphe::Arc;
+
 use crate::{
     Assign, Binary, BinaryOperation, Block, Call, Closure, GenericFor, If, Index, LValue, Literal,
-    MethodCall, NumericFor, RValue, Reduce, Repeat, Return, Select, Statement, Table, Unary,
-    UnaryOperation, While,
+    MethodCall, NumericFor, RValue, Reduce, Repeat, Return, Select, SharedBlock, Statement, Table,
+    Unary, UnaryOperation, While, reset_walk_seen, walk_seen_insert,
 };
 
 pub enum IndentationMode {
@@ -70,12 +72,29 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         output: &'a mut W,
         indentation_mode: IndentationMode,
     ) -> fmt::Result {
+        reset_walk_seen();
         let mut formatter = Self {
             indentation_level: 0,
             indentation_mode,
             output,
         };
         formatter.format_block_no_indent(main)
+    }
+
+    const MAX_NEST: usize = 256;
+
+    fn format_shared_block(&mut self, shared: &SharedBlock) -> fmt::Result {
+        let ptr = Arc::as_ptr(shared) as *const ();
+        if !walk_seen_insert(ptr) {
+            return Ok(());
+        }
+        if self.indentation_level > Self::MAX_NEST {
+            return Ok(());
+        }
+        if let Some(body) = shared.try_lock() {
+            self.format_block(&body)?;
+        }
+        Ok(())
     }
 
     fn indent(&mut self) -> fmt::Result {
@@ -113,6 +132,9 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     }
 
     fn format_block(&mut self, block: &Block) -> fmt::Result {
+        if self.indentation_level > Self::MAX_NEST {
+            return Ok(());
+        }
         self.indentation_level += 1;
         self.format_block_no_indent(block)?;
         self.indentation_level -= 1;
@@ -674,10 +696,8 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             let cond = Unary::new(r#if.condition.clone(), UnaryOperation::Not).reduce_condition();
             self.format_rvalue(&cond)?;
             writeln!(self.output, " then")?;
-            if let Some(else_block) = r#if.else_block.try_lock() {
-                self.format_block(&else_block)?;
-                writeln!(self.output)?;
-            }
+            self.format_shared_block(&r#if.else_block)?;
+            writeln!(self.output)?;
             self.indent()?;
             return write!(self.output, "end");
         }
@@ -687,10 +707,8 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         writeln!(self.output, " then")?;
 
         if !then_empty {
-            if let Some(then_block) = r#if.then_block.try_lock() {
-                self.format_block(&then_block)?;
-                writeln!(self.output)?;
-            }
+            self.format_shared_block(&r#if.then_block)?;
+            writeln!(self.output)?;
         }
 
         if !else_empty {
@@ -703,16 +721,20 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
                     .cloned()
             });
             if let Some(else_if) = else_if {
+                let else_ptr = Arc::as_ptr(&r#if.else_block) as *const ();
+                if !walk_seen_insert(else_ptr) || self.indentation_level > Self::MAX_NEST {
+                    writeln!(self.output)?;
+                    self.indent()?;
+                    return write!(self.output, "end");
+                }
                 self.indent()?;
                 write!(self.output, "else")?;
                 return self.format_if(&else_if);
             }
             self.indent()?;
             writeln!(self.output, "else")?;
-            if let Some(else_block) = r#if.else_block.try_lock() {
-                self.format_block(&else_block)?;
-                writeln!(self.output)?;
-            }
+            self.format_shared_block(&r#if.else_block)?;
+            writeln!(self.output)?;
         }
 
         self.indent()?;
@@ -786,9 +808,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 
         writeln!(self.output, " do")?;
 
-        if let Some(body) = r#while.block.try_lock() {
-            self.format_block(&body)?;
-        }
+        self.format_shared_block(&r#while.block)?;
         writeln!(self.output)?;
         self.indent()?;
         write!(self.output, "end")
@@ -796,9 +816,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 
     pub(crate) fn format_repeat(&mut self, r#repeat: &Repeat) -> fmt::Result {
         writeln!(self.output, "repeat")?;
-        if let Some(body) = repeat.block.try_lock() {
-            self.format_block(&body)?;
-        }
+        self.format_shared_block(&repeat.block)?;
         writeln!(self.output)?;
         self.indent()?;
 
@@ -822,9 +840,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             self.format_rvalue(&numeric_for.step)?;
         }
         writeln!(self.output, " do")?;
-        if let Some(body) = numeric_for.block.try_lock() {
-            self.format_block(&body)?;
-        }
+        self.format_shared_block(&numeric_for.block)?;
         writeln!(self.output)?;
         self.indent()?;
         write!(self.output, "end")
@@ -854,9 +870,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             self.format_rvalue(rvalue)?;
         }
         writeln!(self.output, " do")?;
-        if let Some(body) = generic_for.block.try_lock() {
-            self.format_block(&body)?;
-        }
+        self.format_shared_block(&generic_for.block)?;
         writeln!(self.output)?;
         self.indent()?;
         write!(self.output, "end")

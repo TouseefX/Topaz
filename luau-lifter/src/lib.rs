@@ -27,6 +27,7 @@ use petgraph::visit::Dfs;
 
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::fmt::Write as _;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use triomphe::Arc;
@@ -361,16 +362,78 @@ enum PostEvent {
     Done(String),
 }
 
+const FALLBACK_BYTE_CAP: usize = 8 * 1024 * 1024;
+const COMPLETE_BYTE_CAP: usize = 32 * 1024 * 1024;
+
+struct CappedWriter {
+    buf: String,
+    cap: usize,
+    hit: bool,
+}
+
+impl std::fmt::Write for CappedWriter {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        if self.hit {
+            return Ok(());
+        }
+        let room = self.cap.saturating_sub(self.buf.len());
+        if s.len() <= room {
+            self.buf.push_str(s);
+        } else {
+            self.buf.push_str(&s[..room]);
+            self.hit = true;
+        }
+        Ok(())
+    }
+}
+
+fn format_block_capped(body: &ast::Block, cap: usize) -> (String, bool) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut w = CappedWriter {
+            buf: String::new(),
+            cap,
+            hit: false,
+        };
+        let _ = write!(&mut w, "{body}");
+        (w.buf, w.hit)
+    })) {
+        Ok(pair) => pair,
+        Err(_) => ("-- formatter panicked\n".into(), true),
+    }
+}
+
+fn looks_time_budget_skipped(s: &str) -> bool {
+    s.contains("skipped (time budget)") || s.contains("skipped lift (time budget)")
+}
+
 fn render_complete(body: &mut ast::Block) -> String {
     let _ = ast::sanitize_for_luau(body);
-    format!("-- Decompiled with Topaz\n-- Created by: Andrew and TouseefX\n\n{body}")
+    let (body_s, capped) = format_block_capped(body, COMPLETE_BYTE_CAP);
+    if looks_time_budget_skipped(&body_s) || capped {
+        let why = if capped {
+            "output capped"
+        } else {
+            "some functions skipped (time budget)"
+        };
+        format!(
+            "-- Decompiled with Topaz\n-- Created by: Andrew and TouseefX\n-- {INCOMPLETE_MARK}\n-- ERROR: {why}\n\n{body_s}"
+        )
+    } else {
+        format!("-- Decompiled with Topaz\n-- Created by: Andrew and TouseefX\n\n{body_s}")
+    }
 }
 
 fn render_incomplete(body: &mut ast::Block, pass: &str, n_total: usize) -> String {
     let n_printed = ast::sanitize_for_luau(body);
     let budget = cfg::decompile_budget_secs();
+    let (body_s, capped) = format_block_capped(body, FALLBACK_BYTE_CAP);
+    let cap_note = if capped {
+        "\n-- fallback output capped"
+    } else {
+        ""
+    };
     format!(
-        "-- Decompiled with Topaz\n-- Created by: Andrew and TouseefX\n-- {INCOMPLETE_MARK}\n-- ERROR: time budget {budget}s expired in pass {pass}\n-- functions printed: {n_printed}/{n_total} (incomplete)\n\n{body}"
+        "-- Decompiled with Topaz\n-- Created by: Andrew and TouseefX\n-- {INCOMPLETE_MARK}\n-- ERROR: time budget {budget}s expired in pass {pass}\n-- functions printed: {n_printed}/{n_total} (incomplete){cap_note}\n\n{body_s}"
     )
 }
 
@@ -394,7 +457,14 @@ fn recv_post_wave(rx: mpsc::Receiver<PostEvent>, wait: Duration, n_funcs: usize)
         }
     }
     match fallback {
-        Some(mut b) => render_incomplete(&mut b, current_pass, n_funcs),
+        Some(mut b) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            render_incomplete(&mut b, current_pass, n_funcs)
+        }))
+        .unwrap_or_else(|_| {
+            format!(
+                "-- Decompiled with Topaz\n-- {INCOMPLETE_MARK}\n-- Error: fallback emit panicked in pass {current_pass}\n"
+            )
+        }),
         None => format!(
             "-- Decompiled with Topaz\n-- {INCOMPLETE_MARK}\n-- Error: post-process timed out in pass {current_pass}\n"
         ),
@@ -684,6 +754,9 @@ pub fn output_is_incomplete(out: &str) -> bool {
         || out.contains("-- Error: post-process timed out")
         || out.contains("-- Error: decompilation panicked")
         || out.contains("-- Error: failed to spawn post-process thread")
+        || out.contains("-- Error: fallback emit panicked")
+        || out.contains("skipped (time budget)")
+        || out.contains("skipped lift (time budget)")
         || out.starts_with("failed to deserialize")
 }
 
@@ -1164,6 +1237,35 @@ mod incomplete_output_tests {
         ))]);
         let s = render_complete(&mut body);
         assert!(!s.contains(INCOMPLETE_MARK));
+        assert_no_statement_goto(&s);
+    }
+
+    #[test]
+    fn skip_budget_comment_marks_complete_path_incomplete() {
+        let mut body = ast::Block(vec![ast::Comment::new("skipped (time budget)".into()).into()]);
+        let s = render_complete(&mut body);
+        assert!(s.contains(INCOMPLETE_MARK));
+        assert!(output_is_incomplete(&s));
+    }
+
+    #[test]
+    fn incomplete_render_cyclic_else_terminates() {
+        let shared = ast::share_block(ast::Block::default());
+        let inner = ast::If {
+            condition: ast::Literal::Boolean(true).into(),
+            then_block: ast::share_block(ast::Block::default()),
+            else_block: shared.clone(),
+        };
+        shared.lock().0.push(ast::Statement::If(inner));
+        let mut body = ast::Block(vec![ast::Statement::If(ast::If {
+            condition: ast::Literal::Boolean(false).into(),
+            then_block: ast::share_block(ast::Block::default()),
+            else_block: shared,
+        })]);
+        let s = render_incomplete(&mut body, "name_locals", 4);
+        assert!(s.contains(INCOMPLETE_MARK));
+        assert!(s.contains("name_locals"));
+        assert!(s.len() < FALLBACK_BYTE_CAP + 4096);
         assert_no_statement_goto(&s);
     }
 }

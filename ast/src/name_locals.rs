@@ -320,9 +320,16 @@ impl Namer {
     }
 
     fn name_locals(&mut self, block: &mut Block) {
+        if crate::past_post_deadline() {
+            return;
+        }
         for statement in &mut block.0 {
             statement.post_traverse_values(&mut |value| -> Option<()> {
                 if let itertools::Either::Right(RValue::Closure(closure)) = value {
+                    let ptr = Arc::as_ptr(&closure.function.0) as *const ();
+                    if !crate::walk_seen_insert(ptr) {
+                        return None;
+                    }
                     let Some(mut function) = closure.function.try_lock() else {
                         return None;
                     };
@@ -345,7 +352,8 @@ impl Namer {
                     if named_from_debug {
                         let local = assign.left[0].as_local().unwrap();
                         let closure = assign.right[0].as_closure().unwrap();
-                        if let Some(name) = closure.function.lock().name.clone() {
+                        if let Some(name) = closure.function.try_lock().and_then(|f| f.name.clone())
+                        {
                             if Self::is_valid_identifier(&name) {
                                 let mut lock = local.0 .0.lock();
                                 if lock.0.is_none() || self.rename {
@@ -356,7 +364,7 @@ impl Namer {
                     }
                     for (i, lvalue) in assign.left.iter().enumerate() {
                         if named_from_debug && i == 0 {
-                            if lvalue.as_local().unwrap().0 .0.lock().0.is_some() {
+                            if lvalue.as_local().unwrap().0 .0.try_lock().is_some_and(|g| g.0.is_some()) {
                                 continue;
                             }
                         }
@@ -366,30 +374,20 @@ impl Namer {
                     }
                 }
                 Statement::If(r#if) => {
-                    if let Some(mut b) = r#if.then_block.try_lock() {
-                        self.name_locals(&mut b);
-                    }
-                    if let Some(mut b) = r#if.else_block.try_lock() {
-                        self.name_locals(&mut b);
-                    }
+                    crate::visit_shared_mut(&r#if.then_block, &mut |b| self.name_locals(b));
+                    crate::visit_shared_mut(&r#if.else_block, &mut |b| self.name_locals(b));
                 }
                 Statement::While(r#while) => {
-                    if let Some(mut b) = r#while.block.try_lock() {
-                        self.name_locals(&mut b);
-                    }
+                    crate::visit_shared_mut(&r#while.block, &mut |b| self.name_locals(b));
                 }
                 Statement::Repeat(repeat) => {
-                    if let Some(mut b) = repeat.block.try_lock() {
-                        self.name_locals(&mut b);
-                    }
+                    crate::visit_shared_mut(&repeat.block, &mut |b| self.name_locals(b));
                 }
                 Statement::NumericFor(numeric_for) => {
                     let letter = self.for_letter();
                     self.name_local_fixed(letter, &numeric_for.counter);
                     self.numeric_for_depth += 1;
-                    if let Some(mut b) = numeric_for.block.try_lock() {
-                        self.name_locals(&mut b);
-                    }
+                    crate::visit_shared_mut(&numeric_for.block, &mut |b| self.name_locals(b));
                     self.numeric_for_depth -= 1;
                 }
                 Statement::GenericFor(generic_for) => {
@@ -409,9 +407,7 @@ impl Namer {
                             self.name_local_with_prefix("v", res_local);
                         }
                     }
-                    if let Some(mut b) = generic_for.block.try_lock() {
-                        self.name_locals(&mut b);
-                    }
+                    crate::visit_shared_mut(&generic_for.block, &mut |b| self.name_locals(b));
                 }
                 _ => {}
             }
@@ -419,6 +415,9 @@ impl Namer {
     }
 
     fn find_upvalues(&mut self, block: &mut Block) {
+        if crate::past_post_deadline() {
+            return;
+        }
         for statement in &mut block.0 {
             statement.post_traverse_values(&mut |value| -> Option<()> {
                 if let itertools::Either::Right(RValue::Closure(closure)) = value {
@@ -431,40 +430,31 @@ impl Namer {
                             })
                             .cloned(),
                     );
-                    if let Some(mut function) = closure.function.try_lock() {
-                        self.find_upvalues(&mut function.body);
+                    let ptr = Arc::as_ptr(&closure.function.0) as *const ();
+                    if crate::walk_seen_insert(ptr) {
+                        if let Some(mut function) = closure.function.try_lock() {
+                            self.find_upvalues(&mut function.body);
+                        }
                     }
                 };
                 None
             });
             match statement {
                 Statement::If(r#if) => {
-                    if let Some(mut b) = r#if.then_block.try_lock() {
-                        self.find_upvalues(&mut b);
-                    }
-                    if let Some(mut b) = r#if.else_block.try_lock() {
-                        self.find_upvalues(&mut b);
-                    }
+                    crate::visit_shared_mut(&r#if.then_block, &mut |b| self.find_upvalues(b));
+                    crate::visit_shared_mut(&r#if.else_block, &mut |b| self.find_upvalues(b));
                 }
                 Statement::While(r#while) => {
-                    if let Some(mut b) = r#while.block.try_lock() {
-                        self.find_upvalues(&mut b);
-                    }
+                    crate::visit_shared_mut(&r#while.block, &mut |b| self.find_upvalues(b));
                 }
                 Statement::Repeat(repeat) => {
-                    if let Some(mut b) = repeat.block.try_lock() {
-                        self.find_upvalues(&mut b);
-                    }
+                    crate::visit_shared_mut(&repeat.block, &mut |b| self.find_upvalues(b));
                 }
                 Statement::NumericFor(numeric_for) => {
-                    if let Some(mut b) = numeric_for.block.try_lock() {
-                        self.find_upvalues(&mut b);
-                    }
+                    crate::visit_shared_mut(&numeric_for.block, &mut |b| self.find_upvalues(b));
                 }
                 Statement::GenericFor(generic_for) => {
-                    if let Some(mut b) = generic_for.block.try_lock() {
-                        self.find_upvalues(&mut b);
-                    }
+                    crate::visit_shared_mut(&generic_for.block, &mut |b| self.find_upvalues(b));
                 }
                 _ => {}
             }
@@ -476,6 +466,7 @@ pub fn name_locals(block: &mut Block, rename: bool) {
     if crate::past_post_deadline() {
         return;
     }
+    crate::reset_walk_seen();
     let type_hints = if rename {
         // Usage-based type inference is only useful for the Luau path,
         // where `rename` enables the broader semantic-naming pipeline;
@@ -492,6 +483,35 @@ pub fn name_locals(block: &mut Block, rename: bool) {
         name_uses: FxHashMap::default(),
         type_hints,
     };
+    crate::reset_walk_seen();
     namer.find_upvalues(block);
+    crate::reset_walk_seen();
     namer.name_locals(block);
+}
+
+#[cfg(test)]
+mod cycle_tests {
+    use super::*;
+    use crate::{share_block, If, Literal, Statement};
+
+    #[test]
+    fn cyclic_else_does_not_deadlock_name_or_format() {
+        let shared = share_block(Block::default());
+        let inner = If {
+            condition: Literal::Boolean(true).into(),
+            then_block: share_block(Block::default()),
+            else_block: shared.clone(),
+        };
+        shared.lock().0.push(Statement::If(inner));
+        let mut body = Block(vec![Statement::If(If {
+            condition: Literal::Boolean(false).into(),
+            then_block: share_block(Block::default()),
+            else_block: shared,
+        })]);
+        name_locals(&mut body, true);
+        let s = body.to_string();
+        assert!(s.contains("if"), "formatter produced: {s:?}");
+        assert!(s.contains("end"), "formatter produced: {s:?}");
+        assert!(s.len() < 64 * 1024, "runaway format: {} bytes", s.len());
+    }
 }
