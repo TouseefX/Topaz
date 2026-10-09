@@ -156,7 +156,7 @@ impl GraphStructurer {
                 .map(|e| e.weight().arguments.clone())
                 .unwrap_or_default();
             if then_args == else_args {
-                Some(then_args)
+                Some(crate::without_identity_args(then_args))
             } else {
                 None
             }
@@ -248,7 +248,7 @@ impl GraphStructurer {
 
             let mut edge = BlockEdge::new(BranchType::Unconditional);
             if then_args == else_args {
-                edge.arguments = then_args;
+                edge.arguments = crate::without_identity_args(then_args);
             }
             self.function.set_edges(entry, vec![(else_node, edge)]);
 

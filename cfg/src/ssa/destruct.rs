@@ -971,44 +971,21 @@ impl<'a> Destructor<'a> {
             .all(|(_, e)| e.arguments.is_empty())
     }
 
+    /// Copy `param = arg` onto each predecessor and clear the edge.
+    ///
+    /// The old path invented a `temp_param` at the join and a `temp_local`
+    /// on every pred (two extra SSA names per phi). Those never coalesced
+    /// on n>2000 CFGs and were the ClientRenderer 200-register overflow.
+    /// Diamond matching then dropped the edge, so the join read an
+    /// unassigned temp. Writing the real phi dest on the pred puts the
+    /// copy *inside* the `if/else` arm and uses no extra names.
     fn lift_block_params(&mut self, node: NodeIndex) {
-        let mut param_map = FxHashMap::default();
-        if let Some((_, BlockEdge { arguments, .. })) = self.function.edges_to_block(node).next() {
-            for param in arguments.iter().map(|(p, _)| p) {
-                let temp_param = {
-                    let name = param.0 .0.lock().0.clone();
-                    RcLocal::new(ast::Local::new(name))
-                };
-                if let Some(group) = self.upvalue_to_group.get(param) {
-                    self.upvalue_to_group
-                        .insert(temp_param.clone(), group.clone());
-                }
-                param_map.insert(param.clone(), temp_param);
-            }
-        }
-
-        if !param_map.is_empty() {
-            self.function.block_mut(node).unwrap().insert(
-                0,
-                ast::Assign {
-                    left: param_map.keys().map(|k| k.clone().into()).collect(),
-                    right: param_map.values().map(|v| v.clone().into()).collect(),
-                    prefix: false,
-                    parallel: true,
-                    compound_op: None,
-                }
-                .into(),
-            );
-        }
-
         let mut visited = FxHashSet::default();
         let mut preds = self.function.predecessor_blocks(node).detach();
         while let Some((_, pred)) = preds.next(self.function.graph()) {
-            
-            if visited.contains(&pred) {
+            if !visited.insert(pred) {
                 continue;
             }
-            visited.insert(pred);
 
             let edges = self.function.edges(pred).collect::<Vec<_>>();
             let is_unconditional = edges.len() == 1;
@@ -1023,75 +1000,57 @@ impl<'a> Destructor<'a> {
                 .collect::<Vec<_>>();
 
             for &edge in &edges_to_node {
-                let args = self
-                    .function
-                    .graph_mut()
-                    .edge_weight_mut(edge)
-                    .unwrap()
-                    .arguments
-                    .iter_mut();
-
-                let mut parallel_assign = ast::Assign {
-                    left: Vec::with_capacity(args.len()),
-                    right: Vec::with_capacity(args.len()),
+                let arguments = std::mem::take(
+                    &mut self
+                        .function
+                        .graph_mut()
+                        .edge_weight_mut(edge)
+                        .unwrap()
+                        .arguments,
+                );
+                let mut left = Vec::new();
+                let mut right = Vec::new();
+                for (param, arg) in arguments {
+                    if matches!(&arg, ast::RValue::Local(l) if l == &param) {
+                        continue;
+                    }
+                    left.push(param.into());
+                    right.push(arg);
+                }
+                if left.is_empty() {
+                    continue;
+                }
+                let parallel_assign = ast::Assign {
+                    left,
+                    right,
                     prefix: false,
                     parallel: true,
                     compound_op: None,
                 };
 
-                for (param, arg) in args {
-                    let temp_local = {
-                        let name = param.0 .0.lock().0.clone();
-                        RcLocal::new(ast::Local::new(name))
-                    };
-                    if let ast::RValue::Local(arg) = arg
-                        && let Some(group) = self.upvalue_to_group.get(arg)
-                    {
-                        self.upvalue_to_group
-                            .insert(temp_local.clone(), group.clone());
+                let mut assign_block = pred;
+                if !is_unconditional {
+                    assign_block = self.function.new_block();
+                    if self.is_for_next(self.function.graph().edge_endpoints(edge).unwrap().0) {
+                        self.undesirable_blocks.insert(assign_block);
                     }
-
-                    parallel_assign.left.push(temp_local.clone().into());
-                    parallel_assign
-                        .right
-                        .push(std::mem::replace(arg, temp_local.into()));
-                    *param = param_map[param].clone();
+                    let branch = self.function.graph_mut().remove_edge(edge).unwrap();
+                    self.function.set_edges(
+                        assign_block,
+                        vec![(node, BlockEdge::new(BranchType::Unconditional))],
+                    );
+                    self.function.graph_mut().add_edge(
+                        pred,
+                        assign_block,
+                        BlockEdge::new(branch.branch_type),
+                    );
+                    visited.insert(assign_block);
                 }
 
-                if !parallel_assign.left.is_empty() {
-                    let mut assign_block = pred;
-                    
-                    
-                    if !is_unconditional {
-                        assign_block = self.function.new_block();
-                        if self.is_for_next(self.function.graph().edge_endpoints(edge).unwrap().0) {
-                            self.undesirable_blocks.insert(assign_block);
-                        }
-                        let edge = self.function.graph_mut().remove_edge(edge).unwrap();
-                        self.function.set_edges(
-                            assign_block,
-                            vec![(
-                                node,
-                                BlockEdge {
-                                    branch_type: BranchType::Unconditional,
-                                    arguments: edge.arguments,
-                                },
-                            )],
-                        );
-
-                        self.function.graph_mut().add_edge(
-                            pred,
-                            assign_block,
-                            BlockEdge::new(edge.branch_type),
-                        );
-                        visited.insert(assign_block);
-                    }
-
-                    self.function
-                        .block_mut(assign_block)
-                        .unwrap()
-                        .push(parallel_assign.into());
-                }
+                self.function
+                    .block_mut(assign_block)
+                    .unwrap()
+                    .push(parallel_assign.into());
             }
         }
     }

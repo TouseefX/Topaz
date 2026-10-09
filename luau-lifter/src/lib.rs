@@ -1115,12 +1115,17 @@ fn decompile_function(
     let lifted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         restructure::lift(function)
     }));
-    let body = match lifted {
+    let mut body = match lifted {
         Ok(b) => b,
         Err(_) => ast::Block(vec![
             ast::Comment::new("failed to decompile function".to_string()).into(),
         ]),
     };
+    // Fold `a = b` SSA clones before LocalDeclarer so Luau does not
+    // allocate a register per phi temp (200-local cap on ClientRenderer).
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ast::fold_copies::fold_copy_locals(&mut body);
+    }));
     let block = ast::share_block(body);
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         LocalDeclarer::default().declare_locals(

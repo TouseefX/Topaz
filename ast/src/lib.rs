@@ -33,6 +33,7 @@ pub mod inline_gotos;
 mod literal;
 mod local;
 
+pub mod fold_copies;
 pub mod local_declarations;
 pub mod name_locals;
 mod repeat;

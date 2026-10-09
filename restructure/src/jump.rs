@@ -48,7 +48,7 @@ impl super::GraphStructurer {
             self.function.block_mut(node).unwrap().extend(new_stat);
             let mut edge = BlockEdge::new(BranchType::Unconditional);
             if then_args == else_args {
-                edge.arguments = then_args;
+                edge.arguments = crate::without_identity_args(then_args);
             }
             self.function.set_edges(node, vec![(target, edge)]);
             true

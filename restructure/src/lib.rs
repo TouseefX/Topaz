@@ -28,6 +28,13 @@ struct GraphStructurer {
 /// Copies that remain on a CFG edge after SSA destruct. Identity
 /// `x = x` args are skipped. Used whenever a collapse would otherwise
 /// drop `edge.arguments` (goto insert, leftover dump, jump merge).
+pub(crate) fn without_identity_args(
+    mut args: Vec<(ast::RcLocal, ast::RValue)>,
+) -> Vec<(ast::RcLocal, ast::RValue)> {
+    args.retain(|(p, a)| !matches!(a, ast::RValue::Local(l) if l == p));
+    args
+}
+
 pub(crate) fn parallel_assign_from_args(
     args: &[(ast::RcLocal, ast::RValue)],
 ) -> Option<ast::Assign> {
