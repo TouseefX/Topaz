@@ -283,6 +283,20 @@ fn assigned_local(stmt: &Statement) -> Option<(RcLocal, RValue)> {
     Some((local, a.right[0].clone()))
 }
 
+/// `Clone()` / `TweenInfo.new()` / `{ ...frame ids... }` / nested
+/// functions. Inlining a constructor into the next index (`Beam:Clone().Weld`)
+/// or DCE'ing it as unused drops the identity POLBeam later captures.
+fn is_constructor_like(rv: &RValue) -> bool {
+    matches!(
+        rv,
+        RValue::Call(_)
+            | RValue::MethodCall(_)
+            | RValue::Table(_)
+            | RValue::Closure(_)
+            | RValue::Select(_)
+    )
+}
+
 fn collect_read_counts(block: &Block, counts: &mut HashMap<RcLocal, usize>) {
     for s in &block.0 {
         for l in s.values_read() {
@@ -342,6 +356,10 @@ fn inline_consecutive(
             continue;
         };
         if skip.contains(&local) {
+            i += 1;
+            continue;
+        }
+        if is_constructor_like(&expr) {
             i += 1;
             continue;
         }
@@ -507,7 +525,12 @@ fn dce_unused(block: &mut Block, reads: &HashSet<RcLocal>, ref_captured: &HashSe
                     !reads.contains(l) && !ref_captured.contains(l)
                 });
             if all_unused {
-                if a.right.iter().any(|r| r.has_side_effects()) {
+                if a.right.iter().any(is_constructor_like) {
+                    // Keep `clone = Beam:Clone()` / frame tables / nested
+                    // functions even if this body doesn't read them — a
+                    // sibling closure may (POLBeam).
+                    None
+                } else if a.right.iter().any(|r| r.has_side_effects()) {
                     if a.right.len() == 1 {
                         match &a.right[0] {
                             RValue::Call(c) | RValue::Select(Select::Call(c)) => {
@@ -571,7 +594,10 @@ pub fn apply_protected(block: &mut Block, protected: &HashSet<RcLocal>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Assign, Block, Call, Literal, Local, NumericFor, RValue, RcLocal, Statement};
+    use crate::{
+        Assign, Block, Call, Index, Literal, Local, MethodCall, NumericFor, RValue, RcLocal,
+        Statement,
+    };
     use std::collections::HashSet;
 
     fn named(n: &str) -> RcLocal {
@@ -763,6 +789,55 @@ mod tests {
         assert!(
             printed.contains("rbxassetid://1"),
             "frame table dropped: {printed}"
+        );
+    }
+
+    #[test]
+    fn does_not_inline_clone_into_index() {
+        let clone = named("clone");
+        let beam = named("beam");
+        let weld = named("weld");
+        let mut init = Assign::new(
+            vec![clone.clone().into()],
+            vec![RValue::MethodCall(MethodCall::new(
+                RValue::Local(beam),
+                "Clone".into(),
+                vec![],
+            ))],
+        );
+        init.prefix = true;
+        let next = Assign::new(
+            vec![weld.into()],
+            vec![RValue::Index(Index::new(
+                RValue::Local(clone),
+                Literal::String(b"Weld".to_vec()).into(),
+            ))],
+        );
+        let mut block = Block(vec![init.into(), next.into()]);
+        apply(&mut block);
+        let printed = block.to_string();
+        assert!(printed.contains("Clone"), "{printed}");
+        assert!(
+            !printed.contains("Clone().Weld") && !printed.contains("Clone()["),
+            "Clone() was inlined into the index: {printed}"
+        );
+    }
+
+    #[test]
+    fn does_not_dce_unused_table_constructor() {
+        let frames = named("frames");
+        let mut table = crate::Table::default();
+        table
+            .0
+            .push((None, Literal::String(b"rbxassetid://1".to_vec()).into()));
+        let mut init = Assign::new(vec![frames.into()], vec![RValue::Table(table)]);
+        init.prefix = true;
+        let mut block = Block(vec![init.into()]);
+        apply(&mut block);
+        let printed = block.to_string();
+        assert!(
+            printed.contains("rbxassetid://1"),
+            "unused table constructor DCE'd: {printed}"
         );
     }
 }

@@ -77,16 +77,41 @@ pub struct LocalDeclarer {
     graph: DiGraph<(Option<SharedBlock>, usize), ()>,
     local_usages: IndexMap<RcLocal, FxHashMap<NodeIndex, usize>>,
     declarations: FxHashMap<ByAddress<SharedBlock>, BTreeMap<usize, IndexSet<RcLocal>>>,
+    /// `for i, v in ...` / `for i = ...` binders. Recording their body
+    /// reads (v7) inserted `local i, v` as the first statement of the
+    /// loop, shadowing the iterator with nil (CameraShaker `Update`,
+    /// sample `ipairs`).
+    binder_depth: FxHashMap<RcLocal, u32>,
 }
 
 impl LocalDeclarer {
     fn note_usage(&mut self, local: RcLocal, node: NodeIndex, stat_index: usize) {
+        if self.binder_depth.contains_key(&local) {
+            return;
+        }
         self.local_usages
             .entry(local)
             .or_default()
             .entry(node)
             .and_modify(|i| *i = (*i).min(stat_index))
             .or_insert(stat_index);
+    }
+
+    fn push_binders(&mut self, binders: &[RcLocal]) {
+        for b in binders {
+            *self.binder_depth.entry(b.clone()).or_insert(0) += 1;
+        }
+    }
+
+    fn pop_binders(&mut self, binders: &[RcLocal]) {
+        for b in binders.iter().rev() {
+            if let Some(d) = self.binder_depth.get_mut(b) {
+                *d = d.saturating_sub(1);
+                if *d == 0 {
+                    self.binder_depth.remove(b);
+                }
+            }
+        }
     }
 
     fn visit(&mut self, block: SharedBlock, stat_index: usize) -> NodeIndex {
@@ -107,6 +132,7 @@ impl LocalDeclarer {
             One {
                 stat_index: usize,
                 child: SharedBlock,
+                binders: Vec<RcLocal>,
             },
         }
         let mut nested = Vec::new();
@@ -135,18 +161,22 @@ impl LocalDeclarer {
                     Statement::While(r#while) => nested.push(Nested::One {
                         stat_index,
                         child: r#while.block.clone(),
+                        binders: Vec::new(),
                     }),
                     Statement::Repeat(repeat) => nested.push(Nested::One {
                         stat_index,
                         child: repeat.block.clone(),
+                        binders: Vec::new(),
                     }),
                     Statement::NumericFor(numeric_for) => nested.push(Nested::One {
                         stat_index,
                         child: numeric_for.block.clone(),
+                        binders: vec![numeric_for.counter.clone()],
                     }),
                     Statement::GenericFor(generic_for) => nested.push(Nested::One {
                         stat_index,
                         child: generic_for.block.clone(),
+                        binders: generic_for.res_locals.clone(),
                     }),
                     _ => {}
                 }
@@ -166,8 +196,14 @@ impl LocalDeclarer {
                     let else_node = self.visit(else_b, stat_index);
                     self.graph.add_edge(if_node, else_node, ());
                 }
-                Nested::One { stat_index, child } => {
+                Nested::One {
+                    stat_index,
+                    child,
+                    binders,
+                } => {
+                    self.push_binders(&binders);
                     let child = self.visit(child, stat_index);
+                    self.pop_binders(&binders);
                     self.graph.add_edge(node, child, ());
                 }
             }
@@ -311,7 +347,8 @@ impl LocalDeclarer {
 mod tests {
     use super::*;
     use crate::{
-        Assign, Block, Literal, Local, RcLocal, Return, Statement, While, share_block,
+        Assign, Block, Call, GenericFor, Index, Literal, Local, NumericFor, RcLocal, Return,
+        Statement, While, share_block,
     };
     use triomphe::Arc;
 
@@ -348,5 +385,57 @@ mod tests {
             !after_while.contains("local v74"),
             "must not redeclare v74 after/inside while:\n{s}"
         );
+    }
+
+    #[test]
+    fn does_not_shadow_numeric_for_binder() {
+        let i2 = RcLocal::new(Local::new(Some("i2".into())));
+        let arr = RcLocal::new(Local::new(Some("arr".into())));
+        let v20 = RcLocal::new(Local::new(Some("v20".into())));
+        let inner = Block(vec![Assign::new(
+            vec![v20.clone().into()],
+            vec![Index::new(arr.into(), i2.clone().into()).into()],
+        )
+        .into()]);
+        let body = Block(vec![Statement::NumericFor(NumericFor::new(
+            Literal::Number(1.0).into(),
+            Literal::Number(10.0).into(),
+            Literal::Number(1.0).into(),
+            i2,
+            inner,
+        ))]);
+        let shared = share_block(body);
+        LocalDeclarer::default().declare_locals(Arc::clone(&shared), &FxHashSet::default());
+        let s = shared.lock().to_string();
+        assert!(s.contains("for i2"), "{s}");
+        assert!(
+            !s.contains("local i2"),
+            "numeric-for binder shadowed:\n{s}"
+        );
+        assert!(s.contains("local v20"), "body temp should still be local:\n{s}");
+    }
+
+    #[test]
+    fn does_not_shadow_generic_for_binders() {
+        let index2 = RcLocal::new(Local::new(Some("index2".into())));
+        let player2 = RcLocal::new(Local::new(Some("player2".into())));
+        let inner = Block(vec![Return::new(vec![player2.clone().into()]).into()]);
+        let iter = Call::new(
+            crate::Global::new(b"ipairs".to_vec()).into(),
+            vec![crate::Table::default().into()],
+        );
+        let body = Block(vec![Statement::GenericFor(GenericFor::new(
+            vec![index2, player2],
+            vec![iter.into()],
+            inner,
+        ))]);
+        let shared = share_block(body);
+        LocalDeclarer::default().declare_locals(Arc::clone(&shared), &FxHashSet::default());
+        let s = shared.lock().to_string();
+        assert!(
+            !s.contains("local index2") && !s.contains("local player2"),
+            "generic-for binders shadowed:\n{s}"
+        );
+        assert!(s.contains("for index2, player2"), "{s}");
     }
 }
