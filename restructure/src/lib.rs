@@ -206,12 +206,15 @@ impl GraphStructurer {
         // all collapse in one match_blocks pass. Huge CFGs: fewer CHK
         // solves, more gotos, still full SSA before we get here.
         let large = n > 2000;
+        // v7 left 61 unstructured fors + 521 gotos on ClientRenderer
+        // because huge CFGs only got 2–4 match rounds. Extra rounds are
+        // still O(n) per pass (not the old O(E·dominators) hang).
         let (outer_cap, inner_cap, insert_cap) = if n > 25000 {
-            (2u32, 1u32, 2048u32)
+            (4u32, 2u32, 2048u32)
         } else if n > 8000 {
-            (4u32, 1u32, 1024u32)
+            (6u32, 2u32, 1024u32)
         } else if large {
-            (6u32, 1u32, 512u32)
+            (8u32, 2u32, 512u32)
         } else if n > 400 {
             (16u32, 6u32, 96u32)
         } else {
@@ -231,11 +234,12 @@ impl GraphStructurer {
             // Terminal for-loops (body always returns) have no back-edge,
             // so they never become loop headers. Medal-improved collapses
             // those here; without it they print as unstructured for-IR.
-            if n <= 8000 {
-                let mut t = 0u32;
-                while t < 4 && self.collapse_terminal_for_loop() {
-                    t += 1;
-                }
+            // v7 skipped this on n>8000, which is the ClientRenderer
+            // event-handler CFG — 61 leftover init/next sites.
+            let tcap = if n > 25000 { 2u32 } else { 4u32 };
+            let mut t = 0u32;
+            while t < tcap && self.collapse_terminal_for_loop() {
+                t += 1;
             }
             let Some(entry) = *self.function.entry() else {
                 break;

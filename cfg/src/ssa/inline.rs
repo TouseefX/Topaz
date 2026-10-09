@@ -5,6 +5,21 @@ use itertools::{Either, Itertools};
 use petgraph::visit::EdgeRef;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+/// `Clone()`, `{ ...frame ids... }`, nested functions. Inlining a
+/// constructor into the next index (`Beam:Clone().Weld`) or DCE'ing it
+/// as unused (after SETLIST fold, usages==0 because the only consumer
+/// is a nested closure) drops POLBeam's clone and 44 rbxassetid literals.
+fn keep_identity(rv: &ast::RValue) -> bool {
+    matches!(
+        rv,
+        ast::RValue::Call(_)
+            | ast::RValue::MethodCall(_)
+            | ast::RValue::Table(_)
+            | ast::RValue::Closure(_)
+            | ast::RValue::Select(_)
+    )
+}
+
 struct TraverseSelf<'a, T: Traverse>(&'a mut T);
 
 impl<'a> Traverse for TraverseSelf<'a, ast::RValue> {
@@ -200,7 +215,9 @@ impl<'a> Inliner<'a> {
                                 .values_read()
                                 .iter()
                                 .any(|v| self.upvalue_to_group.contains_key(*v));
-                        if !new_rvalue_has_side_effects || allow_side_effects {
+                        if !keep_identity(new_rvalue)
+                            && (!new_rvalue_has_side_effects || allow_side_effects)
+                        {
                             if let Ok(ast::LValue::Local(local)) = &assign.left.iter().exactly_one()
                                 && let Some(read) = stat_to_values_read[index]
                                     .iter_mut()
@@ -405,7 +422,8 @@ impl<'a> Inliner<'a> {
                                     .values_read()
                                     .iter()
                                     .any(|v| self.upvalue_to_group.contains_key(*v));
-                            if !new_rvalue_has_side_effects
+                            if !keep_identity(new_rvalue)
+                                && !new_rvalue_has_side_effects
                                 && let Ok(ast::LValue::Local(local)) =
                                     &assign.left.iter().exactly_one()
                                 && let Some(read) = arg_to_values_read[index]
@@ -525,7 +543,10 @@ pub fn inline(
                     if !upvalue_to_group.contains_key(local)
                         && local_usages.get(local).map_or(true, |&u| u == 0)
                     {
-                        if has_side_effects {
+                        if keep_identity(rvalue) {
+                            // Keep Clone()/tables/closures even when this
+                            // CFG doesn't read them — a nested function may.
+                        } else if has_side_effects {
                             let new_stat = match rvalue {
                                 ast::RValue::Call(call)
                                 | ast::RValue::Select(ast::Select::Call(call)) => {
