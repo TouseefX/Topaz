@@ -47,6 +47,11 @@ struct SsaConstructor<'a> {
     local_map: FxHashMap<RcLocal, RcLocal>,
     new_upvalues_in: IndexMap<RcLocal, FxHashSet<RcLocal>>,
     upvalues_passed: FxHashMap<RcLocal, FxHashMap<(NodeIndex, usize), FxHashSet<RcLocal>>>,
+    /// Locals captured `Upvalue::Ref` by a nested closure (plus this
+    /// function's incoming upvalues). Writes must keep the original
+    /// `RcLocal` or later stores (`ResetDisabled = true`) become a fresh
+    /// SSA name that nothing reads, and DCE empties the `if`.
+    ref_captured: FxHashSet<RcLocal>,
 }
 
 
@@ -263,6 +268,31 @@ fn new_local_from(original: &RcLocal) -> RcLocal {
     RcLocal::new(ast::Local::new(name))
 }
 
+fn collect_ref_captured_rvalue(rv: &ast::RValue, out: &mut FxHashSet<RcLocal>) {
+    if let ast::RValue::Closure(c) = rv {
+        for u in &c.upvalues {
+            if let ast::Upvalue::Ref(l) = u {
+                out.insert(l.clone());
+            }
+        }
+    }
+    for inner in rv.rvalues() {
+        collect_ref_captured_rvalue(inner, out);
+    }
+}
+
+fn collect_ref_captured(function: &Function) -> FxHashSet<RcLocal> {
+    let mut out = FxHashSet::default();
+    for (_, block) in function.blocks() {
+        for stmt in &block.0 {
+            for rv in stmt.rvalues() {
+                collect_ref_captured_rvalue(rv, &mut out);
+            }
+        }
+    }
+    out
+}
+
 
 impl<'a> SsaConstructor<'a> {
     fn write_local(&mut self, node: NodeIndex, local: &RcLocal, new_local: &RcLocal) {
@@ -389,7 +419,15 @@ impl<'a> SsaConstructor<'a> {
         same
     }
 
+    fn keep_unsplit(&self, local: &RcLocal) -> bool {
+        self.ref_captured.contains(local) || self.new_upvalues_in.contains_key(local)
+    }
+
     fn find_local(&mut self, node: NodeIndex, local: &RcLocal) -> RcLocal {
+        if self.keep_unsplit(local) {
+            self.write_local(node, local, local);
+            return local.clone();
+        }
         // Walk unique-predecessor chains iteratively. Recursing here
         // overflowed the stack on 60k-block dumps and could loop if a
         // sealed cycle had a unique-pred shape after edge edits.
@@ -551,6 +589,9 @@ impl<'a> SsaConstructor<'a> {
         Vec<FxHashSet<RcLocal>>,
     ) {
         let entry = self.function.entry().unwrap();
+        for local in self.ref_captured.iter().cloned().collect::<Vec<_>>() {
+            self.old_locals.entry(local.clone()).or_insert(local);
+        }
         for i in 0..self.dfs.len() {
             if i & 15 == 0 && past_decompile_deadline() {
                 break;
@@ -569,6 +610,12 @@ impl<'a> SsaConstructor<'a> {
                     && let Some(local) = assign.left[0].as_local().cloned()
                     && assign.right[0].as_closure().is_some()
                 {
+                    if self.keep_unsplit(&local) {
+                        self.write_local(node, &local, &local);
+                        self.old_locals.entry(local.clone()).or_insert(local.clone());
+                        self.read(node, stat_index);
+                        continue;
+                    }
                     let new_local = new_local_from(&local);
                     self.old_locals.insert(new_local.clone(), local.clone());
                     if let Some(upvalues) = self.new_upvalues_in.get_mut(&local) {
@@ -595,6 +642,11 @@ impl<'a> SsaConstructor<'a> {
                     self.read(node, stat_index);
                     
                     for (local_index, local) in written.iter().enumerate() {
+                        if self.keep_unsplit(local) {
+                            self.write_local(node, local, local);
+                            self.old_locals.entry(local.clone()).or_insert(local.clone());
+                            continue;
+                        }
                         let new_local = new_local_from(local);
                         self.old_locals.insert(new_local.clone(), local.clone());
                         if let Some(upvalues) = self.new_upvalues_in.get_mut(local) {
@@ -696,6 +748,10 @@ pub fn construct(
     for upvalue in upvalues_in {
         new_upvalues_in.insert(upvalue.clone(), FxHashSet::default());
     }
+    let mut ref_captured = collect_ref_captured(function);
+    for upvalue in upvalues_in {
+        ref_captured.insert(upvalue.clone());
+    }
 
     let dfs = Dfs::new(function.graph(), function.entry().unwrap())
         .iter(function.graph())
@@ -721,6 +777,7 @@ pub fn construct(
         local_map: FxHashMap::default(),
         new_upvalues_in,
         upvalues_passed: FxHashMap::default(),
+        ref_captured,
     }
     .construct()
 }

@@ -53,13 +53,33 @@ fn for_nested_blocks(block: &mut Block, f: &mut impl FnMut(&mut Block)) {
     for stmt in &mut block.0 {
         match stmt {
             Statement::If(s) => {
-                f(&mut s.then_block.lock());
-                f(&mut s.else_block.lock());
+                if let Some(mut b) = s.then_block.try_lock() {
+                    f(&mut b);
+                }
+                if let Some(mut b) = s.else_block.try_lock() {
+                    f(&mut b);
+                }
             }
-            Statement::While(s) => f(&mut s.block.lock()),
-            Statement::Repeat(s) => f(&mut s.block.lock()),
-            Statement::NumericFor(s) => f(&mut s.block.lock()),
-            Statement::GenericFor(s) => f(&mut s.block.lock()),
+            Statement::While(s) => {
+                if let Some(mut b) = s.block.try_lock() {
+                    f(&mut b);
+                }
+            }
+            Statement::Repeat(s) => {
+                if let Some(mut b) = s.block.try_lock() {
+                    f(&mut b);
+                }
+            }
+            Statement::NumericFor(s) => {
+                if let Some(mut b) = s.block.try_lock() {
+                    f(&mut b);
+                }
+            }
+            Statement::GenericFor(s) => {
+                if let Some(mut b) = s.block.try_lock() {
+                    f(&mut b);
+                }
+            }
             _ => {}
         }
     }
@@ -72,18 +92,34 @@ fn stmt_writes_temp(stmt: &Statement, temps: &HashSet<RcLocal>) -> bool {
     match stmt {
         Statement::If(s) => {
             s.then_block
-                .lock()
-                .iter()
-                .any(|t| stmt_writes_temp(t, temps))
+                .try_lock()
+                .map(|b| b.iter().any(|t| stmt_writes_temp(t, temps)))
+                .unwrap_or(false)
                 || s.else_block
-                    .lock()
-                    .iter()
-                    .any(|t| stmt_writes_temp(t, temps))
+                    .try_lock()
+                    .map(|b| b.iter().any(|t| stmt_writes_temp(t, temps)))
+                    .unwrap_or(false)
         }
-        Statement::While(s) => s.block.lock().iter().any(|t| stmt_writes_temp(t, temps)),
-        Statement::Repeat(s) => s.block.lock().iter().any(|t| stmt_writes_temp(t, temps)),
-        Statement::NumericFor(s) => s.block.lock().iter().any(|t| stmt_writes_temp(t, temps)),
-        Statement::GenericFor(s) => s.block.lock().iter().any(|t| stmt_writes_temp(t, temps)),
+        Statement::While(s) => s
+            .block
+            .try_lock()
+            .map(|b| b.iter().any(|t| stmt_writes_temp(t, temps)))
+            .unwrap_or(false),
+        Statement::Repeat(s) => s
+            .block
+            .try_lock()
+            .map(|b| b.iter().any(|t| stmt_writes_temp(t, temps)))
+            .unwrap_or(false),
+        Statement::NumericFor(s) => s
+            .block
+            .try_lock()
+            .map(|b| b.iter().any(|t| stmt_writes_temp(t, temps)))
+            .unwrap_or(false),
+        Statement::GenericFor(s) => s
+            .block
+            .try_lock()
+            .map(|b| b.iter().any(|t| stmt_writes_temp(t, temps)))
+            .unwrap_or(false),
         _ => false,
     }
 }
@@ -234,13 +270,33 @@ fn collect_read_counts(block: &Block, counts: &mut HashMap<RcLocal, usize>) {
         }
         match s {
             Statement::If(st) => {
-                collect_read_counts(&st.then_block.lock(), counts);
-                collect_read_counts(&st.else_block.lock(), counts);
+                if let Some(b) = st.then_block.try_lock() {
+                    collect_read_counts(&b, counts);
+                }
+                if let Some(b) = st.else_block.try_lock() {
+                    collect_read_counts(&b, counts);
+                }
             }
-            Statement::While(st) => collect_read_counts(&st.block.lock(), counts),
-            Statement::Repeat(st) => collect_read_counts(&st.block.lock(), counts),
-            Statement::NumericFor(st) => collect_read_counts(&st.block.lock(), counts),
-            Statement::GenericFor(st) => collect_read_counts(&st.block.lock(), counts),
+            Statement::While(st) => {
+                if let Some(b) = st.block.try_lock() {
+                    collect_read_counts(&b, counts);
+                }
+            }
+            Statement::Repeat(st) => {
+                if let Some(b) = st.block.try_lock() {
+                    collect_read_counts(&b, counts);
+                }
+            }
+            Statement::NumericFor(st) => {
+                if let Some(b) = st.block.try_lock() {
+                    collect_read_counts(&b, counts);
+                }
+            }
+            Statement::GenericFor(st) => {
+                if let Some(b) = st.block.try_lock() {
+                    collect_read_counts(&b, counts);
+                }
+            }
             _ => {}
         }
     }
@@ -313,6 +369,51 @@ fn merge_decl_assign(block: &mut Block) {
     }
 }
 
+fn collect_ref_captured(block: &Block, out: &mut HashSet<RcLocal>) {
+    for s in &block.0 {
+        s.traverse_rvalues(&mut |rv| {
+            if let RValue::Closure(c) = rv {
+                for u in &c.upvalues {
+                    if let Upvalue::Ref(l) = u {
+                        out.insert(l.clone());
+                    }
+                }
+            }
+        });
+        match s {
+            Statement::If(st) => {
+                if let Some(b) = st.then_block.try_lock() {
+                    collect_ref_captured(&b, out);
+                }
+                if let Some(b) = st.else_block.try_lock() {
+                    collect_ref_captured(&b, out);
+                }
+            }
+            Statement::While(st) => {
+                if let Some(b) = st.block.try_lock() {
+                    collect_ref_captured(&b, out);
+                }
+            }
+            Statement::Repeat(st) => {
+                if let Some(b) = st.block.try_lock() {
+                    collect_ref_captured(&b, out);
+                }
+            }
+            Statement::NumericFor(st) => {
+                if let Some(b) = st.block.try_lock() {
+                    collect_ref_captured(&b, out);
+                }
+            }
+            Statement::GenericFor(st) => {
+                if let Some(b) = st.block.try_lock() {
+                    collect_ref_captured(&b, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn collect_reads(block: &Block, reads: &mut HashSet<RcLocal>) {
     for s in &block.0 {
         for l in s.values_read() {
@@ -320,28 +421,49 @@ fn collect_reads(block: &Block, reads: &mut HashSet<RcLocal>) {
         }
         match s {
             Statement::If(st) => {
-                collect_reads(&st.then_block.lock(), reads);
-                collect_reads(&st.else_block.lock(), reads);
+                if let Some(b) = st.then_block.try_lock() {
+                    collect_reads(&b, reads);
+                }
+                if let Some(b) = st.else_block.try_lock() {
+                    collect_reads(&b, reads);
+                }
             }
-            Statement::While(st) => collect_reads(&st.block.lock(), reads),
-            Statement::Repeat(st) => collect_reads(&st.block.lock(), reads),
-            Statement::NumericFor(st) => collect_reads(&st.block.lock(), reads),
-            Statement::GenericFor(st) => collect_reads(&st.block.lock(), reads),
+            Statement::While(st) => {
+                if let Some(b) = st.block.try_lock() {
+                    collect_reads(&b, reads);
+                }
+            }
+            Statement::Repeat(st) => {
+                if let Some(b) = st.block.try_lock() {
+                    collect_reads(&b, reads);
+                }
+            }
+            Statement::NumericFor(st) => {
+                if let Some(b) = st.block.try_lock() {
+                    collect_reads(&b, reads);
+                }
+            }
+            Statement::GenericFor(st) => {
+                if let Some(b) = st.block.try_lock() {
+                    collect_reads(&b, reads);
+                }
+            }
             _ => {}
         }
     }
 }
 
-fn dce_unused(block: &mut Block, reads: &HashSet<RcLocal>) {
-    for_nested_blocks(block, &mut |b| dce_unused(b, reads));
+fn dce_unused(block: &mut Block, reads: &HashSet<RcLocal>, ref_captured: &HashSet<RcLocal>) {
+    for_nested_blocks(block, &mut |b| dce_unused(b, reads, ref_captured));
     let mut i = 0;
     while i < block.0.len() {
         let remove_or_replace = if let Statement::Assign(a) = &block.0[i] {
             let all_local = a.left.iter().all(|lv| lv.as_local().is_some());
             let all_unused = all_local
-                && a.left
-                    .iter()
-                    .all(|lv| !reads.contains(lv.as_local().unwrap()));
+                && a.left.iter().all(|lv| {
+                    let l = lv.as_local().unwrap();
+                    !reads.contains(l) && !ref_captured.contains(l)
+                });
             if all_unused {
                 if a.right.iter().any(|r| r.has_side_effects()) {
                     if a.right.len() == 1 {
@@ -391,7 +513,9 @@ pub fn apply(block: &mut Block) {
     }
     let mut reads = HashSet::new();
     collect_reads(block, &mut reads);
-    dce_unused(block, &reads);
+    let mut ref_captured = HashSet::new();
+    collect_ref_captured(block, &mut ref_captured);
+    dce_unused(block, &reads, &ref_captured);
 }
 
 #[cfg(test)]
@@ -497,6 +621,43 @@ mod tests {
         assert!(
             printed.contains("_callback"),
             "upvalue local must not be inlined away: {printed}"
+        );
+    }
+
+    #[test]
+    fn does_not_dce_store_to_ref_captured_local() {
+        let flag = named("ResetDisabled");
+        let _keep = flag.clone();
+        let mut init = Assign::new(
+            vec![flag.clone().into()],
+            vec![Literal::Boolean(false).into()],
+        );
+        init.prefix = true;
+        let inner = crate::Function {
+            name: None,
+            line: None,
+            parameters: vec![],
+            is_variadic: false,
+            body: Block::default(),
+        };
+        let closure = crate::Closure {
+            function: by_address::ByAddress(crate::share_function(inner)),
+            upvalues: vec![crate::Upvalue::Ref(flag.clone())],
+        };
+        let spawn = Call::new(
+            crate::Global::new(b"task.spawn".to_vec()).into(),
+            vec![RValue::Closure(closure)],
+        );
+        let later = Assign::new(
+            vec![flag.clone().into()],
+            vec![Literal::Boolean(true).into()],
+        );
+        let mut block = Block(vec![init.into(), Statement::Call(spawn), later.into()]);
+        apply(&mut block);
+        let printed = block.to_string();
+        assert!(
+            printed.contains("true"),
+            "store to ref-captured local must survive DCE: {printed}"
         );
     }
 }
