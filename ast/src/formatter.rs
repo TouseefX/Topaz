@@ -9,9 +9,10 @@ use itertools::Itertools;
 use triomphe::Arc;
 
 use crate::{
-    Assign, Binary, BinaryOperation, Block, Call, Closure, GenericFor, If, Index, LValue, Literal,
-    MethodCall, NumericFor, RValue, Reduce, Repeat, Return, Select, SharedBlock, Statement, Table,
-    Unary, UnaryOperation, While, reset_walk_seen, walk_seen_insert,
+    Assign, Binary, BinaryOperation, Block, Call, Closure, GenericFor, GenericForInit,
+    GenericForNext, If, Index, LValue, Literal, MethodCall, NumForInit, NumForNext, NumericFor,
+    RValue, Reduce, Repeat, Return, Select, SharedBlock, Statement, Table, Unary, UnaryOperation,
+    While, reset_walk_seen, walk_seen_insert,
 };
 
 pub enum IndentationMode {
@@ -876,6 +877,61 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         write!(self.output, "end")
     }
 
+    fn format_generic_for_init(&mut self, init: &GenericForInit) -> fmt::Result {
+        writeln!(self.output, "-- unstructured generic-for init")?;
+        self.indent()?;
+        self.format_assign(&init.0)
+    }
+
+    fn format_generic_for_next(&mut self, nxt: &GenericForNext) -> fmt::Result {
+        writeln!(self.output, "-- unstructured generic-for next")?;
+        self.indent()?;
+        for (i, lvalue) in nxt.res_locals.iter().enumerate() {
+            if i != 0 {
+                write!(self.output, ", ")?;
+            }
+            self.format_lvalue(lvalue)?;
+        }
+        write!(self.output, " = ")?;
+        self.format_rvalue(&nxt.generator)?;
+        write!(self.output, "(")?;
+        self.format_rvalue(&nxt.state)?;
+        write!(self.output, ", {})", nxt.control)?;
+        writeln!(self.output)?;
+        self.indent()?;
+        writeln!(self.output, "if {} ~= nil then", nxt.res_locals[0])?;
+        self.indentation_level += 1;
+        self.indent()?;
+        writeln!(self.output, "{} = {}", nxt.control, nxt.res_locals[0])?;
+        self.indentation_level -= 1;
+        self.indent()?;
+        write!(self.output, "end")
+    }
+
+    fn format_num_for_init(&mut self, init: &NumForInit) -> fmt::Result {
+        writeln!(self.output, "-- unstructured numeric-for init")?;
+        self.indent()?;
+        write!(
+            self.output,
+            "{}, {}, {} = {}, {}, {}",
+            init.counter.0, init.limit.0, init.step.0, init.counter.1, init.limit.1, init.step.1
+        )
+    }
+
+    fn format_num_for_next(&mut self, nxt: &NumForNext) -> fmt::Result {
+        writeln!(self.output, "-- unstructured numeric-for next")?;
+        self.indent()?;
+        writeln!(
+            self.output,
+            "{} = {} + {}",
+            nxt.counter.0, nxt.counter.1, nxt.step
+        )?;
+        self.indent()?;
+        writeln!(self.output, "if {} <= {} then", nxt.counter.0, nxt.limit)?;
+        self.indent()?;
+        write!(self.output, "end")
+    }
+
     pub(crate) fn format_return(&mut self, r#return: &Return) -> fmt::Result {
         write!(self.output, "return")?;
         for (i, rvalue) in r#return.values.iter().enumerate() {
@@ -899,7 +955,11 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             Statement::While(r#while) => self.format_while(r#while),
             Statement::Repeat(repeat) => self.format_repeat(repeat),
             Statement::NumericFor(numeric_for) => self.format_numeric_for(numeric_for),
+            Statement::NumForInit(init) => self.format_num_for_init(init),
+            Statement::NumForNext(nxt) => self.format_num_for_next(nxt),
             Statement::GenericFor(generic_for) => self.format_generic_for(generic_for),
+            Statement::GenericForInit(init) => self.format_generic_for_init(init),
+            Statement::GenericForNext(nxt) => self.format_generic_for_next(nxt),
             Statement::Call(call) => self.format_call(call),
             Statement::MethodCall(method_call) => self.format_method_call(method_call),
             Statement::Return(r#return) => self.format_return(r#return),

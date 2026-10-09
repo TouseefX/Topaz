@@ -406,14 +406,29 @@ fn looks_time_budget_skipped(s: &str) -> bool {
     s.contains("skipped (time budget)") || s.contains("skipped lift (time budget)")
 }
 
+/// Leftover SSA for-loop IR or raw CFG dump. Syntactically we now emit
+/// valid Luau for those, but the decompile is not fully structured.
+fn looks_unstructured(s: &str) -> bool {
+    s.contains("[internal control]")
+        || s.contains("-- unstructured generic-for")
+        || s.contains("-- unstructured numeric-for")
+        || s.contains("-- GenericForInit")
+        || s.contains("-- GenericForNext")
+        || s.contains("-- NumForInit")
+        || s.contains("-- NumForNext")
+        || s.contains("-- block ")
+}
+
 fn render_complete(body: &mut ast::Block) -> String {
     let _ = ast::sanitize_for_luau(body);
     let (body_s, capped) = format_block_capped(body, COMPLETE_BYTE_CAP);
-    if looks_time_budget_skipped(&body_s) || capped {
+    if looks_time_budget_skipped(&body_s) || capped || looks_unstructured(&body_s) {
         let why = if capped {
             "output capped"
-        } else {
+        } else if looks_time_budget_skipped(&body_s) {
             "some functions skipped (time budget)"
+        } else {
+            "unstructured control flow remains"
         };
         format!(
             "-- Decompiled with Topaz\n-- Created by: Andrew and TouseefX\n-- {INCOMPLETE_MARK}\n-- ERROR: {why}\n\n{body_s}"
@@ -757,6 +772,7 @@ pub fn output_is_incomplete(out: &str) -> bool {
         || out.contains("-- Error: fallback emit panicked")
         || out.contains("skipped (time budget)")
         || out.contains("skipped lift (time budget)")
+        || looks_unstructured(out)
         || out.starts_with("failed to deserialize")
 }
 
@@ -1246,6 +1262,42 @@ mod incomplete_output_tests {
         let s = render_complete(&mut body);
         assert!(s.contains(INCOMPLETE_MARK));
         assert!(output_is_incomplete(&s));
+    }
+
+    #[test]
+    fn leftover_generic_for_marks_complete_path_incomplete() {
+        let g = ast::RcLocal::new(ast::Local::new(Some("g".into())));
+        let s = ast::RcLocal::new(ast::Local::new(Some("s".into())));
+        let c = ast::RcLocal::new(ast::Local::new(Some("c".into())));
+        let v1 = ast::RcLocal::new(ast::Local::new(Some("v1".into())));
+        let mut body = ast::Block(vec![ast::GenericForNext::new(
+            vec![v1],
+            g.into(),
+            s,
+            c,
+        )
+        .into()]);
+        let out = render_complete(&mut body);
+        assert!(out.contains(INCOMPLETE_MARK), "{out}");
+        assert!(output_is_incomplete(&out));
+        assert!(!out.contains("[internal control]"), "{out}");
+        assert!(out.contains("if v1 ~= nil then"), "{out}");
+        for line in out.lines() {
+            let t = line.trim_start();
+            if t.starts_with("if ") {
+                assert!(t.contains(" then"), "if without then: {line}");
+            }
+            assert!(!t.starts_with("goto "));
+            assert!(!t.starts_with("::"));
+        }
+    }
+
+    #[test]
+    fn leftover_cfg_block_comment_marks_incomplete() {
+        let mut body = ast::Block(vec![ast::Comment::new("block 102".into()).into()]);
+        let out = render_complete(&mut body);
+        assert!(out.contains(INCOMPLETE_MARK), "{out}");
+        assert!(output_is_incomplete(&out));
     }
 
     #[test]

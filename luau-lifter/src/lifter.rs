@@ -1657,7 +1657,7 @@ impl<'a> Lifter<'a> {
                     OpCode::LOP_FORGLOOP => {
                         let generator = self.register(a as _);
                         let state = self.register((a + 1) as _);
-                        let _counter = self.register((a + 2) as _);
+                        let counter = self.register((a + 2) as _);
                         statements.push(
                             ast::GenericForNext::new(
                                 (a as usize + 3..a as usize + 3 + (aux & 0xff) as usize)
@@ -1665,6 +1665,7 @@ impl<'a> Lifter<'a> {
                                     .collect::<Vec<_>>(),
                                 generator.into(),
                                 state,
+                                counter,
                             )
                             .into(),
                         );
