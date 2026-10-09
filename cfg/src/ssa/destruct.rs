@@ -883,40 +883,67 @@ impl<'a> Destructor<'a> {
             return true;
         }
 
-        let mut param_src: IndexMap<RcLocal, RcLocal> = IndexMap::new();
+        // Per-param: lift the ones every predecessor agrees on (Request
+        // through an if-elseif) even if a sibling payload phi is not
+        // trivial. Missing/non-Local/disagreeing params stay for the
+        // general pred-copy path.
+        let mut param_src: IndexMap<RcLocal, Option<RcLocal>> = IndexMap::new();
+        let mut param_ok: IndexMap<RcLocal, bool> = IndexMap::new();
         for (args, _) in &incoming {
-            if args.is_empty() {
-                return false;
+            for (param, _) in args {
+                param_src.entry(param.clone()).or_insert(None);
+                param_ok.entry(param.clone()).or_insert(true);
             }
+        }
+        if param_ok.is_empty() {
+            return false;
+        }
+        for (args, _) in &incoming {
             let mut seen = FxHashSet::default();
             for (param, rval) in args {
                 if !seen.insert(param.clone()) {
-                    return false;
+                    param_ok.insert(param.clone(), false);
+                    continue;
                 }
                 let ast::RValue::Local(src) = rval else {
-                    return false;
+                    param_ok.insert(param.clone(), false);
+                    continue;
                 };
                 match param_src.get(param) {
-                    None => {
-                        param_src.insert(param.clone(), src.clone());
+                    Some(None) => {
+                        param_src.insert(param.clone(), Some(src.clone()));
                     }
-                    Some(prev) if prev == src => {}
-                    _ => return false,
+                    Some(Some(prev)) if prev == src => {}
+                    _ => {
+                        param_ok.insert(param.clone(), false);
+                    }
                 }
             }
-        }
-        let nparams = param_src.len();
-        if nparams == 0 || incoming.iter().any(|(a, _)| a.len() != nparams) {
-            return false;
+            for (param, ok) in param_ok.iter_mut() {
+                if *ok && !seen.contains(param) {
+                    *ok = false;
+                }
+            }
         }
 
         let mut left = Vec::new();
         let mut right = Vec::new();
-        for (param, src) in param_src {
-            if src != param {
-                left.push(param.into());
-                right.push(src.into());
+        let mut trivial = FxHashSet::default();
+        for (param, ok) in &param_ok {
+            if !*ok {
+                continue;
             }
+            let Some(Some(src)) = param_src.get(param) else {
+                continue;
+            };
+            trivial.insert(param.clone());
+            if src != param {
+                left.push(param.clone().into());
+                right.push(src.clone().into());
+            }
+        }
+        if trivial.is_empty() {
+            return false;
         }
         if !left.is_empty() {
             self.function.block_mut(node).unwrap().insert(
@@ -937,9 +964,11 @@ impl<'a> Destructor<'a> {
                 .edge_weight_mut(eid)
                 .unwrap()
                 .arguments
-                .clear();
+                .retain(|(p, _)| !trivial.contains(p));
         }
-        true
+        self.function
+            .edges_to_block(node)
+            .all(|(_, e)| e.arguments.is_empty())
     }
 
     fn lift_block_params(&mut self, node: NodeIndex) {
@@ -1195,5 +1224,65 @@ mod request_phi_tests {
                 "copy trapped in {name} predecessor:\n{s}"
             );
         }
+    }
+
+    #[test]
+    fn mixed_phi_lifts_only_trivial_request() {
+        let request2 = RcLocal::new(Local::new(Some("request2".into())));
+        let data_a = RcLocal::new(Local::new(Some("data_a".into())));
+        let data_b = RcLocal::new(Local::new(Some("data_b".into())));
+        let v1779 = RcLocal::new(Local::new(Some("v1779".into())));
+        let v1780 = RcLocal::new(Local::new(Some("v1780".into())));
+        let mut function = Function::new(0);
+        let entry = function.new_block();
+        let then_n = function.new_block();
+        let else_n = function.new_block();
+        let join = function.new_block();
+        function.set_entry(entry);
+        function.set_edges(
+            entry,
+            vec![
+                (then_n, BlockEdge::new(BranchType::Then)),
+                (else_n, BlockEdge::new(BranchType::Else)),
+            ],
+        );
+        let mut e1 = BlockEdge::new(BranchType::Unconditional);
+        e1.arguments
+            .push((v1779.clone(), request2.clone().into()));
+        e1.arguments.push((v1780.clone(), data_a.clone().into()));
+        let mut e2 = BlockEdge::new(BranchType::Unconditional);
+        e2.arguments
+            .push((v1779.clone(), request2.clone().into()));
+        e2.arguments.push((v1780.clone(), data_b.clone().into()));
+        function.set_edges(then_n, vec![(join, e1)]);
+        function.set_edges(else_n, vec![(join, e2)]);
+        function.block_mut(join).unwrap().0.push(Statement::If(If::new(
+            Binary::new(
+                v1779.clone().into(),
+                Literal::String(b"DL1Flip".to_vec()).into(),
+                BinaryOperation::Equal,
+            )
+            .into(),
+            ast::Block::default(),
+            ast::Block::default(),
+        )));
+        Destructor::new(
+            &mut function,
+            IndexMap::default(),
+            FxHashSet::default(),
+            8,
+        )
+        .destruct();
+        let join_s = function.block(join).unwrap().to_string();
+        let then_s = function.block(then_n).unwrap().to_string();
+        let else_s = function.block(else_n).unwrap().to_string();
+        assert!(
+            join_s.contains("request2") || join_s.contains("DL1Flip"),
+            "Request must reach the join:\nthen:{then_s}\nelse:{else_s}\njoin:{join_s}"
+        );
+        assert!(
+            !then_s.contains("v1779") && !else_s.contains("v1779"),
+            "trivial Request copy must not be trapped in arms:\nthen:{then_s}\nelse:{else_s}"
+        );
     }
 }

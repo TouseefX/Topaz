@@ -141,8 +141,18 @@ pub fn remove_unnecessary_params(
             }
         }
 
-        // Degree-zero chase is extra copy-prop. Identical-arg phis above
-        // already dropped. Skip the walk on huge CFGs.
+        // Identical-arg phis were dropped from the edges. Join uses still
+        // name the phi local (`v1779`). The degree-zero chase below used
+        // to copy param→arg into `local_map`, but that walk is O(|SSA|)
+        // per node and is skipped when n>2000 — ClientRenderer's event
+        // handler. Dropping the phi without rewriting uses is the v8/v9
+        // dispatcher bug: `local v1779; if v1779 == "DL1Flip"`. Mapping
+        // here is O(phis) and required at every CFG size.
+        for (param, arg) in &removable_params {
+            local_map.insert(param.clone(), arg.clone());
+        }
+
+        // Degree-zero chase is extra copy-prop for *dependent* params.
         if function.graph().node_count() > 2000 {
             continue;
         }
@@ -746,6 +756,7 @@ pub fn construct(
 mod tests {
     use super::*;
     use crate::function::Function;
+    use rustc_hash::FxHashMap;
 
     /// v5: `keep_unsplit` left the incoming upvalue as itself, never inserted
     /// it into `new_upvalues_in`'s value-set, then `mark_upvalues` asserted.
@@ -782,6 +793,79 @@ mod tests {
         assert_eq!(
             function.parameters[0].0 .0.lock().0.as_deref(),
             Some("self")
+        );
+    }
+
+    /// v8/v9: `remove_unnecessary_params` dropped identical-arg phis on
+    /// n>2000 CFGs without `local_map` rewrite. Join uses of `v1779` then
+    /// printed as a bare `local` and `if v1779 == "DL1Flip"` was always false.
+    #[test]
+    fn trivial_phi_rewrites_uses_on_large_cfg() {
+        use crate::block::{BlockEdge, BranchType};
+        use ast::{Assign, Binary, BinaryOperation, If, Literal, Local, Statement};
+
+        let request2 = RcLocal::new(Local::new(Some("request2".into())));
+        let v1779 = RcLocal::new(Local::new(Some("v1779".into())));
+        let mut function = Function::new(0);
+        let entry = function.new_block();
+        let then_n = function.new_block();
+        let join = function.new_block();
+        function.set_entry(entry);
+        function.block_mut(entry).unwrap().0.push(
+            Assign::new(
+                vec![request2.clone().into()],
+                vec![Literal::String(b"FASSet".to_vec()).into()],
+            )
+            .into(),
+        );
+        let mut else_edge = BlockEdge::new(BranchType::Else);
+        else_edge
+            .arguments
+            .push((v1779.clone(), request2.clone().into()));
+        function.set_edges(
+            entry,
+            vec![
+                (then_n, BlockEdge::new(BranchType::Then)),
+                (join, else_edge),
+            ],
+        );
+        let mut then_edge = BlockEdge::new(BranchType::Unconditional);
+        then_edge
+            .arguments
+            .push((v1779.clone(), request2.clone().into()));
+        function.set_edges(then_n, vec![(join, then_edge)]);
+        function.block_mut(join).unwrap().0.push(Statement::If(If::new(
+            Binary::new(
+                v1779.clone().into(),
+                Literal::String(b"DL1Flip".to_vec()).into(),
+                BinaryOperation::Equal,
+            )
+            .into(),
+            ast::Block::default(),
+            ast::Block::default(),
+        )));
+        // Force the n>2000 skip that used to drop the mapping.
+        for _ in 0..2001 {
+            let _ = function.new_block();
+        }
+        assert!(function.graph().node_count() > 2000);
+
+        let mut local_map = FxHashMap::default();
+        remove_unnecessary_params(&mut function, &mut local_map);
+        assert_eq!(
+            local_map.get(&v1779),
+            Some(&request2),
+            "trivial phi must map v1779 → request2 even when n>2000"
+        );
+        apply_local_map(&mut function, local_map);
+        let join_s = function.block(join).unwrap().to_string();
+        assert!(
+            join_s.contains("request2"),
+            "join must compare request2, not a never-written phi:\n{join_s}"
+        );
+        assert!(
+            !join_s.contains("v1779"),
+            "phi name must not survive apply_local_map:\n{join_s}"
         );
     }
 }
