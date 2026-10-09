@@ -989,7 +989,7 @@ const MAX_TAIL_LEN: usize = 64;
 /// else into a cycle (v12 ClientRenderer hang).
 fn stmt_weight(stmt: &Statement, seen: &mut FxHashSet<*const ()>) -> usize {
     match stmt {
-        Statement::If(r#if) => 1
+        Statement::If(r#if) => 1usize
             .saturating_add(shared_weight(&r#if.then_block, seen))
             .saturating_add(shared_weight(&r#if.else_block, seen)),
         Statement::While(w) => 1usize.saturating_add(shared_weight(&w.block, seen)),
