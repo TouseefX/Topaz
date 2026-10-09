@@ -211,36 +211,35 @@ impl Namer {
 
     fn name_local_smart(&mut self, hint: &str, rvalue: Option<&RValue>, local: &RcLocal) {
         let mut lock = local.0 .0.lock();
-        if lock.0.is_some() {
-            if !self.rename {
-                // Register the pre-existing name so that later calls to
-                // `unique_name` for an unrelated local don't hand out the
-                // exact same name and create a collision (two distinct
-                // variables printing identically, which can silently
-                // corrupt the decompiled source -- see the NodeSorter
-                // `Id = Id` regression).
-                if let Some(ref existing) = lock.0 {
-                    self.name_uses.entry(existing.clone()).or_insert(1);
-                }
-                return;
-            }
+        if !self.rename {
+            // lua51 path: keep whatever name is already there, but still
+            // record it so later unique_name calls cannot collide.
             if let Some(ref existing) = lock.0 {
-                // Check if the existing name is valid: not synthetic AND not a keyword.
-                // Keywords like "cframe" from debug info should be renamed to avoid
-                // conflicts with Luau's type keywords.
-                if !is_synthetic_name(existing) && Self::is_valid_identifier(existing) {
-                    self.name_uses.entry(existing.clone()).or_insert(1);
-                    return;
-                }
+                self.name_uses.entry(existing.clone()).or_insert(1);
+                return;
             }
         }
         if Arc::count(&local.0 .0) == 1 {
             lock.0 = Some("_".to_string());
             return;
         }
+        // SSA copies the originating register's debug name onto every split
+        // (`new_local_from`). Keeping that name without uniquifying made
+        // distinct live ranges print as the same identifier (`insert = Bars`
+        // then `insert = Debris`, `new = Color3.fromRGB` then `new = 255`)
+        // and silently clobber each other in the emitted Luau.
+        let preferred = lock.0.as_ref().and_then(|existing| {
+            if !is_synthetic_name(existing) && Self::is_valid_identifier(existing) {
+                Some(existing.clone())
+            } else {
+                None
+            }
+        });
         drop(lock);
 
-        let name = if let Some(derived) = rvalue.and_then(Self::derive_name) {
+        let name = if let Some(pref) = preferred {
+            self.unique_name(&pref)
+        } else if let Some(derived) = rvalue.and_then(Self::derive_name) {
             self.unique_name(&derived)
         } else if let Some(&hint) = self.type_hints.get(local) {
             self.unique_name(hint)
@@ -248,7 +247,7 @@ impl Namer {
             let suffix = self.counter;
             self.counter += 1;
             let upv = if self.upvalues.contains(local) { "_u" } else { "" };
-            format!("{hint}{upv}{suffix}")
+            self.unique_name(&format!("{hint}{upv}{suffix}"))
         };
         local.0 .0.lock().0 = Some(name);
     }
@@ -262,19 +261,13 @@ impl Namer {
         if lock.0.is_some() && !self.rename {
             return;
         }
-        if lock.0.is_some() && self.rename {
-            if let Some(ref name) = lock.0 {
-                // Check if the existing name is valid: not synthetic AND not a keyword.
-                if !is_synthetic_name(name) && Self::is_valid_identifier(name) {
-                    return;
-                }
-            }
-        }
         if Arc::count(&local.0 .0) == 1 {
             lock.0 = Some("_".to_string());
             return;
         }
-        lock.0 = Some(fixed.to_string());
+        drop(lock);
+        let name = self.unique_name(fixed);
+        local.0 .0.lock().0 = Some(name);
     }
 
     fn for_letter(&self) -> &'static str {
@@ -513,5 +506,25 @@ mod cycle_tests {
         assert!(s.contains("if"), "formatter produced: {s:?}");
         assert!(s.contains("end"), "formatter produced: {s:?}");
         assert!(s.len() < 64 * 1024, "runaway format: {} bytes", s.len());
+    }
+
+    #[test]
+    fn duplicate_debug_names_are_uniquified() {
+        use crate::{Assign, Local, Literal, RcLocal};
+
+        let a = RcLocal::new(Local::new(Some("insert".into())));
+        let b = RcLocal::new(Local::new(Some("insert".into())));
+        let _keep_a = a.clone();
+        let _keep_b = b.clone();
+        let mut a1 = Assign::new(vec![a.clone().into()], vec![Literal::Nil.into()]);
+        a1.prefix = true;
+        let mut a2 = Assign::new(vec![b.clone().into()], vec![Literal::Nil.into()]);
+        a2.prefix = true;
+        let mut body = Block(vec![a1.into(), a2.into()]);
+        name_locals(&mut body, true);
+        let na = a.0 .0.lock().0.clone().unwrap();
+        let nb = b.0 .0.lock().0.clone().unwrap();
+        assert_ne!(na, nb, "colliding debug names were not uniquified: {na} / {nb}");
+        assert!(na == "insert" || nb == "insert", "{na} / {nb}");
     }
 }

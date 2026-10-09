@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::iter;
 use std::{
     borrow::Cow,
@@ -12,8 +13,29 @@ use crate::{
     Assign, Binary, BinaryOperation, Block, Call, Closure, GenericFor, GenericForInit,
     GenericForNext, If, Index, LValue, Literal, MethodCall, NumForInit, NumForNext, NumericFor,
     RValue, Reduce, Repeat, Return, Select, SharedBlock, Statement, Table, Unary, UnaryOperation,
-    While, reset_walk_seen, walk_seen_insert,
+    While, reset_walk_seen,
 };
+
+thread_local! {
+    static FORMAT_PATH: RefCell<Vec<*const ()>> = const { RefCell::new(Vec::new()) };
+}
+
+fn format_path_push(ptr: *const ()) -> bool {
+    FORMAT_PATH.with(|p| {
+        if p.borrow().iter().any(|&x| x == ptr) {
+            false
+        } else {
+            p.borrow_mut().push(ptr);
+            true
+        }
+    })
+}
+
+fn format_path_pop() {
+    FORMAT_PATH.with(|p| {
+        p.borrow_mut().pop();
+    });
+}
 
 pub enum IndentationMode {
     Spaces(u8),
@@ -74,6 +96,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         indentation_mode: IndentationMode,
     ) -> fmt::Result {
         reset_walk_seen();
+        FORMAT_PATH.with(|p| p.borrow_mut().clear());
         let mut formatter = Self {
             indentation_level: 0,
             indentation_mode,
@@ -85,17 +108,25 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     const MAX_NEST: usize = 256;
 
     fn format_shared_block(&mut self, shared: &SharedBlock) -> fmt::Result {
+        // Skip only when this Arc is already on the *current* recursion
+        // path (a cycle). A global seen-set treated DAG sharing as a
+        // cycle and printed thousands of empty `if`s: the first parent
+        // got the body, every later parent printed `then end`.
         let ptr = Arc::as_ptr(shared) as *const ();
-        if !walk_seen_insert(ptr) {
+        if !format_path_push(ptr) {
             return Ok(());
         }
         if self.indentation_level > Self::MAX_NEST {
+            format_path_pop();
             return Ok(());
         }
-        if let Some(body) = shared.try_lock() {
-            self.format_block(&body)?;
-        }
-        Ok(())
+        let result = if let Some(body) = shared.try_lock() {
+            self.format_block(&body)
+        } else {
+            Ok(())
+        };
+        format_path_pop();
+        result
     }
 
     fn indent(&mut self) -> fmt::Result {
@@ -723,14 +754,16 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             });
             if let Some(else_if) = else_if {
                 let else_ptr = Arc::as_ptr(&r#if.else_block) as *const ();
-                if !walk_seen_insert(else_ptr) || self.indentation_level > Self::MAX_NEST {
+                if !format_path_push(else_ptr) || self.indentation_level > Self::MAX_NEST {
                     writeln!(self.output)?;
                     self.indent()?;
                     return write!(self.output, "end");
                 }
                 self.indent()?;
                 write!(self.output, "else")?;
-                return self.format_if(&else_if);
+                let result = self.format_if(&else_if);
+                format_path_pop();
+                return result;
             }
             self.indent()?;
             writeln!(self.output, "else")?;
@@ -1021,5 +1054,54 @@ mod is_valid_name_tests {
         assert!(F::is_valid_name(b"type"));
         assert!(F::is_valid_name(b"typeof"));
         assert!(F::is_valid_name(b"export"));
+    }
+}
+
+#[cfg(test)]
+mod shared_body_tests {
+    use crate::{share_block, Assign, Block, If, Literal, Local, RcLocal, Statement};
+
+    #[test]
+    fn dag_shared_then_block_prints_twice() {
+        let local = RcLocal::new(Local::new(Some("x".into())));
+        let _keep = local.clone();
+        let mut assign = Assign::new(vec![local.into()], vec![Literal::Boolean(true).into()]);
+        assign.prefix = true;
+        let body = share_block(Block(vec![assign.into()]));
+        let block = Block(vec![
+            Statement::If(If {
+                condition: Literal::Boolean(true).into(),
+                then_block: body.clone(),
+                else_block: share_block(Block::default()),
+            }),
+            Statement::If(If {
+                condition: Literal::Boolean(false).into(),
+                then_block: body,
+                else_block: share_block(Block::default()),
+            }),
+        ]);
+        let s = block.to_string();
+        let hits = s.matches("x = true").count();
+        assert_eq!(hits, 2, "DAG-shared then-body should print for both ifs:\n{s}");
+    }
+
+    #[test]
+    fn cyclic_else_still_terminates() {
+        let shared = share_block(Block::default());
+        let inner = If {
+            condition: Literal::Boolean(true).into(),
+            then_block: share_block(Block::default()),
+            else_block: shared.clone(),
+        };
+        shared.lock().0.push(Statement::If(inner));
+        let body = Block(vec![Statement::If(If {
+            condition: Literal::Boolean(false).into(),
+            then_block: share_block(Block::default()),
+            else_block: shared,
+        })]);
+        let s = body.to_string();
+        assert!(s.contains("if"));
+        assert!(s.contains("end"));
+        assert!(s.len() < 64 * 1024, "runaway format: {} bytes", s.len());
     }
 }
