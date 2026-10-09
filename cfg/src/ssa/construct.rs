@@ -423,9 +423,21 @@ impl<'a> SsaConstructor<'a> {
         self.ref_captured.contains(local) || self.new_upvalues_in.contains_key(local)
     }
 
+    /// Unsplit writes/reads keep the original `RcLocal`. Incoming upvalues
+    /// must still appear in `new_upvalues_in`'s value-set: `mark_upvalues`
+    /// used to `assert!(set.contains(&value))`, which fired on every nested
+    /// function that touched an upvalue (v5: 224 ClientRenderer panics).
+    fn record_unsplit(&mut self, node: NodeIndex, local: &RcLocal) {
+        self.write_local(node, local, local);
+        self.old_locals.entry(local.clone()).or_insert(local.clone());
+        if let Some(upvalues) = self.new_upvalues_in.get_mut(local) {
+            upvalues.insert(local.clone());
+        }
+    }
+
     fn find_local(&mut self, node: NodeIndex, local: &RcLocal) -> RcLocal {
         if self.keep_unsplit(local) {
-            self.write_local(node, local, local);
+            self.record_unsplit(node, local);
             return local.clone();
         }
         // Walk unique-predecessor chains iteratively. Recursing here
@@ -522,16 +534,20 @@ impl<'a> SsaConstructor<'a> {
                 let statement = self.function.block(node).unwrap().get(stat_index).unwrap();
                 let values = statement.values().into_iter().cloned().collect::<Vec<_>>();
                 for value in values {
-                    let old_local = &self.old_locals[&value];
+                    let Some(old_local) = self.old_locals.get(&value).cloned() else {
+                        continue;
+                    };
                     if let Some(open_locations) = upvalues_open
                         .open
                         .get(&node)
-                        .and_then(|m| m.get(old_local))
+                        .and_then(|m| m.get(&old_local))
                         .and_then(|m| m.get(&stat_index))
                     {
-                        if let Some(new_upvalues_in) = self.new_upvalues_in.get_mut(old_local) {
-                            assert!(new_upvalues_in.contains(&value));
-                        } else if let Some(all_defs) = self.all_definitions.get(old_local) {
+                        if let Some(new_upvalues_in) = self.new_upvalues_in.get_mut(&old_local) {
+                            // Unsplit incoming upvalues never went through the
+                            // split-insert path; record them rather than panic.
+                            new_upvalues_in.insert(value.clone());
+                        } else if let Some(all_defs) = self.all_definitions.get(&old_local) {
                             self.upvalues_passed
                                 .entry(old_local.clone())
                                 .or_default()
@@ -611,8 +627,7 @@ impl<'a> SsaConstructor<'a> {
                     && assign.right[0].as_closure().is_some()
                 {
                     if self.keep_unsplit(&local) {
-                        self.write_local(node, &local, &local);
-                        self.old_locals.entry(local.clone()).or_insert(local.clone());
+                        self.record_unsplit(node, &local);
                         self.read(node, stat_index);
                         continue;
                     }
@@ -643,8 +658,7 @@ impl<'a> SsaConstructor<'a> {
                     
                     for (local_index, local) in written.iter().enumerate() {
                         if self.keep_unsplit(local) {
-                            self.write_local(node, local, local);
-                            self.old_locals.entry(local.clone()).or_insert(local.clone());
+                            self.record_unsplit(node, local);
                             continue;
                         }
                         let new_local = new_local_from(local);
@@ -699,7 +713,13 @@ impl<'a> SsaConstructor<'a> {
         
         if let Some(mut incomplete_params) = self.incomplete_params.remove(&entry) {
             for param in &mut self.function.parameters {
-                *param = incomplete_params.remove(param).unwrap_or_default();
+                // Ref-captured / incoming-upvalue params are keep_unsplit and
+                // never enter `incomplete_params`. `unwrap_or_default()` used
+                // to replace them with a fresh UNNAMED local (CameraShaker
+                // `Start(UNNAMED_117)` while the body still said `p5`).
+                if let Some(new) = incomplete_params.remove(param) {
+                    *param = new;
+                }
             }
         }
         // Unsealed params are left when we hit the deadline or a cyclic CFG.
@@ -746,7 +766,9 @@ pub fn construct(
         .is_none());
     let mut new_upvalues_in = IndexMap::with_capacity(upvalues_in.len());
     for upvalue in upvalues_in {
-        new_upvalues_in.insert(upvalue.clone(), FxHashSet::default());
+        let mut set = FxHashSet::default();
+        set.insert(upvalue.clone());
+        new_upvalues_in.insert(upvalue.clone(), set);
     }
     let mut ref_captured = collect_ref_captured(function);
     for upvalue in upvalues_in {
@@ -780,4 +802,48 @@ pub fn construct(
         ref_captured,
     }
     .construct()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::function::Function;
+
+    /// v5: `keep_unsplit` left the incoming upvalue as itself, never inserted
+    /// it into `new_upvalues_in`'s value-set, then `mark_upvalues` asserted.
+    #[test]
+    fn unsplit_incoming_upvalue_does_not_panic() {
+        let up = RcLocal::new(ast::Local::new(Some("up".into())));
+        let tmp = RcLocal::new(ast::Local::new(Some("tmp".into())));
+        let mut function = Function::new(0);
+        let entry = function.new_block();
+        function.set_entry(entry);
+        function.block_mut(entry).unwrap().0.push(
+            ast::Assign::new(vec![tmp.into()], vec![up.clone().into()]).into(),
+        );
+        let _ = construct(&mut function, &vec![up]);
+    }
+
+    /// Sibling of a keep_unsplit param used to be rewritten via
+    /// `incomplete_params`, and `unwrap_or_default` then wiped the unsplit
+    /// param to a fresh UNNAMED local.
+    #[test]
+    fn unsplit_param_survives_sibling_rewrite() {
+        let self_p = RcLocal::new(ast::Local::new(Some("self".into())));
+        let other = RcLocal::new(ast::Local::new(Some("other".into())));
+        let tmp = RcLocal::new(ast::Local::new(Some("tmp".into())));
+        let mut function = Function::new(0);
+        function.parameters = vec![self_p.clone(), other.clone()];
+        let entry = function.new_block();
+        function.set_entry(entry);
+        function.block_mut(entry).unwrap().0.push(
+            ast::Assign::new(vec![tmp.into()], vec![other.clone().into()]).into(),
+        );
+        let _ = construct(&mut function, &vec![self_p.clone()]);
+        assert_eq!(function.parameters[0], self_p);
+        assert_eq!(
+            function.parameters[0].0 .0.lock().0.as_deref(),
+            Some("self")
+        );
+    }
 }

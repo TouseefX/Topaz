@@ -417,6 +417,8 @@ fn looks_unstructured(s: &str) -> bool {
         || s.contains("-- NumForInit")
         || s.contains("-- NumForNext")
         || s.contains("-- block ")
+        || s.contains("failed to decompile function")
+        || s.contains("failed to lift function")
 }
 
 fn render_complete(body: &mut ast::Block) -> String {
@@ -1000,7 +1002,8 @@ fn decompile_function(
         let params = std::mem::take(&mut function.parameters);
         let is_variadic = function.is_variadic;
         let func_line = function.line;
-        let body = flatten_cfg(&function);
+        let mut body = flatten_cfg(&function);
+        body.push(ast::Comment::new("skipped (time budget)".to_string()).into());
         return finish_function(
             ast_function,
             body,
@@ -1018,7 +1021,8 @@ fn decompile_function(
     let (local_count, local_groups, upvalue_in_groups, upvalue_passed_groups) = match constructed {
         Ok(v) => v,
         Err(_) => {
-            let body = flatten_cfg(&function);
+            let mut body = flatten_cfg(&function);
+            body.push(ast::Comment::new("failed to decompile function".to_string()).into());
             return finish_function(
                 ast_function,
                 body,
@@ -1096,7 +1100,8 @@ fn decompile_function(
     if !destruct_ok {
         // Half-destructed CFG: do not restructure or format it. That is
         // what deadlocked parking_lot after `local_defs[&local]` panicked.
-        let body = flatten_cfg(&function);
+        let mut body = flatten_cfg(&function);
+        body.push(ast::Comment::new("failed to decompile function".to_string()).into());
         return finish_function(
             ast_function,
             body,
@@ -1116,7 +1121,9 @@ fn decompile_function(
     }));
     let body = match lifted {
         Ok(b) => b,
-        Err(_) => ast::Block::default(),
+        Err(_) => ast::Block(vec![
+            ast::Comment::new("failed to decompile function".to_string()).into(),
+        ]),
     };
     let block = ast::share_block(body);
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1298,6 +1305,19 @@ mod incomplete_output_tests {
         let out = render_complete(&mut body);
         assert!(out.contains(INCOMPLETE_MARK), "{out}");
         assert!(output_is_incomplete(&out));
+    }
+
+    #[test]
+    fn caught_ssa_panic_marks_incomplete() {
+        let mut body = ast::Block(vec![ast::Comment::new(
+            "failed to decompile function".into(),
+        )
+        .into()]);
+        let out = render_complete(&mut body);
+        assert!(out.contains(INCOMPLETE_MARK), "{out}");
+        assert!(output_is_incomplete(&out));
+        assert!(output_is_incomplete("failed to decompile function"));
+        assert!(output_is_incomplete("failed to lift function"));
     }
 
     #[test]

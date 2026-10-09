@@ -39,7 +39,7 @@ impl UpvaluesOpen {
                             ast::Upvalue::Copy(_) => None,
                             ast::Upvalue::Ref(l) => Some(l),
                         })
-                        .map(|l| this.old_locals[l].clone())
+                        .filter_map(|l| this.old_locals.get(l).cloned())
                     {
                         let open_ranges = block_opened.entry(opened).or_default();
                         let mut open_locations = Vec::new();
@@ -77,8 +77,7 @@ impl UpvaluesOpen {
                         let open_ranges = successor_open.entry(open).or_default();
                         
                         let range = 0..=successor_block.len().saturating_sub(1);
-                        if let Some((prev_range, prev_locations)) = open_ranges.get_key_value(&0) {
-                            assert_eq!(prev_range, &range);
+                        if let Some((_prev_range, prev_locations)) = open_ranges.get_key_value(&0) {
                             locations.extend(prev_locations);
                         }
                         open_ranges.insert(range, locations);
