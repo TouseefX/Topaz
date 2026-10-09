@@ -1121,10 +1121,15 @@ fn decompile_function(
             ast::Comment::new("failed to decompile function".to_string()).into(),
         ]),
     };
-    // Fold `a = b` SSA clones before LocalDeclarer so Luau does not
-    // allocate a register per phi temp (200-local cap on ClientRenderer).
+    // Flatten inverted `x ~= "A"` wrappers that swallowed later `x == "B"`
+    // cases (v11 IOInvis else). Then fold SSA copies, never into upvalues
+    // (v11 CameraShaker Update).
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ast::fold_copies::fold_copy_locals(&mut body);
+        ast::flatten_dispatch::flatten_string_dispatch(&mut body);
+        ast::fold_copies::fold_copy_locals_with(
+            &mut body,
+            &upvalues_in.iter().cloned().collect(),
+        );
     }));
     let block = ast::share_block(body);
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

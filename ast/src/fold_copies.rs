@@ -11,16 +11,31 @@ use crate::{
 };
 
 pub fn fold_copy_locals(block: &mut Block) {
+    fold_copy_locals_with(block, &FxHashSet::default());
+}
+
+/// `upvalues` are this function's captured outer locals. Never fold a
+/// copy into them — CameraShaker `Update` initializes two accumulators
+/// from a module-level zero; folding both into that upvalue made
+/// `v27` nil and `v_u32 +=` mutate the shared zero.
+pub fn fold_copy_locals_with(block: &mut Block, upvalues: &FxHashSet<RcLocal>) {
     fold_nested_closures(block);
-    fold_one_function(block);
+    fold_one_function(block, upvalues);
 }
 
 fn fold_nested_closures(block: &mut Block) {
     for stat in &mut block.0 {
         stat.traverse_rvalues(&mut |rv| {
             if let RValue::Closure(c) = rv {
+                let ups: FxHashSet<_> = c
+                    .upvalues
+                    .iter()
+                    .map(|u| match u {
+                        crate::Upvalue::Copy(l) | crate::Upvalue::Ref(l) => l.clone(),
+                    })
+                    .collect();
                 if let Some(mut f) = c.function.try_lock() {
-                    fold_copy_locals(&mut f.body);
+                    fold_copy_locals_with(&mut f.body, &ups);
                 }
             }
         });
@@ -58,8 +73,9 @@ fn fold_nested_closures(block: &mut Block) {
     }
 }
 
-fn fold_one_function(block: &mut Block) {
-    let captured = collect_captured(block);
+fn fold_one_function(block: &mut Block, upvalues: &FxHashSet<RcLocal>) {
+    let mut captured = collect_captured(block);
+    captured.extend(upvalues.iter().cloned());
     let mut writes = FxHashMap::default();
     let mut write_at = FxHashMap::default();
     let mut index = 0u32;
@@ -390,5 +406,23 @@ mod tests {
         let s = body.to_string();
         assert!(s.contains("return request2"), "{s}");
         assert!(!s.contains("return v"), "{s}");
+    }
+
+    #[test]
+    fn does_not_fold_copy_of_upvalue() {
+        let zero = RcLocal::new(Local::new(Some("v_u32".into())));
+        let rot = RcLocal::new(Local::new(Some("v27".into())));
+        let mut body = Block(vec![
+            Assign::new(vec![rot.clone().into()], vec![zero.clone().into()]).into(),
+            crate::Return::new(vec![rot.clone().into()]).into(),
+        ]);
+        let mut ups = FxHashSet::default();
+        ups.insert(zero);
+        fold_copy_locals_with(&mut body, &ups);
+        let s = body.to_string();
+        assert!(
+            s.contains("v27"),
+            "accumulator must stay distinct from module zero:\n{s}"
+        );
     }
 }
