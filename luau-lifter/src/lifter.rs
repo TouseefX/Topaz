@@ -1068,17 +1068,17 @@ impl<'a> Lifter<'a> {
                         }
                     }
                     OpCode::LOP_CLOSEUPVALS => {
-                        // LOP_CLOSEUPVALS in Luau is an *implicit* barrier:
-                        // "close every open upvalue that captures any
-                        // register >= a". There is no source-level Lua
-                        // construct for this; the AST `Close` node we used
-                        // to emit here was purely cosmetic and printed as
-                        // `__close_uv(reg_a, reg_a+1, ..., reg_max)` —
-                        // which (a) is not valid Lua, (b) spammed the
-                        // decompiled output for any function that used
-                        // closures in loops, and (c) gave no useful
-                        // information. Skip it entirely; the SSA / name
-                        // resolution passes do not depend on it.
+                        // Close every open upvalue capturing register >= A.
+                        // SSA `UpvaluesOpen` uses these to stop treating
+                        // later writes to the same register as stores to
+                        // the captured local (StateStorage vs UI reuse).
+                        // Stripped before emit (`sanitize_for_luau` /
+                        // `mark_upvalues`); never printed as `__close_uv`.
+                        let max = self.function_list[self.function.id].max_stack_size as usize;
+                        let locals = (a as usize..max).map(|r| self.register(r)).collect::<Vec<_>>();
+                        if !locals.is_empty() {
+                            statements.push(ast::Close { locals }.into());
+                        }
                     }
                     OpCode::LOP_SETLIST => {
                         let setlist = if c != 0 {

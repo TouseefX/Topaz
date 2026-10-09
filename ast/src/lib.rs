@@ -593,6 +593,8 @@ fn sanitize_block(block: &mut Block, functions: &mut usize) {
     if past_post_deadline() {
         return;
     }
+    // Internal SSA close markers — not valid Luau.
+    block.0.retain(|s| !matches!(s, Statement::Close(_)));
     for stmt in &mut block.0 {
         let rewrite = match stmt {
             Statement::Goto(g) => Some(format!("goto {}", g.0 .0)),
@@ -666,5 +668,20 @@ mod sanitize_tests {
             assert!(!t.starts_with("::"), "label leaked: {line}");
         }
         assert!(s.contains("goto l95") || s.contains("l95"));
+    }
+
+    #[test]
+    fn sanitize_drops_internal_close() {
+        let loc = RcLocal::new(Local::new(Some("x".into())));
+        let mut body = Block(vec![
+            Statement::Close(Close {
+                locals: vec![loc],
+            }),
+            Comment::new("keep".into()).into(),
+        ]);
+        sanitize_for_luau(&mut body);
+        let s = body.to_string();
+        assert!(!s.contains("__close_uv"), "{s}");
+        assert!(s.contains("keep"), "{s}");
     }
 }

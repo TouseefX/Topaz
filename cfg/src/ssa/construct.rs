@@ -47,11 +47,6 @@ struct SsaConstructor<'a> {
     local_map: FxHashMap<RcLocal, RcLocal>,
     new_upvalues_in: IndexMap<RcLocal, FxHashSet<RcLocal>>,
     upvalues_passed: FxHashMap<RcLocal, FxHashMap<(NodeIndex, usize), FxHashSet<RcLocal>>>,
-    /// Locals captured `Upvalue::Ref` by a nested closure (plus this
-    /// function's incoming upvalues). Writes must keep the original
-    /// `RcLocal` or later stores (`ResetDisabled = true`) become a fresh
-    /// SSA name that nothing reads, and DCE empties the `if`.
-    ref_captured: FxHashSet<RcLocal>,
 }
 
 
@@ -268,32 +263,6 @@ fn new_local_from(original: &RcLocal) -> RcLocal {
     RcLocal::new(ast::Local::new(name))
 }
 
-fn collect_ref_captured_rvalue(rv: &ast::RValue, out: &mut FxHashSet<RcLocal>) {
-    if let ast::RValue::Closure(c) = rv {
-        for u in &c.upvalues {
-            if let ast::Upvalue::Ref(l) = u {
-                out.insert(l.clone());
-            }
-        }
-    }
-    for inner in rv.rvalues() {
-        collect_ref_captured_rvalue(inner, out);
-    }
-}
-
-fn collect_ref_captured(function: &Function) -> FxHashSet<RcLocal> {
-    let mut out = FxHashSet::default();
-    for (_, block) in function.blocks() {
-        for stmt in &block.0 {
-            for rv in stmt.rvalues() {
-                collect_ref_captured_rvalue(rv, &mut out);
-            }
-        }
-    }
-    out
-}
-
-
 impl<'a> SsaConstructor<'a> {
     fn write_local(&mut self, node: NodeIndex, local: &RcLocal, new_local: &RcLocal) {
         self.all_definitions
@@ -419,27 +388,7 @@ impl<'a> SsaConstructor<'a> {
         same
     }
 
-    fn keep_unsplit(&self, local: &RcLocal) -> bool {
-        self.ref_captured.contains(local) || self.new_upvalues_in.contains_key(local)
-    }
-
-    /// Unsplit writes/reads keep the original `RcLocal`. Incoming upvalues
-    /// must still appear in `new_upvalues_in`'s value-set: `mark_upvalues`
-    /// used to `assert!(set.contains(&value))`, which fired on every nested
-    /// function that touched an upvalue (v5: 224 ClientRenderer panics).
-    fn record_unsplit(&mut self, node: NodeIndex, local: &RcLocal) {
-        self.write_local(node, local, local);
-        self.old_locals.entry(local.clone()).or_insert(local.clone());
-        if let Some(upvalues) = self.new_upvalues_in.get_mut(local) {
-            upvalues.insert(local.clone());
-        }
-    }
-
     fn find_local(&mut self, node: NodeIndex, local: &RcLocal) -> RcLocal {
-        if self.keep_unsplit(local) {
-            self.record_unsplit(node, local);
-            return local.clone();
-        }
         // Walk unique-predecessor chains iteratively. Recursing here
         // overflowed the stack on 60k-block dumps and could loop if a
         // sealed cycle had a unique-pred shape after edge edits.
@@ -544,16 +493,20 @@ impl<'a> SsaConstructor<'a> {
                         .and_then(|m| m.get(&stat_index))
                     {
                         if let Some(new_upvalues_in) = self.new_upvalues_in.get_mut(&old_local) {
-                            // Unsplit incoming upvalues never went through the
+                            // Unsplit / identity uses never went through the
                             // split-insert path; record them rather than panic.
                             new_upvalues_in.insert(value.clone());
-                        } else if let Some(all_defs) = self.all_definitions.get(&old_local) {
+                        } else {
+                            // Only this SSA name, not every write to the
+                            // original register — `all_definitions` would
+                            // coalesce later register-reuse (UI temps) into
+                            // the captured local (`StateStorage = color`).
                             self.upvalues_passed
                                 .entry(old_local.clone())
                                 .or_default()
                                 .entry(*open_locations.first().unwrap())
                                 .or_default()
-                                .extend(all_defs.clone());
+                                .insert(value.clone());
                         }
                     }
                 }
@@ -602,10 +555,10 @@ impl<'a> SsaConstructor<'a> {
         usize,
         Vec<FxHashSet<RcLocal>>,
         Vec<(RcLocal, FxHashSet<RcLocal>)>,
-        Vec<FxHashSet<RcLocal>>,
+        Vec<(RcLocal, FxHashSet<RcLocal>)>,
     ) {
         let entry = self.function.entry().unwrap();
-        for local in self.ref_captured.iter().cloned().collect::<Vec<_>>() {
+        for local in self.new_upvalues_in.keys().cloned().collect::<Vec<_>>() {
             self.old_locals.entry(local.clone()).or_insert(local);
         }
         for i in 0..self.dfs.len() {
@@ -626,11 +579,6 @@ impl<'a> SsaConstructor<'a> {
                     && let Some(local) = assign.left[0].as_local().cloned()
                     && assign.right[0].as_closure().is_some()
                 {
-                    if self.keep_unsplit(&local) {
-                        self.record_unsplit(node, &local);
-                        self.read(node, stat_index);
-                        continue;
-                    }
                     let new_local = new_local_from(&local);
                     self.old_locals.insert(new_local.clone(), local.clone());
                     if let Some(upvalues) = self.new_upvalues_in.get_mut(&local) {
@@ -657,10 +605,6 @@ impl<'a> SsaConstructor<'a> {
                     self.read(node, stat_index);
                     
                     for (local_index, local) in written.iter().enumerate() {
-                        if self.keep_unsplit(local) {
-                            self.record_unsplit(node, local);
-                            continue;
-                        }
                         let new_local = new_local_from(local);
                         self.old_locals.insert(new_local.clone(), local.clone());
                         if let Some(upvalues) = self.new_upvalues_in.get_mut(local) {
@@ -713,10 +657,10 @@ impl<'a> SsaConstructor<'a> {
         
         if let Some(mut incomplete_params) = self.incomplete_params.remove(&entry) {
             for param in &mut self.function.parameters {
-                // Ref-captured / incoming-upvalue params are keep_unsplit and
-                // never enter `incomplete_params`. `unwrap_or_default()` used
-                // to replace them with a fresh UNNAMED local (CameraShaker
-                // `Start(UNNAMED_117)` while the body still said `p5`).
+                // Params that were never rewritten (unread, or a partial
+                // construct) must keep their original `RcLocal`.
+                // `unwrap_or_default()` replaced them with a fresh UNNAMED
+                // (CameraShaker `Start(UNNAMED_117)`).
                 if let Some(new) = incomplete_params.remove(param) {
                     *param = new;
                 }
@@ -742,8 +686,8 @@ impl<'a> SsaConstructor<'a> {
             self.all_definitions.into_values().collect(),
             self.new_upvalues_in.into_iter().collect(),
             self.upvalues_passed
-                .into_values()
-                .flat_map(|m| m.into_values())
+                .into_iter()
+                .flat_map(|(orig, m)| m.into_values().map(move |s| (orig.clone(), s)))
                 .collect(),
         )
     }
@@ -756,7 +700,7 @@ pub fn construct(
     usize,
     Vec<FxHashSet<RcLocal>>,
     Vec<(RcLocal, FxHashSet<RcLocal>)>,
-    Vec<FxHashSet<RcLocal>>,
+    Vec<(RcLocal, FxHashSet<RcLocal>)>,
 ) {
     
     
@@ -770,11 +714,6 @@ pub fn construct(
         set.insert(upvalue.clone());
         new_upvalues_in.insert(upvalue.clone(), set);
     }
-    let mut ref_captured = collect_ref_captured(function);
-    for upvalue in upvalues_in {
-        ref_captured.insert(upvalue.clone());
-    }
-
     let dfs = Dfs::new(function.graph(), function.entry().unwrap())
         .iter(function.graph())
         .collect::<IndexSet<_>>();
@@ -799,7 +738,6 @@ pub fn construct(
         local_map: FxHashMap::default(),
         new_upvalues_in,
         upvalues_passed: FxHashMap::default(),
-        ref_captured,
     }
     .construct()
 }

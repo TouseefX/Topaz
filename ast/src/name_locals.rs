@@ -2,8 +2,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use triomphe::Arc;
 
 use crate::{
-    type_inference_naming, Block, Call, Global, Literal, MethodCall, RValue, RcLocal, Select,
-    Statement, Traverse, Upvalue,
+    type_inference_naming, Block, Call, Global, Literal, LocalRw, MethodCall, RValue, RcLocal,
+    Select, Statement, Traverse, Upvalue,
 };
 
 struct Namer {
@@ -334,11 +334,12 @@ impl Namer {
                 None
             });
             match statement {
-                Statement::Assign(assign) if assign.prefix => {
+                Statement::Assign(assign) => {
                     // Medal-improved: prefer the compiler debug name on a
                     // `local f = function ...` so CameraShaker.Start-style
                     // helpers keep their original identifier.
-                    let named_from_debug = assign.left.len() == 1
+                    let named_from_debug = assign.prefix
+                        && assign.left.len() == 1
                         && assign.right.len() == 1
                         && assign.left[0].as_local().is_some()
                         && assign.right[0].as_closure().is_some();
@@ -356,14 +357,21 @@ impl Namer {
                         }
                     }
                     for (i, lvalue) in assign.left.iter().enumerate() {
+                        let Some(local) = lvalue.as_local() else {
+                            continue;
+                        };
                         if named_from_debug && i == 0 {
-                            if lvalue.as_local().unwrap().0 .0.try_lock().is_some_and(|g| g.0.is_some()) {
+                            if local.0 .0.try_lock().is_some_and(|g| g.0.is_some()) {
                                 continue;
                             }
                         }
                         let rv = assign.right.get(i);
                         let hint = rv.map(Self::hint_for_rvalue).unwrap_or("v");
-                        self.name_local_smart(hint, rv, lvalue.as_local().unwrap());
+                        // Non-prefix assigns used to skip uniquify, so two
+                        // SSA ranges that inherited the same debug name
+                        // (`insert = Bars` then `insert = Debris`,
+                        // `StateStorage = ui`) printed as one identifier.
+                        self.name_local_smart(hint, rv, local);
                     }
                 }
                 Statement::If(r#if) => {
@@ -453,6 +461,61 @@ impl Namer {
             }
         }
     }
+
+    /// Anything still unnamed prints as `UNNAMED_{id}`, and that id is a
+    /// per-thread counter — rayon workers made hashes differ across runs.
+    fn name_remaining(&mut self, block: &mut Block) {
+        if crate::past_post_deadline() {
+            return;
+        }
+        for statement in &mut block.0 {
+            statement.post_traverse_values(&mut |value| -> Option<()> {
+                if let itertools::Either::Right(RValue::Closure(closure)) = value {
+                    let ptr = Arc::as_ptr(&closure.function.0) as *const ();
+                    if crate::walk_seen_insert(ptr) {
+                        if let Some(mut function) = closure.function.try_lock() {
+                            for param in &function.parameters.clone() {
+                                if param.0 .0.lock().0.is_none() {
+                                    self.name_local_with_prefix("p", param);
+                                }
+                            }
+                            self.name_remaining(&mut function.body);
+                        }
+                    }
+                }
+                None
+            });
+            let locals: Vec<RcLocal> = statement
+                .values()
+                .into_iter()
+                .cloned()
+                .collect();
+            for local in &locals {
+                if local.0 .0.lock().0.is_none() {
+                    self.name_local_with_prefix("v", local);
+                }
+            }
+            match statement {
+                Statement::If(r#if) => {
+                    crate::visit_shared_mut(&r#if.then_block, &mut |b| self.name_remaining(b));
+                    crate::visit_shared_mut(&r#if.else_block, &mut |b| self.name_remaining(b));
+                }
+                Statement::While(r#while) => {
+                    crate::visit_shared_mut(&r#while.block, &mut |b| self.name_remaining(b));
+                }
+                Statement::Repeat(repeat) => {
+                    crate::visit_shared_mut(&repeat.block, &mut |b| self.name_remaining(b));
+                }
+                Statement::NumericFor(numeric_for) => {
+                    crate::visit_shared_mut(&numeric_for.block, &mut |b| self.name_remaining(b));
+                }
+                Statement::GenericFor(generic_for) => {
+                    crate::visit_shared_mut(&generic_for.block, &mut |b| self.name_remaining(b));
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 pub fn name_locals(block: &mut Block, rename: bool) {
@@ -480,6 +543,8 @@ pub fn name_locals(block: &mut Block, rename: bool) {
     namer.find_upvalues(block);
     crate::reset_walk_seen();
     namer.name_locals(block);
+    crate::reset_walk_seen();
+    namer.name_remaining(block);
 }
 
 #[cfg(test)]
@@ -526,5 +591,36 @@ mod cycle_tests {
         let nb = b.0 .0.lock().0.clone().unwrap();
         assert_ne!(na, nb, "colliding debug names were not uniquified: {na} / {nb}");
         assert!(na == "insert" || nb == "insert", "{na} / {nb}");
+    }
+
+    #[test]
+    fn non_prefix_assigns_are_uniquified() {
+        use crate::{Assign, Local, Literal, RcLocal};
+
+        let a = RcLocal::new(Local::new(Some("StateStorage".into())));
+        let b = RcLocal::new(Local::new(Some("StateStorage".into())));
+        let _keep_a = a.clone();
+        let _keep_b = b.clone();
+        let a1 = Assign::new(vec![a.clone().into()], vec![Literal::Nil.into()]);
+        let a2 = Assign::new(vec![b.clone().into()], vec![Literal::Nil.into()]);
+        let mut body = Block(vec![a1.into(), a2.into()]);
+        name_locals(&mut body, true);
+        let na = a.0 .0.lock().0.clone().unwrap();
+        let nb = b.0 .0.lock().0.clone().unwrap();
+        assert_ne!(na, nb, "non-prefix colliding names: {na} / {nb}");
+    }
+
+    #[test]
+    fn unnamed_locals_get_stable_names() {
+        use crate::{Assign, Local, Literal, RcLocal};
+
+        let a = RcLocal::new(Local::new(None));
+        let _keep = a.clone();
+        let assign = Assign::new(vec![a.clone().into()], vec![Literal::Nil.into()]);
+        let mut body = Block(vec![assign.into()]);
+        name_locals(&mut body, true);
+        let name = a.0 .0.lock().0.clone().unwrap();
+        assert!(!name.starts_with("UNNAMED_"), "{name}");
+        assert!(name.starts_with('v') || name == "_", "{name}");
     }
 }

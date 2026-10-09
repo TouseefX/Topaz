@@ -204,6 +204,9 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 
     fn format_block_no_indent(&mut self, block: &Block) -> fmt::Result {
         for (i, statement) in block.iter().enumerate() {
+            if matches!(statement, Statement::Close(_)) {
+                continue;
+            }
             if i != 0 {
                 writeln!(self.output)?;
                 let prev = &block.0[i - 1];
@@ -214,10 +217,9 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             // Lua forbids `return` unless it is last in the block. Wrap a
             // mid-block return (from unstructured CFG) as `do return end`.
             if statement.as_return().is_some()
-                && block
-                    .iter()
-                    .skip(i + 1)
-                    .any(|s| s.as_comment().is_none())
+                && block.iter().skip(i + 1).any(|s| {
+                    s.as_comment().is_none() && !matches!(s, Statement::Close(_))
+                })
             {
                 self.indent()?;
                 writeln!(self.output, "do")?;
@@ -230,9 +232,9 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             } else {
                 self.format_statement(statement)?;
             }
-            if let Some(next_statement) =
-                block.iter().skip(i + 1).find(|s| s.as_comment().is_none())
-            {
+            if let Some(next_statement) = block.iter().skip(i + 1).find(|s| {
+                s.as_comment().is_none() && !matches!(s, Statement::Close(_))
+            }) {
                 fn is_ambiguous(r: &RValue) -> bool {
                     match r {
                         RValue::Local(_)
@@ -1097,6 +1099,15 @@ mod shared_body_tests {
         let body = Block(vec![Statement::If(If {
             condition: Literal::Boolean(false).into(),
             then_block: share_block(Block::default()),
+            else_block: shared,
+        })]);
+        let s = body.to_string();
+        assert!(s.contains("if"));
+        assert!(s.contains("end"));
+        assert!(s.len() < 64 * 1024, "runaway format: {} bytes", s.len());
+    }
+}
+)),
             else_block: shared,
         })]);
         let s = body.to_string();
