@@ -369,17 +369,24 @@ fn merge_decl_assign(block: &mut Block) {
     }
 }
 
+fn collect_ref_captured_rvalue(rv: &RValue, out: &mut HashSet<RcLocal>) {
+    if let RValue::Closure(c) = rv {
+        for u in &c.upvalues {
+            if let Upvalue::Ref(l) = u {
+                out.insert(l.clone());
+            }
+        }
+    }
+    for inner in rv.rvalues() {
+        collect_ref_captured_rvalue(inner, out);
+    }
+}
+
 fn collect_ref_captured(block: &Block, out: &mut HashSet<RcLocal>) {
     for s in &block.0 {
-        s.traverse_rvalues(&mut |rv| {
-            if let RValue::Closure(c) = rv {
-                for u in &c.upvalues {
-                    if let Upvalue::Ref(l) = u {
-                        out.insert(l.clone());
-                    }
-                }
-            }
-        });
+        for rv in s.rvalues() {
+            collect_ref_captured_rvalue(rv, out);
+        }
         match s {
             Statement::If(st) => {
                 if let Some(b) = st.then_block.try_lock() {
