@@ -332,11 +332,10 @@ fn decompile_from_chunk_inner(chunk: deserializer::chunk::Chunk, _encode_key: u8
     // deep-cloned snapshots (closures detached) mean a hang still returns
     // structured, *valid* Luau instead of 58 bytes or a `goto` dump.
     let remaining = deadline.saturating_duration_since(Instant::now());
-    let wait = if cfg::decompile_budget_secs() >= 30 {
-        remaining.max(Duration::from_secs(15))
-    } else {
-        remaining
-    };
+    // Honor `--time-budget` exactly. A 15s floor after lift used to let
+    // render run past the budget; combined with a hanging formatter the
+    // outer 240s kill then wrote 0 bytes (v12 ClientRenderer).
+    let wait = remaining;
     let (tx, rx) = mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("topaz-post".into())
@@ -419,6 +418,7 @@ fn looks_unstructured(s: &str) -> bool {
         || s.contains("-- block ")
         || s.contains("failed to decompile function")
         || s.contains("failed to lift function")
+        || s.contains("formatter stopped")
 }
 
 fn render_complete(body: &mut ast::Block) -> String {
@@ -473,6 +473,13 @@ fn recv_post_wave(rx: mpsc::Receiver<PostEvent>, wait: Duration, n_funcs: usize)
             Err(_) => break,
         }
     }
+    // Formatter `past_post_deadline` is thread-local. The post thread's
+    // deadline does not apply here; without a fresh one, fallback format
+    // of a cyclic AST hung until the outer 240s kill (0-byte v12).
+    const FALLBACK_FORMAT_SECS: u64 = 8;
+    let format_until = Instant::now() + Duration::from_secs(FALLBACK_FORMAT_SECS);
+    ast::set_post_deadline(Some(format_until));
+    cfg::set_decompile_deadline(Some(format_until));
     match fallback {
         Some(mut b) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             render_incomplete(&mut b, current_pass, n_funcs)
@@ -492,7 +499,7 @@ fn run_post_wave(
     mut body: ast::Block,
     mut upvalues: FxHashMap<ByAddress<ast::SharedFunction>, Vec<ast::RcLocal>>,
     tx: mpsc::Sender<PostEvent>,
-    _n_funcs: usize,
+    n_funcs: usize,
 ) {
     let dbg = std::env::var("TOPAZ_DEBUG_CYCLES")
         .ok()
@@ -545,13 +552,43 @@ fn run_post_wave(
                 pass: "inline_short_gotos",
             });
         }
-        step!(
-            "apply_guard_clauses",
-            ast::guard_clauses::apply_guard_clauses(&mut body)
-        );
+        if ast_has_cycle(&mut body) {
+            if dbg {
+                eprintln!(
+                    "[post] cycle after inline_short_gotos; skipping guard_clauses: {}",
+                    report_cycles(&mut body)
+                );
+            }
+        } else {
+            step!(
+                "apply_guard_clauses",
+                ast::guard_clauses::apply_guard_clauses(&mut body)
+            );
+        }
     }
     if body.0.len() < QUALITY_STMT_CAP {
         step!("name_locals", name_locals(&mut body, true));
+    }
+    // Do not hand a cyclic SharedBlock graph to unbounded `Display`.
+    // Formatter now has a step cap, but skip the "complete" path so we
+    // always mark TOPAZ_INCOMPLETE and honor the budget.
+    if ast_has_cycle(&mut body) {
+        if dbg {
+            eprintln!(
+                "[post] cyclic AST after name_locals; emitting incomplete t+{:.1}s: {}",
+                post_start.elapsed().as_secs_f64(),
+                report_cycles(&mut body)
+            );
+        }
+        let format_until = Instant::now() + Duration::from_secs(8);
+        ast::set_post_deadline(Some(format_until));
+        cfg::set_decompile_deadline(Some(format_until));
+        let _ = tx.send(PostEvent::Done(render_incomplete(
+            &mut body,
+            "shared-block cycle",
+            n_funcs,
+        )));
+        return;
     }
     let _ = tx.send(PostEvent::Done(render_complete(&mut body)));
 }
@@ -639,6 +676,14 @@ fn walk_block(
         }
     }
     None
+}
+
+fn ast_has_cycle(body: &mut ast::Block) -> bool {
+    let mut on_path = Vec::new();
+    let mut seen = FxHashSet::default();
+    let mut shared = 0usize;
+    let mut trail = Vec::new();
+    walk_block(body, &mut on_path, &mut seen, &mut shared, &mut trail).is_some()
 }
 
 fn report_cycles(body: &mut ast::Block) -> String {

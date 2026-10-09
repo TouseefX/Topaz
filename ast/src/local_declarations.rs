@@ -82,6 +82,10 @@ pub struct LocalDeclarer {
     /// loop, shadowing the iterator with nil (CameraShaker `Update`,
     /// sample `ipairs`).
     binder_depth: FxHashMap<RcLocal, u32>,
+    /// Locals that are actually assigned. Read-only SSA temps (lost phi
+    /// copies of a generic-for binder) used to get `local v28, v29` at
+    /// first use, shadowing the iterator with nil (v12 StopSustained).
+    written: FxHashSet<RcLocal>,
 }
 
 impl LocalDeclarer {
@@ -143,6 +147,7 @@ impl LocalDeclarer {
             for (stat_index, stat) in guard.iter().enumerate() {
                 if !matches!(stat, Statement::GenericFor(_) | Statement::NumericFor(_)) {
                     for local in stat.values_written() {
+                        self.written.insert(local.clone());
                         self.note_usage(local.clone(), node, stat_index);
                     }
                 }
@@ -221,6 +226,13 @@ impl LocalDeclarer {
         let dom_idx = DomIdx::build(self.graph.node_indices(), &dominators);
         for (local, usages) in self.local_usages {
             if locals_to_ignore.contains(&local) {
+                continue;
+            }
+            if !self.written.contains(&local) {
+                // Never assigned: a missing def, an upvalue/param we
+                // already ignore, or a generic-for binder phi. Inserting
+                // `local x` at the first read shadows the binder / outer
+                // with nil.
                 continue;
             }
             let (mut node, mut first_stat_index) = if usages.len() == 1 {
@@ -437,5 +449,35 @@ mod tests {
             "generic-for binders shadowed:\n{s}"
         );
         assert!(s.contains("for index2, player2"), "{s}");
+    }
+
+    #[test]
+    fn does_not_declare_read_only_ssa_temp_shadowing_generic_for_binder() {
+        // Distinct RcLocal that inherited the binder's debug name and is
+        // only read. Declaring `local v28` at first use made
+        // `v28.fadeOutDuration` nil (v12 CameraShaker StopSustained).
+        let k = RcLocal::new(Local::new(Some("v24".into())));
+        let binder = RcLocal::new(Local::new(Some("v28".into())));
+        let extra = RcLocal::new(Local::new(Some("v28".into())));
+        let _keep = (k.clone(), binder.clone(), extra.clone());
+        let inner = Block(vec![Return::new(vec![extra.clone().into()]).into()]);
+        let iter = Call::new(
+            crate::Global::new(b"pairs".to_vec()).into(),
+            vec![crate::Table::default().into()],
+        );
+        let body = Block(vec![Statement::GenericFor(GenericFor::new(
+            vec![k, binder],
+            vec![iter.into()],
+            inner,
+        ))]);
+        let shared = share_block(body);
+        LocalDeclarer::default().declare_locals(Arc::clone(&shared), &FxHashSet::default());
+        let s = shared.lock().to_string();
+        assert!(
+            !s.contains("local v28"),
+            "read-only SSA temp shadowed binder:\n{s}"
+        );
+        assert!(s.contains("for v24, v28"), "{s}");
+        assert!(s.contains("return v28"), "{s}");
     }
 }

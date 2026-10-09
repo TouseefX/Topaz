@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::iter;
 use std::{
     borrow::Cow,
@@ -18,6 +18,32 @@ use crate::{
 
 thread_local! {
     static FORMAT_PATH: RefCell<Vec<*const ()>> = const { RefCell::new(Vec::new()) };
+    static FORMAT_STEPS: Cell<u32> = const { Cell::new(0) };
+    static FORMAT_ABORTED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Hard cap on SharedBlock / statement visits per `Formatter::format`.
+/// Path-only cycle detection still reprints DAG-shared bodies (needed so
+/// a then-block used by two `if`s is not empty on the second parent).
+/// Shallow `Statement::clone()` of a 6k-node else-DAG made that
+/// exponential; without a step cap `Display` never returned.
+const MAX_FORMAT_STEPS: u32 = 1_500_000;
+
+fn format_tick() -> bool {
+    if crate::past_post_deadline() {
+        FORMAT_ABORTED.with(|c| c.set(true));
+        return false;
+    }
+    FORMAT_STEPS.with(|c| {
+        let n = c.get().saturating_add(1);
+        c.set(n);
+        if n > MAX_FORMAT_STEPS {
+            FORMAT_ABORTED.with(|a| a.set(true));
+            false
+        } else {
+            true
+        }
+    })
 }
 
 fn format_path_push(ptr: *const ()) -> bool {
@@ -97,12 +123,21 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     ) -> fmt::Result {
         reset_walk_seen();
         FORMAT_PATH.with(|p| p.borrow_mut().clear());
+        FORMAT_STEPS.with(|c| c.set(0));
+        FORMAT_ABORTED.with(|c| c.set(false));
         let mut formatter = Self {
             indentation_level: 0,
             indentation_mode,
             output,
         };
-        formatter.format_block_no_indent(main)
+        let result = formatter.format_block_no_indent(main);
+        if FORMAT_ABORTED.with(|c| c.get()) {
+            let _ = writeln!(
+                formatter.output,
+                "\n-- formatter stopped (time budget or step cap)"
+            );
+        }
+        result
     }
 
     const MAX_NEST: usize = 256;
@@ -112,6 +147,9 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         // path (a cycle). A global seen-set treated DAG sharing as a
         // cycle and printed thousands of empty `if`s: the first parent
         // got the body, every later parent printed `then end`.
+        if !format_tick() {
+            return Ok(());
+        }
         let ptr = Arc::as_ptr(shared) as *const ();
         if !format_path_push(ptr) {
             return Ok(());
@@ -164,7 +202,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     }
 
     fn format_block(&mut self, block: &Block) -> fmt::Result {
-        if self.indentation_level > Self::MAX_NEST {
+        if !format_tick() || self.indentation_level > Self::MAX_NEST {
             return Ok(());
         }
         self.indentation_level += 1;
@@ -204,6 +242,9 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 
     fn format_block_no_indent(&mut self, block: &Block) -> fmt::Result {
         for (i, statement) in block.iter().enumerate() {
+            if !format_tick() {
+                return Ok(());
+            }
             if matches!(statement, Statement::Close(_)) {
                 continue;
             }
@@ -710,6 +751,9 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     }
 
     pub(crate) fn format_if(&mut self, r#if: &If) -> fmt::Result {
+        if !format_tick() {
+            return Ok(());
+        }
         // Never hold then and else together, and never recurse into
         // `else if` while those guards are live. parking_lot::Mutex is
         // not reentrant: aliased branches (or elseif-in-else) deadlocked
@@ -1105,5 +1149,35 @@ mod shared_body_tests {
         assert!(s.contains("if"));
         assert!(s.contains("end"));
         assert!(s.len() < 64 * 1024, "runaway format: {} bytes", s.len());
+    }
+
+    #[test]
+    fn exponential_else_dag_hits_step_cap() {
+        // Diamond: each level's then *and* else point at the next shared
+        // node. Path-only cycle detection reprints every path (2^n).
+        // Without a step cap this never returns (v12 ClientRenderer).
+        let local = RcLocal::new(Local::new(Some("x".into())));
+        let _keep = local.clone();
+        let mut assign = Assign::new(vec![local.into()], vec![Literal::Boolean(true).into()]);
+        assign.prefix = true;
+        let mut next = share_block(Block(vec![assign.into()]));
+        for _ in 0..22 {
+            next = share_block(Block(vec![Statement::If(If {
+                condition: Literal::Boolean(true).into(),
+                then_block: next.clone(),
+                else_block: next,
+            })]));
+        }
+        let body = Block(vec![Statement::If(If {
+            condition: Literal::Boolean(true).into(),
+            then_block: next.clone(),
+            else_block: next,
+        })]);
+        let s = body.to_string();
+        assert!(
+            s.contains("formatter stopped") || s.len() < 8 * 1024 * 1024,
+            "exponential DAG format did not stop: {} bytes",
+            s.len()
+        );
     }
 }

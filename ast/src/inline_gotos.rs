@@ -29,7 +29,8 @@
 //!
 //! 4. Existing **short-tail inlining** for gotos into a short terminating tail.
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
+use triomphe::Arc;
 
 use crate::{
     deep_clone_statement, Binary, BinaryOperation, Block, If, Literal, RValue, Repeat, Statement,
@@ -983,14 +984,55 @@ fn stmt_contains_goto(stmt: &Statement, name: &str) -> bool {
 
 const MAX_TAIL_LEN: usize = 64;
 
+/// Nested statement count. Shallow `If` clones of a 50k-line else were
+/// "one statement" under `MAX_TAIL_LEN` and, when spliced, aliased that
+/// else into a cycle (v12 ClientRenderer hang).
+fn stmt_weight(stmt: &Statement, seen: &mut FxHashSet<*const ()>) -> usize {
+    match stmt {
+        Statement::If(r#if) => 1
+            .saturating_add(shared_weight(&r#if.then_block, seen))
+            .saturating_add(shared_weight(&r#if.else_block, seen)),
+        Statement::While(w) => 1usize.saturating_add(shared_weight(&w.block, seen)),
+        Statement::Repeat(r) => 1usize.saturating_add(shared_weight(&r.block, seen)),
+        Statement::NumericFor(n) => 1usize.saturating_add(shared_weight(&n.block, seen)),
+        Statement::GenericFor(g) => 1usize.saturating_add(shared_weight(&g.block, seen)),
+        _ => 1,
+    }
+}
+
+fn shared_weight(block: &crate::SharedBlock, seen: &mut FxHashSet<*const ()>) -> usize {
+    let ptr = Arc::as_ptr(block) as *const ();
+    if !seen.insert(ptr) {
+        return 0;
+    }
+    let Some(g) = block.try_lock() else {
+        return MAX_TAIL_LEN + 1;
+    };
+    let mut n = 0usize;
+    for s in &g.0 {
+        n = n.saturating_add(stmt_weight(s, seen));
+        if n > MAX_TAIL_LEN {
+            return MAX_TAIL_LEN + 1;
+        }
+    }
+    n
+}
+
 fn extract_short_tail(stmts: &[Statement], from: usize) -> Option<Vec<Statement>> {
     if from >= stmts.len() {
         return None;
     }
     let mut tail = Vec::with_capacity(2);
     let mut i = from;
+    let mut weight = 0usize;
+    let mut seen = FxHashSet::default();
     while i < stmts.len() && tail.len() < MAX_TAIL_LEN {
         let stmt = &stmts[i];
+        let w = stmt_weight(stmt, &mut seen);
+        if w > MAX_TAIL_LEN || weight.saturating_add(w) > MAX_TAIL_LEN {
+            return None;
+        }
+        weight += w;
         match stmt {
             Statement::Return(_)
             | Statement::Break(_)
@@ -1020,7 +1062,12 @@ fn replace_gotos(block: &mut Block, tails: &FxHashMap<String, Vec<Statement>>, c
     let mut i = 0;
     while i < block.0.len() {
         let replacement = match &block.0[i] {
-            Statement::Goto(goto) => tails.get(&goto.0 .0).cloned(),
+            // Deep clone: shallow `Statement::clone()` of an `If` shares
+            // then/else Arcs with the labeled tail. Splicing that into
+            // another if's else built the v12 else→else cycle.
+            Statement::Goto(goto) => tails.get(&goto.0 .0).map(|v| {
+                v.iter().map(deep_clone_statement).collect::<Vec<_>>()
+            }),
             _ => None,
         };
         if let Some(repl) = replacement {
@@ -1070,6 +1117,8 @@ fn count_remaining_gotos(block: &Block, counts: &mut FxHashMap<String, usize>) {
 mod tests {
     use super::*;
     use crate::{Goto, Label, Literal};
+    use rustc_hash::FxHashSet;
+    use triomphe::Arc;
 
     fn lit_true() -> RValue {
         Literal::Boolean(true).into()
@@ -1321,6 +1370,76 @@ mod tests {
         let s = body.to_string();
         assert!(!s.contains("goto"), "gotos remain: {s}");
         assert!(s.contains("while"), "expected while from back-edge: {s}");
+    }
+
+    #[test]
+    fn inlined_goto_tails_do_not_share_else_arcs() {
+        // if C then goto L end
+        // if D then goto L end
+        // ::L::
+        // if E then return else x = 1 end
+        //
+        // Both gotos inline the same if-tail. Shallow clone would make
+        // the three `else` Arcs identical; mutating one mutates all.
+        use crate::{Assign, RcLocal};
+        let work = Statement::Assign(Assign::new(
+            vec![crate::LValue::Local(RcLocal::default())],
+            vec![Literal::Number(1.0).into()],
+        ));
+        let tail_if = If::new(
+            lit_true(),
+            Block(vec![Statement::Return(crate::Return::new(vec![]))]),
+            Block(vec![work]),
+        );
+        let mut body = Block(vec![
+            Statement::If(If::new(
+                lit_true(),
+                Block(vec![Statement::Goto(Goto::new(Label("l1".into())))]),
+                Block::default(),
+            )),
+            Statement::If(If::new(
+                Literal::Boolean(false).into(),
+                Block(vec![Statement::Goto(Goto::new(Label("l1".into())))]),
+                Block::default(),
+            )),
+            Statement::Label(Label("l1".into())),
+            Statement::If(tail_if),
+        ]);
+        inline_short_gotos(&mut body);
+        let mut else_ptrs = Vec::new();
+        let mut seen = FxHashSet::default();
+        fn collect(
+            block: &Block,
+            out: &mut Vec<*const ()>,
+            seen: &mut FxHashSet<*const ()>,
+        ) {
+            for s in &block.0 {
+                if let Statement::If(i) = s {
+                    let p = Arc::as_ptr(&i.else_block) as *const ();
+                    out.push(p);
+                    let then_p = Arc::as_ptr(&i.then_block) as *const ();
+                    if seen.insert(then_p) {
+                        if let Some(b) = i.then_block.try_lock() {
+                            collect(&b, out, seen);
+                        }
+                    }
+                    if seen.insert(p) {
+                        if let Some(b) = i.else_block.try_lock() {
+                            collect(&b, out, seen);
+                        }
+                    }
+                }
+            }
+        }
+        collect(&body, &mut else_ptrs, &mut seen);
+        let unique = else_ptrs.iter().copied().collect::<FxHashSet<_>>();
+        assert_eq!(
+            unique.len(),
+            else_ptrs.len(),
+            "inlined if-tails still share else Arcs: {} ptrs {} unique",
+            else_ptrs.len(),
+            unique.len()
+        );
     }
 
     #[test]
