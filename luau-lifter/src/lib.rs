@@ -978,7 +978,7 @@ fn finish_function(
         let mut ast_function = ast_function.lock();
         ast_function.body = body;
         if post && !ast_function.body.0.is_empty() && ast_function.body.0.len() < 250_000 {
-            post_process::apply_all(&mut ast_function.body);
+            post_process::apply_all_with_upvalues(&mut ast_function.body, &upvalues_in);
         }
         ast_function.parameters = params;
         ast_function.is_variadic = is_variadic;

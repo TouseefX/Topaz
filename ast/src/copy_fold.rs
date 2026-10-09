@@ -49,6 +49,26 @@ fn loop_body_arc(stmt: &Statement) -> Option<crate::SharedBlock> {
     }
 }
 
+/// Nested `function()` bodies. `Closure::values_read` is only the upvalue
+/// list — POLBeam frame tables lived in the parent and were *used* inside
+/// a child with a missing/Copy upvalue, so DCE deleted the constructor.
+fn for_each_closure_body(rv: &RValue, f: &mut impl FnMut(&Block)) {
+    if let RValue::Closure(c) = rv {
+        if let Some(func) = c.function.try_lock() {
+            f(&func.body);
+        }
+    }
+    for inner in rv.rvalues() {
+        for_each_closure_body(inner, f);
+    }
+}
+
+fn for_stmt_closure_bodies(stmt: &Statement, f: &mut impl FnMut(&Block)) {
+    for rv in stmt.rvalues() {
+        for_each_closure_body(rv, f);
+    }
+}
+
 fn for_nested_blocks(block: &mut Block, f: &mut impl FnMut(&mut Block)) {
     for stmt in &mut block.0 {
         match stmt {
@@ -268,6 +288,7 @@ fn collect_read_counts(block: &Block, counts: &mut HashMap<RcLocal, usize>) {
         for l in s.values_read() {
             *counts.entry(l.clone()).or_insert(0) += 1;
         }
+        for_stmt_closure_bodies(s, &mut |body| collect_read_counts(body, counts));
         match s {
             Statement::If(st) => {
                 if let Some(b) = st.then_block.try_lock() {
@@ -305,10 +326,14 @@ fn collect_read_counts(block: &Block, counts: &mut HashMap<RcLocal, usize>) {
 /// O(n) single-use inlining. The previous “scan every other statement
 /// for each assign” was O(n²) and made 60k-line dumps take minutes
 /// (Oracle finishes those in ~2s).
-fn inline_consecutive(block: &mut Block, counts: &HashMap<RcLocal, usize>) -> bool {
+fn inline_consecutive(
+    block: &mut Block,
+    counts: &HashMap<RcLocal, usize>,
+    skip: &HashSet<RcLocal>,
+) -> bool {
     let mut changed = false;
     for_nested_blocks(block, &mut |b| {
-        changed |= inline_consecutive(b, counts);
+        changed |= inline_consecutive(b, counts, skip);
     });
     let mut i = 0;
     while i + 1 < block.0.len() {
@@ -316,6 +341,10 @@ fn inline_consecutive(block: &mut Block, counts: &HashMap<RcLocal, usize>) -> bo
             i += 1;
             continue;
         };
+        if skip.contains(&local) {
+            i += 1;
+            continue;
+        }
         if counts.get(&local).copied().unwrap_or(0) != 1 {
             i += 1;
             continue;
@@ -372,9 +401,14 @@ fn merge_decl_assign(block: &mut Block) {
 fn collect_ref_captured_rvalue(rv: &RValue, out: &mut HashSet<RcLocal>) {
     if let RValue::Closure(c) = rv {
         for u in &c.upvalues {
-            if let Upvalue::Ref(l) = u {
-                out.insert(l.clone());
+            match u {
+                Upvalue::Ref(l) | Upvalue::Copy(l) => {
+                    out.insert(l.clone());
+                }
             }
+        }
+        if let Some(func) = c.function.try_lock() {
+            collect_ref_captured(&func.body, out);
         }
     }
     for inner in rv.rvalues() {
@@ -426,6 +460,7 @@ fn collect_reads(block: &Block, reads: &mut HashSet<RcLocal>) {
         for l in s.values_read() {
             reads.insert(l.clone());
         }
+        for_stmt_closure_bodies(s, &mut |body| collect_reads(body, reads));
         match s {
             Statement::If(st) => {
                 if let Some(b) = st.then_block.try_lock() {
@@ -506,13 +541,23 @@ fn dce_unused(block: &mut Block, reads: &HashSet<RcLocal>, ref_captured: &HashSe
 }
 
 pub fn apply(block: &mut Block) {
+    apply_protected(block, &HashSet::new());
+}
+
+/// `protected` is `upvalues_in` of this function: stores like
+/// `DisableReset`'s `ResetOnSpawn = false` are writes with no read in
+/// *this* body, and must not be DCE'd.
+pub fn apply_protected(block: &mut Block, protected: &HashSet<RcLocal>) {
     merge_decl_assign(block);
     fold_loop_carried(block);
     remove_identity(block);
+    let mut captured = HashSet::new();
+    collect_ref_captured(block, &mut captured);
+    captured.extend(protected.iter().cloned());
     for _ in 0..8 {
         let mut counts = HashMap::new();
         collect_read_counts(block, &mut counts);
-        if !inline_consecutive(block, &counts) {
+        if !inline_consecutive(block, &counts, &captured) {
             break;
         }
         merge_decl_assign(block);
@@ -520,15 +565,14 @@ pub fn apply(block: &mut Block) {
     }
     let mut reads = HashSet::new();
     collect_reads(block, &mut reads);
-    let mut ref_captured = HashSet::new();
-    collect_ref_captured(block, &mut ref_captured);
-    dce_unused(block, &reads, &ref_captured);
+    dce_unused(block, &reads, &captured);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Assign, Block, Call, Literal, Local, NumericFor, RValue, Statement};
+    use crate::{Assign, Block, Call, Literal, Local, NumericFor, RValue, RcLocal, Statement};
+    use std::collections::HashSet;
 
     fn named(n: &str) -> RcLocal {
         RcLocal::new(Local::new(Some(n.into())))
@@ -665,6 +709,60 @@ mod tests {
         assert!(
             printed.contains("true"),
             "store to ref-captured local must survive DCE: {printed}"
+        );
+    }
+
+    #[test]
+    fn does_not_dce_protected_upvalue_store() {
+        let flag = named("ResetDisabled");
+        let mut store = Assign::new(
+            vec![flag.clone().into()],
+            vec![Literal::Boolean(true).into()],
+        );
+        store.prefix = true;
+        let mut block = Block(vec![store.into()]);
+        let mut protected = HashSet::new();
+        protected.insert(flag);
+        apply_protected(&mut block, &protected);
+        let printed = block.to_string();
+        assert!(
+            printed.contains("true"),
+            "upvalues_in store dropped: {printed}"
+        );
+    }
+
+    #[test]
+    fn does_not_dce_table_read_only_in_closure_body() {
+        let frames = named("frames");
+        let mut table = crate::Table::default();
+        table
+            .0
+            .push((None, Literal::String(b"rbxassetid://1".to_vec()).into()));
+        let mut init = Assign::new(vec![frames.clone().into()], vec![RValue::Table(table)]);
+        init.prefix = true;
+        let inner = crate::Function {
+            name: None,
+            line: None,
+            parameters: vec![],
+            is_variadic: false,
+            body: Block(vec![
+                crate::Return::new(vec![RValue::Local(frames.clone())]).into()
+            ]),
+        };
+        let closure = crate::Closure {
+            function: by_address::ByAddress(crate::share_function(inner)),
+            upvalues: vec![],
+        };
+        let call = Call::new(
+            crate::Global::new(b"task.spawn".to_vec()).into(),
+            vec![RValue::Closure(closure)],
+        );
+        let mut block = Block(vec![init.into(), Statement::Call(call)]);
+        apply(&mut block);
+        let printed = block.to_string();
+        assert!(
+            printed.contains("rbxassetid://1"),
+            "frame table dropped: {printed}"
         );
     }
 }

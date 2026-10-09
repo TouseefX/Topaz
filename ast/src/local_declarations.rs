@@ -80,6 +80,15 @@ pub struct LocalDeclarer {
 }
 
 impl LocalDeclarer {
+    fn note_usage(&mut self, local: RcLocal, node: NodeIndex, stat_index: usize) {
+        self.local_usages
+            .entry(local)
+            .or_default()
+            .entry(node)
+            .and_modify(|i| *i = (*i).min(stat_index))
+            .or_insert(stat_index);
+    }
+
     fn visit(&mut self, block: SharedBlock, stat_index: usize) -> NodeIndex {
         // Shared / cyclic `SharedBlock` (half-destructed CFG) used
         // to re-enter `block.lock()` and sleep forever on parking_lot.
@@ -108,12 +117,14 @@ impl LocalDeclarer {
             for (stat_index, stat) in guard.iter().enumerate() {
                 if !matches!(stat, Statement::GenericFor(_) | Statement::NumericFor(_)) {
                     for local in stat.values_written() {
-                        self.local_usages
-                            .entry(local.clone())
-                            .or_default()
-                            .entry(node)
-                            .or_insert(stat_index);
+                        self.note_usage(local.clone(), node, stat_index);
                     }
+                }
+                // Reads count too: `DTWait` copied `elapsed` to a loop-body
+                // temp then `return`ed it *after* the while. Declaring at
+                // the write made `return v74` a global (`nil`).
+                for local in stat.values_read() {
+                    self.note_usage(local.clone(), node, stat_index);
                 }
                 match stat {
                     Statement::If(r#if) => nested.push(Nested::If {
@@ -293,5 +304,49 @@ impl LocalDeclarer {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        Assign, Block, Literal, Local, RcLocal, Return, Statement, While, share_block,
+    };
+    use triomphe::Arc;
+
+    #[test]
+    fn hoist_loop_temp_used_after_while() {
+        let v74 = RcLocal::new(Local::new(Some("v74".into())));
+        let v75 = RcLocal::new(Local::new(Some("v75".into())));
+        let inner = Block(vec![Assign::new(
+            vec![v74.clone().into()],
+            vec![v75.clone().into()],
+        )
+        .into()]);
+        let body = Block(vec![
+            Assign::new(
+                vec![v75.clone().into()],
+                vec![Literal::Number(0.0).into()],
+            )
+            .into(),
+            Statement::While(While::new(Literal::Boolean(true).into(), inner)),
+            Return::new(vec![v74.clone().into()]).into(),
+        ]);
+        let shared = share_block(body);
+        LocalDeclarer::default().declare_locals(Arc::clone(&shared), &FxHashSet::default());
+        let s = shared.lock().to_string();
+        let while_idx = s.find("while").unwrap_or_else(|| panic!("{s}"));
+        let local_v74 = s.find("local v74").unwrap_or_else(|| panic!("{s}"));
+        assert!(
+            local_v74 < while_idx,
+            "v74 must be declared outside the while:\n{s}"
+        );
+        assert!(s.contains("return v74"), "{s}");
+        let after_while = &s[while_idx..];
+        assert!(
+            !after_while.contains("local v74"),
+            "must not redeclare v74 after/inside while:\n{s}"
+        );
     }
 }

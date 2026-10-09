@@ -590,6 +590,10 @@ pub fn sanitize_for_luau(block: &mut Block) -> usize {
 }
 
 fn sanitize_block(block: &mut Block, functions: &mut usize) {
+    sanitize_block_in(block, functions, false);
+}
+
+fn sanitize_block_in(block: &mut Block, functions: &mut usize, in_loop: bool) {
     if past_post_deadline() {
         return;
     }
@@ -599,6 +603,11 @@ fn sanitize_block(block: &mut Block, functions: &mut usize) {
         let rewrite = match stmt {
             Statement::Goto(g) => Some(format!("goto {}", g.0 .0)),
             Statement::Label(l) => Some(format!("::{}::", l.0)),
+            // Loop-edge `break`/`continue` dumped outside any loop after
+            // gotos were commented (v6: 34 `break statement must be inside
+            // a loop` parse errors).
+            Statement::Break(_) if !in_loop => Some("break".into()),
+            Statement::Continue(_) if !in_loop => Some("continue".into()),
             _ => None,
         };
         if let Some(text) = rewrite {
@@ -613,26 +622,30 @@ fn sanitize_block(block: &mut Block, functions: &mut usize) {
                 }
                 if let Some(mut f) = c.function.try_lock() {
                     *functions += 1;
-                    sanitize_block(&mut f.body, functions);
+                    sanitize_block_in(&mut f.body, functions, false);
                 }
             }
         });
         match stmt {
             Statement::If(r#if) => {
-                visit_shared_mut(&r#if.then_block, &mut |b| sanitize_block(b, functions));
-                visit_shared_mut(&r#if.else_block, &mut |b| sanitize_block(b, functions));
+                visit_shared_mut(&r#if.then_block, &mut |b| {
+                    sanitize_block_in(b, functions, in_loop)
+                });
+                visit_shared_mut(&r#if.else_block, &mut |b| {
+                    sanitize_block_in(b, functions, in_loop)
+                });
             }
             Statement::While(w) => {
-                visit_shared_mut(&w.block, &mut |b| sanitize_block(b, functions));
+                visit_shared_mut(&w.block, &mut |b| sanitize_block_in(b, functions, true));
             }
             Statement::Repeat(r) => {
-                visit_shared_mut(&r.block, &mut |b| sanitize_block(b, functions));
+                visit_shared_mut(&r.block, &mut |b| sanitize_block_in(b, functions, true));
             }
             Statement::NumericFor(n) => {
-                visit_shared_mut(&n.block, &mut |b| sanitize_block(b, functions));
+                visit_shared_mut(&n.block, &mut |b| sanitize_block_in(b, functions, true));
             }
             Statement::GenericFor(g) => {
-                visit_shared_mut(&g.block, &mut |b| sanitize_block(b, functions));
+                visit_shared_mut(&g.block, &mut |b| sanitize_block_in(b, functions, true));
             }
             _ => {}
         }
@@ -683,5 +696,35 @@ mod sanitize_tests {
         let s = body.to_string();
         assert!(!s.contains("__close_uv"), "{s}");
         assert!(s.contains("keep"), "{s}");
+    }
+
+    #[test]
+    fn sanitize_comments_break_outside_loop() {
+        let mut body = Block(vec![
+            Comment::new("goto l4473".into()).into(),
+            Statement::Break(Break {}),
+        ]);
+        sanitize_for_luau(&mut body);
+        let s = body.to_string();
+        for line in s.lines() {
+            let t = line.trim_start();
+            assert!(!t.starts_with("break"), "orphan break leaked: {line}");
+        }
+        assert!(s.contains("break"), "{s}");
+    }
+
+    #[test]
+    fn sanitize_keeps_break_inside_while() {
+        let inner = Block(vec![Statement::Break(Break {})]);
+        let mut body = Block(vec![Statement::While(While::new(
+            Literal::Boolean(true).into(),
+            inner,
+        ))]);
+        sanitize_for_luau(&mut body);
+        let s = body.to_string();
+        assert!(
+            s.lines().any(|l| l.trim_start() == "break"),
+            "loop break was commented: {s}"
+        );
     }
 }
