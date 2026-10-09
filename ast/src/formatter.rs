@@ -1107,12 +1107,3 @@ mod shared_body_tests {
         assert!(s.len() < 64 * 1024, "runaway format: {} bytes", s.len());
     }
 }
-)),
-            else_block: shared,
-        })]);
-        let s = body.to_string();
-        assert!(s.contains("if"));
-        assert!(s.contains("end"));
-        assert!(s.len() < 64 * 1024, "runaway format: {} bytes", s.len());
-    }
-}

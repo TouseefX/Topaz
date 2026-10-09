@@ -58,6 +58,112 @@ impl GraphStructurer {
         init_blocks.exactly_one().ok()
     }
 
+    /// Medal-improved: a for-next whose body never leaves (all paths
+    /// `return`) is not a DFS back-edge header, so `try_collapse_loop`
+    /// skips it and the init/next IR prints as `-- unstructured *-for`.
+    pub(crate) fn collapse_terminal_for_loop(&mut self) -> bool {
+        let headers: Vec<_> = self
+            .function
+            .graph()
+            .node_indices()
+            .filter(|&n| self.function.has_block(n) && self.is_for_next(n))
+            .collect();
+        for header in headers {
+            let Some((then_edge, else_edge)) = self.function.conditional_edges(header) else {
+                continue;
+            };
+            let body = then_edge.target();
+            let next = else_edge.target();
+            if !self.function.has_block(body) || !self.function.has_block(next) {
+                continue;
+            }
+            if self.function.successor_blocks(body).next().is_some() {
+                continue;
+            }
+            let Some((init_block, init_index)) = self.find_for_init(header) else {
+                continue;
+            };
+            if init_block == header || !self.function.has_block(init_block) {
+                continue;
+            }
+            let init_len = self.function.block(init_block).map(|b| b.len()).unwrap_or(0);
+            if init_index >= init_len {
+                continue;
+            }
+            let body_ast = self.function.block(body).cloned().unwrap_or_default();
+            let init_statement = self
+                .function
+                .block_mut(init_block)
+                .unwrap()
+                .remove(init_index);
+            let next_statement = match self.function.block_mut(header).unwrap().pop() {
+                Some(s) => s,
+                None => {
+                    self.function
+                        .block_mut(init_block)
+                        .unwrap()
+                        .insert(init_index, init_statement);
+                    continue;
+                }
+            };
+            let loop_statement = match (init_statement, next_statement) {
+                (
+                    ast::Statement::NumForInit(init),
+                    ast::Statement::NumForNext(next_statement),
+                ) if next_statement.counter.0.as_local().is_some() => ast::NumericFor::new(
+                    init.counter.1,
+                    init.limit.1,
+                    init.step.1,
+                    next_statement.counter.0.as_local().unwrap().clone(),
+                    body_ast,
+                )
+                .into(),
+                (
+                    ast::Statement::GenericForInit(init),
+                    ast::Statement::GenericForNext(next_statement),
+                ) => ast::GenericFor::new(
+                    next_statement
+                        .res_locals
+                        .iter()
+                        .filter_map(|local| local.as_local().cloned())
+                        .collect(),
+                    init.0.right,
+                    body_ast,
+                )
+                .into(),
+                (init_statement, next_statement) => {
+                    self.function
+                        .block_mut(init_block)
+                        .unwrap()
+                        .insert(init_index, init_statement);
+                    self.function
+                        .block_mut(header)
+                        .unwrap()
+                        .push(next_statement);
+                    continue;
+                }
+            };
+
+            let body_is_unique = self.function.predecessor_blocks(body).count() == 1;
+            self.function.remove_block(header);
+            if body_is_unique && body != init_block && body != next {
+                self.function.remove_block(body);
+            }
+            self.function
+                .block_mut(init_block)
+                .unwrap()
+                .push(loop_statement);
+            self.function.set_edges(
+                init_block,
+                vec![(next, BlockEdge::new(BranchType::Unconditional))],
+            );
+            self.find_loop_headers();
+            self.match_jump(init_block, Some(next));
+            return true;
+        }
+        false
+    }
+
     pub(crate) fn try_collapse_loop(
         &mut self,
         header: NodeIndex,

@@ -228,6 +228,15 @@ impl GraphStructurer {
                 break;
             }
             self.find_loop_headers();
+            // Terminal for-loops (body always returns) have no back-edge,
+            // so they never become loop headers. Medal-improved collapses
+            // those here; without it they print as unstructured for-IR.
+            if n <= 8000 {
+                let mut t = 0u32;
+                while t < 4 && self.collapse_terminal_for_loop() {
+                    t += 1;
+                }
+            }
             let Some(entry) = *self.function.entry() else {
                 break;
             };
