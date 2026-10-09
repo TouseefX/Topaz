@@ -858,11 +858,90 @@ impl<'a> Destructor<'a> {
 
     fn lift_params(&mut self) {
         for node in self.function.graph().node_indices().collect::<Vec<_>>() {
-            self.lift_block_params(node);
+            if !self.try_lift_trivial_phis(node) {
+                self.lift_block_params(node);
+            }
         }
     }
 
-    
+    /// Every predecessor passes the same local for a param (the ClientRenderer
+    /// `Request` / `Data` registers through an if-elseif chain). Assign at the
+    /// *join*, not at the end of each predecessor: diamond matching wraps those
+    /// predecessors in `if/else`, which trapped the copies so later cases
+    /// compared a never-assigned `v1779` to `"DL1Flip"` / `"POLBeam"` / …
+    fn try_lift_trivial_phis(&mut self, node: NodeIndex) -> bool {
+        let incoming: Vec<(Vec<(RcLocal, ast::RValue)>, _)> = self
+            .function
+            .graph()
+            .edges_directed(node, petgraph::Direction::Incoming)
+            .map(|e| (e.weight().arguments.clone(), e.id()))
+            .collect();
+        if incoming.is_empty() {
+            return true;
+        }
+        if incoming.iter().any(|(a, _)| a.is_empty()) {
+            return incoming.iter().all(|(a, _)| a.is_empty());
+        }
+        let nparams = incoming[0].0.len();
+        if nparams == 0 || incoming.iter().any(|(a, _)| a.len() != nparams) {
+            return false;
+        }
+        let mut sources: Vec<Option<RcLocal>> = vec![None; nparams];
+        for i in 0..nparams {
+            let mut same: Option<RcLocal> = None;
+            for (args, _) in &incoming {
+                if args[i].0 != incoming[0].0[i].0 {
+                    return false;
+                }
+                match &args[i].1 {
+                    ast::RValue::Local(l) => {
+                        if let Some(s) = &same {
+                            if s != l {
+                                return false;
+                            }
+                        } else {
+                            same = Some(l.clone());
+                        }
+                    }
+                    _ => return false,
+                }
+            }
+            sources[i] = same;
+        }
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for i in 0..nparams {
+            let param = incoming[0].0[i].0.clone();
+            let src = sources[i].clone().unwrap();
+            if src != param {
+                left.push(param.into());
+                right.push(src.into());
+            }
+        }
+        if !left.is_empty() {
+            self.function.block_mut(node).unwrap().insert(
+                0,
+                ast::Assign {
+                    left,
+                    right,
+                    prefix: false,
+                    parallel: true,
+                    compound_op: None,
+                }
+                .into(),
+            );
+        }
+        for (_, eid) in incoming {
+            self.function
+                .graph_mut()
+                .edge_weight_mut(eid)
+                .unwrap()
+                .arguments
+                .clear();
+        }
+        true
+    }
+
     fn lift_block_params(&mut self, node: NodeIndex) {
         let mut param_map = FxHashMap::default();
         if let Some((_, BlockEdge { arguments, .. })) = self.function.edges_to_block(node).next() {
@@ -985,6 +1064,74 @@ impl<'a> Destructor<'a> {
                         .push(parallel_assign.into());
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod request_phi_tests {
+    use super::*;
+    use crate::{
+        block::{BlockEdge, BranchType},
+        function::Function,
+    };
+    use ast::{Assign, Binary, BinaryOperation, If, Literal, Local, Statement};
+
+    #[test]
+    fn trivial_phi_assigns_request_at_join() {
+        let request2 = RcLocal::new(Local::new(Some("request2".into())));
+        let v1779 = RcLocal::new(Local::new(Some("v1779".into())));
+        let mut function = Function::new(0);
+        let b0 = function.new_block();
+        let b1 = function.new_block();
+        function.set_entry(b0);
+        function.block_mut(b0).unwrap().0.push(
+            Assign::new(
+                vec![request2.clone().into()],
+                vec![Literal::String(b"FASSet".to_vec()).into()],
+            )
+            .into(),
+        );
+        let mut edge = BlockEdge::new(BranchType::Unconditional);
+        edge.arguments
+            .push((v1779.clone(), request2.clone().into()));
+        function.set_edges(b0, vec![(b1, edge)]);
+        function.block_mut(b1).unwrap().0.push(Statement::If(If::new(
+            Binary::new(
+                v1779.clone().into(),
+                Literal::String(b"DL1Flip".to_vec()).into(),
+                BinaryOperation::Equal,
+            )
+            .into(),
+            ast::Block::default(),
+            ast::Block::default(),
+        )));
+        Destructor::new(
+            &mut function,
+            IndexMap::default(),
+            FxHashSet::default(),
+            8,
+        )
+        .destruct();
+        let combined = format!(
+            "{}\n{}",
+            function.block(b0).unwrap(),
+            function.block(b1).unwrap()
+        );
+        assert!(combined.contains("DL1Flip"), "{combined}");
+        let uses_request = combined.contains("request2");
+        let has_copy = combined.contains("v1779") && combined.contains("request2");
+        assert!(
+            uses_request || has_copy,
+            "Request was not carried into the join:\n{combined}"
+        );
+        // A bare `local v1779` with no RHS would be the v8 dispatcher bug.
+        for line in combined.lines() {
+            let t = line.trim();
+            assert!(
+                t != "local v1779" && t != "local v1779, v1780",
+                "uninitialized discriminator:\n{combined}"
+            );
         }
     }
 }

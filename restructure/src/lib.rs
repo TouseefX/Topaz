@@ -158,9 +158,23 @@ impl GraphStructurer {
             && self.function.predecessor_blocks(target).count() == 1
             && self.function.successor_blocks(source).count() == 1
         {
-            
+            let args = self
+                .function
+                .graph()
+                .edge_weight(edge)
+                .unwrap()
+                .arguments
+                .clone();
             let edges = self.function.remove_edges(target);
-            let block = self.function.remove_block(target).unwrap();
+            let mut block = self.function.remove_block(target).unwrap();
+            if !args.is_empty() {
+                let mut assign = ast::Assign::new(
+                    args.iter().map(|(p, _)| p.clone().into()).collect(),
+                    args.iter().map(|(_, a)| a.clone()).collect(),
+                );
+                assign.parallel = true;
+                block.0.insert(0, assign.into());
+            }
             self.function.block_mut(source).unwrap().extend(block.0);
             self.function.set_edges(source, edges);
         } else {

@@ -142,6 +142,13 @@ impl GraphStructurer {
             return false;
         }
 
+        let exit_args = then_successors.first().and_then(|&exit| {
+            self.function
+                .edges(then_node)
+                .find(|e| e.target() == exit)
+                .map(|e| e.weight().arguments.clone())
+        });
+
         let then_block = self.function.remove_block(then_node).unwrap();
         let else_block = self.function.remove_block(else_node).unwrap();
 
@@ -166,10 +173,11 @@ impl GraphStructurer {
 
         let exit = then_successors.first().cloned();
         if let Some(exit) = exit {
-            self.function.set_edges(
-                entry,
-                vec![(exit, BlockEdge::new(BranchType::Unconditional))],
-            );
+            let mut edge = BlockEdge::new(BranchType::Unconditional);
+            if let Some(args) = exit_args {
+                edge.arguments = args;
+            }
+            self.function.set_edges(entry, vec![(exit, edge)]);
         } else {
             self.function.remove_edges(entry);
         }
