@@ -76,14 +76,14 @@ fn fold_one_function(block: &mut Block) {
     strip_identity_assigns(block);
 }
 
-fn collect_captured(block: &Block) -> FxHashSet<RcLocal> {
+fn collect_captured(block: &mut Block) -> FxHashSet<RcLocal> {
     let mut out = FxHashSet::default();
     collect_captured_in(block, &mut out);
     out
 }
 
-fn collect_captured_in(block: &Block, out: &mut FxHashSet<RcLocal>) {
-    for stat in &block.0 {
+fn collect_captured_in(block: &mut Block, out: &mut FxHashSet<RcLocal>) {
+    for stat in &mut block.0 {
         stat.traverse_rvalues(&mut |rv| {
             if let RValue::Closure(c) = rv {
                 for u in &c.upvalues {
@@ -97,31 +97,31 @@ fn collect_captured_in(block: &Block, out: &mut FxHashSet<RcLocal>) {
         });
         match stat {
             Statement::If(r#if) => {
-                if let Some(b) = r#if.then_block.try_lock() {
-                    collect_captured_in(&b, out);
+                if let Some(mut b) = r#if.then_block.try_lock() {
+                    collect_captured_in(&mut b, out);
                 }
-                if let Some(b) = r#if.else_block.try_lock() {
-                    collect_captured_in(&b, out);
+                if let Some(mut b) = r#if.else_block.try_lock() {
+                    collect_captured_in(&mut b, out);
                 }
             }
             Statement::While(w) => {
-                if let Some(b) = w.block.try_lock() {
-                    collect_captured_in(&b, out);
+                if let Some(mut b) = w.block.try_lock() {
+                    collect_captured_in(&mut b, out);
                 }
             }
             Statement::Repeat(r) => {
-                if let Some(b) = r.block.try_lock() {
-                    collect_captured_in(&b, out);
+                if let Some(mut b) = r.block.try_lock() {
+                    collect_captured_in(&mut b, out);
                 }
             }
             Statement::NumericFor(n) => {
-                if let Some(b) = n.block.try_lock() {
-                    collect_captured_in(&b, out);
+                if let Some(mut b) = n.block.try_lock() {
+                    collect_captured_in(&mut b, out);
                 }
             }
             Statement::GenericFor(g) => {
-                if let Some(b) = g.block.try_lock() {
-                    collect_captured_in(&b, out);
+                if let Some(mut b) = g.block.try_lock() {
+                    collect_captured_in(&mut b, out);
                 }
             }
             _ => {}
