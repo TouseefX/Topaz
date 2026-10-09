@@ -64,19 +64,28 @@ fn visit_nested_mut(stat: &mut Statement, f: fn(&mut Block)) {
 }
 
 fn flatten_block(block: &mut Block) {
-    collapse_neq_guards(block);
-    let mut i = 0;
-    while i < block.0.len() {
-        visit_nested_mut(&mut block.0[i], flatten_block);
-        if let Statement::If(_) = &block.0[i] {
-            if let Some(repl) = rewrite_if(&mut block.0, i) {
-                let n = repl.len();
-                block.0.splice(i..=i, repl);
-                i += n.max(1);
-                continue;
+    let mut guard = 0u32;
+    loop {
+        collapse_neq_guards(block);
+        let mut i = 0;
+        let mut changed = false;
+        while i < block.0.len() {
+            visit_nested_mut(&mut block.0[i], flatten_block);
+            if let Statement::If(_) = &block.0[i] {
+                if let Some(repl) = rewrite_if(&mut block.0, i) {
+                    let n = repl.len();
+                    block.0.splice(i..=i, repl);
+                    changed = true;
+                    i += n.max(1);
+                    continue;
+                }
             }
+            i += 1;
         }
-        i += 1;
+        guard += 1;
+        if !changed || guard > 8 {
+            break;
+        }
     }
 }
 

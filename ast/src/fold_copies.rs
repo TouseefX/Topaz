@@ -212,8 +212,12 @@ fn collect_copies(
                         && writes.get(dst).copied().unwrap_or(0) == 1
                     {
                         let src_w = writes.get(src).copied().unwrap_or(0);
-                        let src_ok = src_w == 0
-                            || (src_w == 1 && write_at.get(src).copied().unwrap_or(u32::MAX) < i);
+                        // Never fold a copy of something never assigned in
+                        // this function (params / upvalues / module zeros).
+                        // CameraShaker `local rot = ZERO` used to become a
+                        // nil `v27` plus mutations of the shared zero.
+                        let src_ok = src_w == 1
+                            && write_at.get(src).copied().unwrap_or(u32::MAX) < i;
                         if src_ok {
                             map.insert(dst.clone(), src.clone());
                         }

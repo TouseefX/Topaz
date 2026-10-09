@@ -1100,6 +1100,7 @@ pub fn structure_jumps(function: &mut Function, dom_idx: &DomIndex) -> bool {
                 }
             }
             if function.predecessor_blocks(jump_target).count() == 1
+                && !function.is_branch_arm(node)
                 && dom_idx.dominates(node, jump_target)
                 && function.graph().edge_weight(jump_edge).unwrap().arguments.is_empty()
             {

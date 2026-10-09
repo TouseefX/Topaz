@@ -84,6 +84,7 @@ impl super::GraphStructurer {
                     self.function.remove_block(node);
                     true
                 } else if self.function.predecessor_blocks(target).count() == 1
+                    && !self.function.is_branch_arm(node)
                     && !self.function.edges_to_block(node).any(|(t, _)| t == target)
                     && !self
                         .function

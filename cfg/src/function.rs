@@ -84,6 +84,17 @@ impl Function {
         self.graph.neighbors_directed(block, Direction::Incoming)
     }
 
+    /// True when `node` is a then/else successor of a two-way branch.
+    /// Merging the continuation *into* such an arm is the v11 IOInvis
+    /// trap: later `request2 == "…"` tests end up only reachable when
+    /// `request2 == "IOInvis"`.
+    pub fn is_branch_arm(&self, node: NodeIndex) -> bool {
+        let preds: Vec<_> = self.predecessor_blocks(node).collect();
+        preds
+            .iter()
+            .any(|&p| self.successor_blocks(p).count() >= 2)
+    }
+
     pub fn edges_to_block(&self, node: NodeIndex) -> impl Iterator<Item = (NodeIndex, &BlockEdge)> {
         let mut edges = self.predecessor_blocks(node).detach();
         std::iter::from_fn(move || edges.next_edge(&self.graph)).filter_map(move |e| {
