@@ -25,6 +25,32 @@ struct GraphStructurer {
     post_idx: DomIndex,
 }
 
+/// Copies that remain on a CFG edge after SSA destruct. Identity
+/// `x = x` args are skipped. Used whenever a collapse would otherwise
+/// drop `edge.arguments` (goto insert, leftover dump, jump merge).
+pub(crate) fn parallel_assign_from_args(
+    args: &[(ast::RcLocal, ast::RValue)],
+) -> Option<ast::Assign> {
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for (p, a) in args {
+        if let ast::RValue::Local(l) = a {
+            if l == p {
+                continue;
+            }
+        }
+        left.push(p.clone().into());
+        right.push(a.clone());
+    }
+    if left.is_empty() {
+        None
+    } else {
+        let mut assign = ast::Assign::new(left, right);
+        assign.parallel = true;
+        Some(assign)
+    }
+}
+
 impl GraphStructurer {
     fn find_loop_headers(&mut self) {
         self.loop_headers.clear();
@@ -167,13 +193,13 @@ impl GraphStructurer {
                 .clone();
             let edges = self.function.remove_edges(target);
             let mut block = self.function.remove_block(target).unwrap();
-            if !args.is_empty() {
-                let mut assign = ast::Assign::new(
-                    args.iter().map(|(p, _)| p.clone().into()).collect(),
-                    args.iter().map(|(_, a)| a.clone()).collect(),
-                );
-                assign.parallel = true;
-                block.0.insert(0, assign.into());
+            if let Some(assign) = parallel_assign_from_args(&args) {
+                let at = if block.first().is_some_and(|s| s.as_label().is_some()) {
+                    1
+                } else {
+                    0
+                };
+                block.0.insert(at, assign.into());
             }
             self.function.block_mut(source).unwrap().extend(block.0);
             self.function.set_edges(source, edges);
@@ -191,9 +217,47 @@ impl GraphStructurer {
                 .unwrap()
                 .push(ast::Goto::new(label).into());
 
-            let edge = self.function.graph_mut().remove_edge(edge).unwrap();
+            let mut edge = self.function.graph_mut().remove_edge(edge).unwrap();
+            if let Some(assign) = parallel_assign_from_args(&edge.arguments) {
+                self.function
+                    .block_mut(goto_block)
+                    .unwrap()
+                    .insert(0, assign.into());
+                edge.arguments.clear();
+            }
             self.function.graph_mut().add_edge(source, goto_block, edge);
         }
+    }
+
+    /// Incoming edge arguments that every remaining predecessor agrees on.
+    fn incoming_trivial_args(&self, node: NodeIndex) -> Vec<(ast::RcLocal, ast::RValue)> {
+        let mut iter = self.function.edges_to_block(node);
+        let Some((_, first)) = iter.next() else {
+            return Vec::new();
+        };
+        let args = first.arguments.clone();
+        if iter.all(|(_, e)| e.arguments == args) {
+            args
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn take_block_applying_args(
+        &mut self,
+        node: NodeIndex,
+        args: &[(ast::RcLocal, ast::RValue)],
+    ) -> ast::Block {
+        let mut block = self.function.remove_block(node).unwrap();
+        if let Some(assign) = parallel_assign_from_args(args) {
+            let at = if block.first().is_some_and(|s| s.as_label().is_some()) {
+                1
+            } else {
+                0
+            };
+            block.insert(at, assign.into());
+        }
+        block
     }
 
     fn remove_last_return(block: ast::Block) -> ast::Block {
@@ -344,6 +408,13 @@ impl GraphStructurer {
             let Some(entry) = *self.function.entry() else {
                 return res_block;
             };
+            // Snapshot before remove_block drops predecessor edges.
+            let incoming: FxHashMap<NodeIndex, Vec<(ast::RcLocal, ast::RValue)>> = self
+                .function
+                .graph()
+                .node_indices()
+                .map(|n| (n, self.incoming_trivial_args(n)))
+                .collect();
             let mut stack = vec![entry];
             let mut visited = FxHashSet::default();
             while let Some(node) = stack.pop() {
@@ -379,7 +450,9 @@ impl GraphStructurer {
                     }
                 }
 
-                let block = self.function.remove_block(node).unwrap();
+                let empty: &[(ast::RcLocal, ast::RValue)] = &[];
+                let block =
+                    self.take_block_applying_args(node, incoming.get(&node).map_or(empty, |v| v));
                 let mut goto_destinations = FxHashSet::default();
                 collect_gotos(&block, &mut goto_destinations);
                 for label in goto_destinations {
@@ -405,7 +478,9 @@ impl GraphStructurer {
             }
             
             for node in self.function.graph().node_indices().collect::<Vec<_>>() {
-                let block = self.function.remove_block(node).unwrap();
+                let empty: &[(ast::RcLocal, ast::RValue)] = &[];
+                let block =
+                    self.take_block_applying_args(node, incoming.get(&node).map_or(empty, |v| v));
                 if !block
                     .first()
                     .is_some_and(|s| matches!(s, ast::Statement::Label(_)))

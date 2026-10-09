@@ -18,6 +18,8 @@ impl super::GraphStructurer {
             && then_edge.target() == else_edge.target()
         {
             let target = then_edge.target();
+            let then_args = then_edge.weight().arguments.clone();
+            let else_args = else_edge.weight().arguments.clone();
             let cond = self
                 .function
                 .block_mut(node)
@@ -44,10 +46,11 @@ impl super::GraphStructurer {
                 _ => None,
             };
             self.function.block_mut(node).unwrap().extend(new_stat);
-            self.function.set_edges(
-                node,
-                vec![(target, BlockEdge::new(BranchType::Unconditional))],
-            );
+            let mut edge = BlockEdge::new(BranchType::Unconditional);
+            if then_args == else_args {
+                edge.arguments = then_args;
+            }
+            self.function.set_edges(node, vec![(target, edge)]);
             true
         } else {
             false
@@ -91,13 +94,30 @@ impl super::GraphStructurer {
                         && !self.is_loop_header(target)
                         && !self.is_for_next(target)
                     {
+                        let args = self
+                            .function
+                            .unconditional_edge(node)
+                            .map(|e| e.weight().arguments.clone())
+                            .unwrap_or_default();
                         let edges = self.function.remove_edges(target);
-                        let block = self.function.remove_block(target).unwrap();
+                        let mut block = self.function.remove_block(target).unwrap();
+                        if let Some(assign) = crate::parallel_assign_from_args(&args) {
+                            let at = if block.first().is_some_and(|s| s.as_label().is_some()) {
+                                1
+                            } else {
+                                0
+                            };
+                            block.insert(at, assign.into());
+                        }
                         self.function.block_mut(node).unwrap().extend(block.0);
                         self.function.set_edges(node, edges);
                         true
                     } else if self.function.entry() != &Some(node) && !self.is_loop_header(node) {
-                        
+                        let args = self
+                            .function
+                            .unconditional_edge(node)
+                            .map(|e| e.weight().arguments.clone())
+                            .unwrap_or_default();
                         for (source, edge) in self
                             .function
                             .graph()
@@ -110,6 +130,9 @@ impl super::GraphStructurer {
                             self.try_remove_unnecessary_condition(source);
                         }
                         let mut block = self.function.remove_block(node).unwrap();
+                        if let Some(assign) = crate::parallel_assign_from_args(&args) {
+                            block.push(assign.into());
+                        }
                         block.extend(std::mem::take(self.function.block_mut(target).unwrap()).0);
                         *self.function.block_mut(target).unwrap() = block;
                         true

@@ -869,50 +869,50 @@ impl<'a> Destructor<'a> {
     /// *join*, not at the end of each predecessor: diamond matching wraps those
     /// predecessors in `if/else`, which trapped the copies so later cases
     /// compared a never-assigned `v1779` to `"DL1Flip"` / `"POLBeam"` / …
+    ///
+    /// Params are matched by identity, not edge-arg index: SSA edges do not
+    /// always list the same phi in the same order.
     fn try_lift_trivial_phis(&mut self, node: NodeIndex) -> bool {
         let incoming: Vec<(Vec<(RcLocal, ast::RValue)>, _)> = self
             .function
             .graph()
-            .edges_directed(node, petgraph::Direction::Incoming)
+            .edges_directed(node, Direction::Incoming)
             .map(|e| (e.weight().arguments.clone(), e.id()))
             .collect();
-        if incoming.is_empty() {
+        if incoming.is_empty() || incoming.iter().all(|(a, _)| a.is_empty()) {
             return true;
         }
-        if incoming.iter().any(|(a, _)| a.is_empty()) {
-            return incoming.iter().all(|(a, _)| a.is_empty());
-        }
-        let nparams = incoming[0].0.len();
-        if nparams == 0 || incoming.iter().any(|(a, _)| a.len() != nparams) {
-            return false;
-        }
-        let mut sources: Vec<Option<RcLocal>> = vec![None; nparams];
-        for i in 0..nparams {
-            let mut same: Option<RcLocal> = None;
-            for (args, _) in &incoming {
-                if args[i].0 != incoming[0].0[i].0 {
+
+        let mut param_src: IndexMap<RcLocal, RcLocal> = IndexMap::new();
+        for (args, _) in &incoming {
+            if args.is_empty() {
+                return false;
+            }
+            let mut seen = FxHashSet::default();
+            for (param, rval) in args {
+                if !seen.insert(param.clone()) {
                     return false;
                 }
-                match &args[i].1 {
-                    ast::RValue::Local(l) => {
-                        if let Some(s) = &same {
-                            if s != l {
-                                return false;
-                            }
-                        } else {
-                            same = Some(l.clone());
-                        }
+                let ast::RValue::Local(src) = rval else {
+                    return false;
+                };
+                match param_src.get(param) {
+                    None => {
+                        param_src.insert(param.clone(), src.clone());
                     }
+                    Some(prev) if prev == src => {}
                     _ => return false,
                 }
             }
-            sources[i] = same;
         }
+        let nparams = param_src.len();
+        if nparams == 0 || incoming.iter().any(|(a, _)| a.len() != nparams) {
+            return false;
+        }
+
         let mut left = Vec::new();
         let mut right = Vec::new();
-        for i in 0..nparams {
-            let param = incoming[0].0[i].0.clone();
-            let src = sources[i].clone().unwrap();
+        for (param, src) in param_src {
             if src != param {
                 left.push(param.into());
                 right.push(src.into());
@@ -1131,6 +1131,68 @@ mod request_phi_tests {
             assert!(
                 t != "local v1779" && t != "local v1779, v1780",
                 "uninitialized discriminator:\n{combined}"
+            );
+        }
+    }
+
+    #[test]
+    fn trivial_phi_two_preds_assigns_at_join() {
+        let request2 = RcLocal::new(Local::new(Some("request2".into())));
+        let v1779 = RcLocal::new(Local::new(Some("v1779".into())));
+        let mut function = Function::new(0);
+        let entry = function.new_block();
+        let then_n = function.new_block();
+        let else_n = function.new_block();
+        let join = function.new_block();
+        function.set_entry(entry);
+        function.set_edges(
+            entry,
+            vec![
+                (then_n, BlockEdge::new(BranchType::Then)),
+                (else_n, BlockEdge::new(BranchType::Else)),
+            ],
+        );
+        let mut e1 = BlockEdge::new(BranchType::Unconditional);
+        e1.arguments
+            .push((v1779.clone(), request2.clone().into()));
+        let mut e2 = BlockEdge::new(BranchType::Unconditional);
+        e2.arguments
+            .push((v1779.clone(), request2.clone().into()));
+        function.set_edges(then_n, vec![(join, e1)]);
+        function.set_edges(else_n, vec![(join, e2)]);
+        function.block_mut(join).unwrap().0.push(Statement::If(If::new(
+            Binary::new(
+                v1779.clone().into(),
+                Literal::String(b"POLBeam".to_vec()).into(),
+                BinaryOperation::Equal,
+            )
+            .into(),
+            ast::Block::default(),
+            ast::Block::default(),
+        )));
+        Destructor::new(
+            &mut function,
+            IndexMap::default(),
+            FxHashSet::default(),
+            8,
+        )
+        .destruct();
+        let join_s = function.block(join).unwrap().to_string();
+        let then_s = function.block(then_n).unwrap().to_string();
+        let else_s = function.block(else_n).unwrap().to_string();
+        assert!(
+            join_s.contains("POLBeam"),
+            "join lost the compare:\n{join_s}"
+        );
+        assert!(
+            join_s.contains("request2")
+                || (join_s.contains("v1779") && join_s.contains("request2")),
+            "Request was not carried onto the join:\nthen:{then_s}\nelse:{else_s}\njoin:{join_s}"
+        );
+        for (name, s) in [("then", &then_s), ("else", &else_s)] {
+            assert!(
+                !s.contains("v1779"),
+                "copy trapped in {name} predecessor:\n{s}"
             );
         }
     }

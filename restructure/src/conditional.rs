@@ -143,10 +143,23 @@ impl GraphStructurer {
         }
 
         let exit_args = then_successors.first().and_then(|&exit| {
-            self.function
+            let then_args = self
+                .function
                 .edges(then_node)
                 .find(|e| e.target() == exit)
                 .map(|e| e.weight().arguments.clone())
+                .unwrap_or_default();
+            let else_args = self
+                .function
+                .edges(else_node)
+                .find(|e| e.target() == exit)
+                .map(|e| e.weight().arguments.clone())
+                .unwrap_or_default();
+            if then_args == else_args {
+                Some(then_args)
+            } else {
+                None
+            }
         });
 
         let then_block = self.function.remove_block(then_node).unwrap();
@@ -208,6 +221,19 @@ impl GraphStructurer {
                 return false;
             }
 
+            let then_args = self
+                .function
+                .edges(then_node)
+                .find(|e| e.target() == else_node)
+                .map(|e| e.weight().arguments.clone())
+                .unwrap_or_default();
+            let else_args = self
+                .function
+                .edges(entry)
+                .find(|e| e.target() == else_node)
+                .map(|e| e.weight().arguments.clone())
+                .unwrap_or_default();
+
             let then_block = self.function.remove_block(then_node).unwrap();
 
             let block = self.function.block_mut(entry).unwrap();
@@ -220,11 +246,11 @@ impl GraphStructurer {
                         .reduce_condition()
             }
 
-            
-            self.function.set_edges(
-                entry,
-                vec![(else_node, BlockEdge::new(BranchType::Unconditional))],
-            );
+            let mut edge = BlockEdge::new(BranchType::Unconditional);
+            if then_args == else_args {
+                edge.arguments = then_args;
+            }
+            self.function.set_edges(entry, vec![(else_node, edge)]);
 
             self.match_jump(entry, Some(else_node));
 
