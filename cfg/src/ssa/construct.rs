@@ -10,7 +10,26 @@ use petgraph::{
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::{function::Function, ssa::param_dependency_graph::ParamDependencyGraph};
+use crate::{
+    function::Function, past_decompile_deadline, ssa::param_dependency_graph::ParamDependencyGraph,
+};
+
+/// Follow `local_map` without looping forever if a copy-prop cycle exists
+/// (`a → b → a`). CameraShaker-style MOVE chains used to hang here.
+fn follow_local_map<'a>(
+    local_map: &'a FxHashMap<RcLocal, RcLocal>,
+    mut local: &'a RcLocal,
+) -> &'a RcLocal {
+    let mut hops = 0u32;
+    while let Some(next) = local_map.get(local) {
+        hops += 1;
+        if hops > 64 || next == local {
+            break;
+        }
+        local = next;
+    }
+    local
+}
 
 use super::upvalues::UpvaluesOpen;
 
@@ -37,6 +56,24 @@ pub fn remove_unnecessary_params(
 ) -> bool {
     let mut changed = false;
     for node in function.blocks().map(|(i, _)| i).collect::<Vec<_>>() {
+        // Most CFG nodes have no phi args. Building a dependency graph
+        // for each of them was O(n) wasted work per node. Peek without
+        // holding EdgeRefs across the `&mut function` call below.
+        let skip = {
+            let mut any = false;
+            let mut all_empty = true;
+            for e in function.graph().edges_directed(node, Direction::Incoming) {
+                any = true;
+                if !e.weight().arguments.is_empty() {
+                    all_empty = false;
+                    break;
+                }
+            }
+            !any || all_empty
+        };
+        if skip {
+            continue;
+        }
         let mut dependency_graph = ParamDependencyGraph::new(function, node);
         let mut removable_params = FxHashMap::default();
         let edges = function
@@ -56,7 +93,7 @@ pub fn remove_unnecessary_params(
                 })
                 .collect::<Vec<_>>();
             let mut params_to_remove = FxHashSet::default();
-            for (index, mut param) in params.enumerate() {
+            for (index, param) in params.enumerate() {
                 if args_in_by_block
                     .iter()
                     .map(|a| a[index])
@@ -71,13 +108,9 @@ pub fn remove_unnecessary_params(
                     .filter_map(|r| r.as_local())
                     .collect::<FxHashSet<_>>();
                 if arg_set.len() == 1 {
-                    while let Some(param_to) = local_map.get(param) {
-                        param = param_to;
-                    }
-                    let mut arg = arg_set.into_iter().next().unwrap();
-                    while let Some(arg_to) = local_map.get(arg) {
-                        arg = arg_to;
-                    }
+                    let param = follow_local_map(local_map, param);
+                    let arg = arg_set.into_iter().next().unwrap();
+                    let arg = follow_local_map(local_map, arg);
                     if arg != param {
                         
                         
@@ -101,15 +134,27 @@ pub fn remove_unnecessary_params(
                         .unwrap()
                         .arguments
                         .retain(|(p, _)| {
-                            let mut p = p;
-                            while let Some(p_to) = local_map.get(p) {
-                                p = p_to;
-                            }
-                            !params_to_remove.contains(p)
+                            !params_to_remove.contains(follow_local_map(local_map, p))
                         });
                 }
                 changed = true;
             }
+        }
+
+        // Identical-arg phis were dropped from the edges. Join uses still
+        // name the phi local (`v1779`). The degree-zero chase below used
+        // to copy param→arg into `local_map`, but that walk is O(|SSA|)
+        // per node and is skipped when n>2000 — ClientRenderer's event
+        // handler. Dropping the phi without rewriting uses is the v8/v9
+        // dispatcher bug: `local v1779; if v1779 == "DL1Flip"`. Mapping
+        // here is O(phis) and required at every CFG size.
+        for (param, arg) in &removable_params {
+            local_map.insert(param.clone(), arg.clone());
+        }
+
+        // Degree-zero chase is extra copy-prop for *dependent* params.
+        if function.graph().node_count() > 2000 {
+            continue;
         }
 
         let mut removable_params_degree_zero = removable_params
@@ -143,9 +188,7 @@ pub fn remove_unnecessary_params(
             }
             dependency_graph.remove_node(param_node);
 
-            while let Some(arg_to) = local_map.get(arg) {
-                arg = arg_to;
-            }
+            arg = follow_local_map(local_map, arg);
             local_map.insert(param, arg.clone());
             changed = true;
         }
@@ -164,9 +207,7 @@ fn apply_local_map_to_values_referenced<T: LocalRw + Traverse>(
         .into_iter()
         .filter_map(|v| local_map.get(v).map(|t| (v, t)))
     {
-        while let Some(to_to) = local_map.get(to) {
-            to = to_to;
-        }
+        to = follow_local_map(local_map, to);
         *from = to.clone();
     }
     let mut map = FxHashMap::default();
@@ -175,9 +216,7 @@ fn apply_local_map_to_values_referenced<T: LocalRw + Traverse>(
         .into_iter()
         .filter_map(|v| local_map.get(v).map(|t| (v, t)))
     {
-        while let Some(to_to) = local_map.get(to) {
-            to = to_to;
-        }
+        to = follow_local_map(local_map, to);
         map.insert(from.clone(), to.clone());
         *from = to.clone();
     }
@@ -188,12 +227,11 @@ fn apply_local_map_to_values_referenced<T: LocalRw + Traverse>(
 
 pub fn apply_local_map(function: &mut Function, local_map: FxHashMap<RcLocal, RcLocal>) {
     for param in &mut function.parameters {
-        if let Some(mut new_param) = local_map.get(param) {
-            
-            while let Some(new_to) = local_map.get(new_param) {
-                new_param = new_to;
-            }
-            *param = new_param.clone();
+        let mapped = local_map
+            .get(param)
+            .map(|new_param| follow_local_map(&local_map, new_param).clone());
+        if let Some(mapped) = mapped {
+            *param = mapped;
         }
     }
     
@@ -214,13 +252,11 @@ pub fn apply_local_map(function: &mut Function, local_map: FxHashMap<RcLocal, Rc
             {
                 match local {
                     Either::Left(local) => {
-                        if let Some(mut new_local) = local_map.get(local) {
-                            
-                            
-                            while let Some(new_to) = local_map.get(new_local) {
-                                new_local = new_to;
-                            }
-                            *local = new_local.clone();
+                        let mapped = local_map
+                            .get(local)
+                            .map(|new_local| follow_local_map(&local_map, new_local).clone());
+                        if let Some(mapped) = mapped {
+                            *local = mapped;
                         }
                     }
                     Either::Right(rvalue) => {
@@ -236,7 +272,6 @@ fn new_local_from(original: &RcLocal) -> RcLocal {
     let name = original.0 .0.lock().0.clone();
     RcLocal::new(ast::Local::new(name))
 }
-
 
 impl<'a> SsaConstructor<'a> {
     fn write_local(&mut self, node: NodeIndex, local: &RcLocal, new_local: &RcLocal) {
@@ -276,7 +311,15 @@ impl<'a> SsaConstructor<'a> {
         param_local
     }
 
-    fn try_remove_trivial_param(&mut self, node: NodeIndex, param_local: RcLocal) -> RcLocal {
+    fn try_remove_trivial_param(
+        &mut self,
+        node: NodeIndex,
+        param_local: RcLocal,
+        depth: u32,
+    ) -> RcLocal {
+        if depth > 32 || past_decompile_deadline() {
+            return param_local;
+        }
         let mut same = None;
         let args_in = self.function.edges_to_block(node).map(|(_, e)| {
             &e.arguments
@@ -286,10 +329,7 @@ impl<'a> SsaConstructor<'a> {
                 .1
         });
         for arg in args_in {
-            let mut arg = arg.as_local().unwrap();
-            while let Some(arg_to) = self.local_map.get(arg) {
-                arg = arg_to;
-            }
+            let arg = follow_local_map(&self.local_map, arg.as_local().unwrap());
 
             if Some(&arg) == same.as_ref() || arg == &param_local {
                 
@@ -301,10 +341,18 @@ impl<'a> SsaConstructor<'a> {
             }
             same = Some(arg);
         }
-        let same = same.unwrap().clone();
+        let Some(same) = same else {
+            return param_local;
+        };
+        let same = same.clone();
         self.local_map.insert(param_local.clone(), same.clone());
 
-        
+        // Walking every block for every trivial phi is O(n²). On large
+        // CFGs the extra cleanup isn't worth it — SSA is already correct.
+        if self.function.graph().node_count() > 512 {
+            return same;
+        }
+
         for node in self.function.graph().node_indices().collect::<Vec<_>>() {
             let mut edges = self
                 .function
@@ -332,15 +380,15 @@ impl<'a> SsaConstructor<'a> {
                                 .collect::<Vec<_>>()
                         })
                         .collect::<Vec<_>>();
-                    for mut param in params_in[0].iter() {
-                        while let Some(param_to) = self.local_map.get(param) {
-                            param = param_to;
-                        }
+                    for param in params_in[0].iter() {
+                        let param = follow_local_map(&self.local_map, param);
 
                         if param == &param_local
                             || params_in.iter().any(|e| e.iter().any(|p| p == param))
                         {
-                            self.try_remove_trivial_param(node, param.clone());
+                            if depth < 32 && !past_decompile_deadline() {
+                                self.try_remove_trivial_param(node, param.clone(), depth + 1);
+                            }
                         }
                     }
                 }
@@ -351,17 +399,22 @@ impl<'a> SsaConstructor<'a> {
     }
 
     fn find_local(&mut self, node: NodeIndex, local: &RcLocal) -> RcLocal {
-        let res = if let Some(new_local) = self
-            .current_definition
-            .get(local)
-            .and_then(|x| x.get(&node))
-        {
-            
-            new_local.clone()
-        } else {
-            
-            if !self.sealed_blocks.contains(&node) {
-                
+        // Walk unique-predecessor chains iteratively. Recursing here
+        // overflowed the stack on 60k-block dumps and could loop if a
+        // sealed cycle had a unique-pred shape after edge edits.
+        let mut stack = vec![node];
+        let mut seen = FxHashSet::default();
+        seen.insert(node);
+        let def = loop {
+            let cur = *stack.last().unwrap();
+            if let Some(new_local) = self
+                .current_definition
+                .get(local)
+                .and_then(|x| x.get(&cur))
+            {
+                break new_local.clone();
+            }
+            if !self.sealed_blocks.contains(&cur) {
                 let param_local = new_local_from(local);
                 self.old_locals.insert(param_local.clone(), local.clone());
                 if let Some(upvalues) = self.new_upvalues_in.get_mut(local) {
@@ -369,26 +422,29 @@ impl<'a> SsaConstructor<'a> {
                 }
                 self.local_count += 1;
                 self.incomplete_params
-                    .entry(node)
+                    .entry(cur)
                     .or_default()
                     .insert(local.clone(), param_local.clone());
-                param_local
-            } else if let Ok(pred) = self.function.predecessor_blocks(node).exactly_one() {
-                self.find_local(pred, local)
-            } else {
-                let param_local = new_local_from(local);
-                self.old_locals.insert(param_local.clone(), local.clone());
-                if let Some(upvalues) = self.new_upvalues_in.get_mut(local) {
-                    upvalues.insert(param_local.clone());
-                }
-                self.local_count += 1;
-                self.write_local(node, local, &param_local);
-
-                self.add_param_args(node, local, param_local)
+                break param_local;
             }
+            let preds: Vec<_> = self.function.predecessor_blocks(cur).collect();
+            if preds.len() == 1 && seen.insert(preds[0]) && stack.len() < 10_000 {
+                stack.push(preds[0]);
+                continue;
+            }
+            let param_local = new_local_from(local);
+            self.old_locals.insert(param_local.clone(), local.clone());
+            if let Some(upvalues) = self.new_upvalues_in.get_mut(local) {
+                upvalues.insert(param_local.clone());
+            }
+            self.local_count += 1;
+            self.write_local(cur, local, &param_local);
+            break self.add_param_args(cur, local, param_local);
         };
-        self.write_local(node, local, &res);
-        res
+        for n in stack {
+            self.write_local(n, local, &def);
+        }
+        def
     }
 
     fn propagate_copies(&mut self) {
@@ -406,16 +462,15 @@ impl<'a> SsaConstructor<'a> {
                 if assign.left.len() == 1
                     && assign.right.len() == 1
                     && let Some(from) = assign.left[0].as_local()
-                    && let from_old = &self.old_locals[from]
+                    && let Some(from_old) = self.old_locals.get(from)
                     && !self.new_upvalues_in.contains_key(from_old)
                     && !self.upvalues_passed.contains_key(from_old)
-                    && let Some(mut to) = assign.right[0].as_local()
+                    && let Some(to) = assign.right[0].as_local()
                 {
-                    
-                    while let Some(to_to) = self.local_map.get(to) {
-                        to = to_to;
-                    }
-                    let to_old = &self.old_locals[to];
+                    let to = follow_local_map(&self.local_map, to);
+                    let Some(to_old) = self.old_locals.get(to) else {
+                        continue;
+                    };
                     if !self.new_upvalues_in.contains_key(to_old)
                         && !self.upvalues_passed.contains_key(to_old)
                     {
@@ -438,22 +493,30 @@ impl<'a> SsaConstructor<'a> {
                 let statement = self.function.block(node).unwrap().get(stat_index).unwrap();
                 let values = statement.values().into_iter().cloned().collect::<Vec<_>>();
                 for value in values {
-                    let old_local = &self.old_locals[&value];
+                    let Some(old_local) = self.old_locals.get(&value).cloned() else {
+                        continue;
+                    };
                     if let Some(open_locations) = upvalues_open
                         .open
                         .get(&node)
-                        .and_then(|m| m.get(old_local))
+                        .and_then(|m| m.get(&old_local))
                         .and_then(|m| m.get(&stat_index))
                     {
-                        if let Some(new_upvalues_in) = self.new_upvalues_in.get_mut(old_local) {
-                            assert!(new_upvalues_in.contains(&value));
-                        } else if let Some(all_defs) = self.all_definitions.get(old_local) {
+                        if let Some(new_upvalues_in) = self.new_upvalues_in.get_mut(&old_local) {
+                            // Unsplit / identity uses never went through the
+                            // split-insert path; record them rather than panic.
+                            new_upvalues_in.insert(value.clone());
+                        } else {
+                            // Only this SSA name, not every write to the
+                            // original register — `all_definitions` would
+                            // coalesce later register-reuse (UI temps) into
+                            // the captured local (`StateStorage = color`).
                             self.upvalues_passed
                                 .entry(old_local.clone())
                                 .or_default()
                                 .entry(*open_locations.first().unwrap())
                                 .or_default()
-                                .extend(all_defs.clone());
+                                .insert(value.clone());
                         }
                     }
                 }
@@ -502,13 +565,17 @@ impl<'a> SsaConstructor<'a> {
         usize,
         Vec<FxHashSet<RcLocal>>,
         Vec<(RcLocal, FxHashSet<RcLocal>)>,
-        Vec<FxHashSet<RcLocal>>,
+        Vec<(RcLocal, FxHashSet<RcLocal>)>,
     ) {
         let entry = self.function.entry().unwrap();
-        let mut visited_nodes = Vec::with_capacity(self.function.graph().node_count());
+        for local in self.new_upvalues_in.keys().cloned().collect::<Vec<_>>() {
+            self.old_locals.entry(local.clone()).or_insert(local);
+        }
         for i in 0..self.dfs.len() {
+            if i & 15 == 0 && past_decompile_deadline() {
+                break;
+            }
             let node = self.dfs[i];
-            visited_nodes.push(node);
             for stat_index in 0..self.function.block(node).unwrap().len() {
                 let statement = self
                     .function
@@ -569,23 +636,30 @@ impl<'a> SsaConstructor<'a> {
             }
             self.filled_blocks.insert(node);
 
-            for &node in &visited_nodes {
-                if node != entry
-                    && !self.sealed_blocks.contains(&node)
+            // Only a node whose last unfilled predecessor just filled can
+            // become sealable. Checking every visited node here was O(n²)
+            // and froze 60k-line scripts.
+            let mut candidates: Vec<NodeIndex> =
+                self.function.successor_blocks(node).collect();
+            candidates.push(node);
+            candidates.sort_unstable();
+            candidates.dedup();
+            for cand in candidates {
+                if cand != entry
+                    && !self.sealed_blocks.contains(&cand)
                     && !self
                         .function
-                        .predecessor_blocks(node)
+                        .predecessor_blocks(cand)
                         .any(|p| !self.filled_blocks.contains(&p))
                 {
-                    if let Some(incomplete_params) = self.incomplete_params.remove(&node) {
+                    if let Some(incomplete_params) = self.incomplete_params.remove(&cand) {
                         for (local, param_local) in incomplete_params {
-                            
                             if !self.new_upvalues_in.contains_key(&local) {
-                                self.add_param_args(node, &local, param_local);
+                                self.add_param_args(cand, &local, param_local);
                             }
                         }
                     }
-                    self.sealed_blocks.insert(node);
+                    self.sealed_blocks.insert(cand);
                 }
             }
         }
@@ -593,10 +667,18 @@ impl<'a> SsaConstructor<'a> {
         
         if let Some(mut incomplete_params) = self.incomplete_params.remove(&entry) {
             for param in &mut self.function.parameters {
-                *param = incomplete_params.remove(param).unwrap_or_default();
+                // Params that were never rewritten (unread, or a partial
+                // construct) must keep their original `RcLocal`.
+                // `unwrap_or_default()` replaced them with a fresh UNNAMED
+                // (CameraShaker `Start(UNNAMED_117)`).
+                if let Some(new) = incomplete_params.remove(param) {
+                    *param = new;
+                }
             }
         }
-        assert!(self.incomplete_params.is_empty());
+        // Unsealed params are left when we hit the deadline or a cyclic CFG.
+        // Do not assert — that aborted CameraShaker / huge dumps.
+        self.incomplete_params.clear();
 
         
         apply_local_map(self.function, std::mem::take(&mut self.local_map));
@@ -614,8 +696,8 @@ impl<'a> SsaConstructor<'a> {
             self.all_definitions.into_values().collect(),
             self.new_upvalues_in.into_iter().collect(),
             self.upvalues_passed
-                .into_values()
-                .flat_map(|m| m.into_values())
+                .into_iter()
+                .flat_map(|(orig, m)| m.into_values().map(move |s| (orig.clone(), s)))
                 .collect(),
         )
     }
@@ -628,7 +710,7 @@ pub fn construct(
     usize,
     Vec<FxHashSet<RcLocal>>,
     Vec<(RcLocal, FxHashSet<RcLocal>)>,
-    Vec<FxHashSet<RcLocal>>,
+    Vec<(RcLocal, FxHashSet<RcLocal>)>,
 ) {
     
     
@@ -638,9 +720,10 @@ pub fn construct(
         .is_none());
     let mut new_upvalues_in = IndexMap::with_capacity(upvalues_in.len());
     for upvalue in upvalues_in {
-        new_upvalues_in.insert(upvalue.clone(), FxHashSet::default());
+        let mut set = FxHashSet::default();
+        set.insert(upvalue.clone());
+        new_upvalues_in.insert(upvalue.clone(), set);
     }
-
     let dfs = Dfs::new(function.graph(), function.entry().unwrap())
         .iter(function.graph())
         .collect::<IndexSet<_>>();
@@ -667,4 +750,122 @@ pub fn construct(
         upvalues_passed: FxHashMap::default(),
     }
     .construct()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::function::Function;
+    use rustc_hash::FxHashMap;
+
+    /// v5: `keep_unsplit` left the incoming upvalue as itself, never inserted
+    /// it into `new_upvalues_in`'s value-set, then `mark_upvalues` asserted.
+    #[test]
+    fn unsplit_incoming_upvalue_does_not_panic() {
+        let up = RcLocal::new(ast::Local::new(Some("up".into())));
+        let tmp = RcLocal::new(ast::Local::new(Some("tmp".into())));
+        let mut function = Function::new(0);
+        let entry = function.new_block();
+        function.set_entry(entry);
+        function.block_mut(entry).unwrap().0.push(
+            ast::Assign::new(vec![tmp.into()], vec![up.clone().into()]).into(),
+        );
+        let _ = construct(&mut function, &vec![up]);
+    }
+
+    /// Sibling of a keep_unsplit param used to be rewritten via
+    /// `incomplete_params`, and `unwrap_or_default` then wiped the unsplit
+    /// param to a fresh UNNAMED local.
+    #[test]
+    fn unsplit_param_survives_sibling_rewrite() {
+        let self_p = RcLocal::new(ast::Local::new(Some("self".into())));
+        let other = RcLocal::new(ast::Local::new(Some("other".into())));
+        let tmp = RcLocal::new(ast::Local::new(Some("tmp".into())));
+        let mut function = Function::new(0);
+        function.parameters = vec![self_p.clone(), other.clone()];
+        let entry = function.new_block();
+        function.set_entry(entry);
+        function.block_mut(entry).unwrap().0.push(
+            ast::Assign::new(vec![tmp.into()], vec![other.clone().into()]).into(),
+        );
+        let _ = construct(&mut function, &vec![self_p.clone()]);
+        assert_eq!(function.parameters[0], self_p);
+        assert_eq!(
+            function.parameters[0].0 .0.lock().0.as_deref(),
+            Some("self")
+        );
+    }
+
+    /// v8/v9: `remove_unnecessary_params` dropped identical-arg phis on
+    /// n>2000 CFGs without `local_map` rewrite. Join uses of `v1779` then
+    /// printed as a bare `local` and `if v1779 == "DL1Flip"` was always false.
+    #[test]
+    fn trivial_phi_rewrites_uses_on_large_cfg() {
+        use crate::block::{BlockEdge, BranchType};
+        use ast::{Assign, Binary, BinaryOperation, If, Literal, Local, Statement};
+
+        let request2 = RcLocal::new(Local::new(Some("request2".into())));
+        let v1779 = RcLocal::new(Local::new(Some("v1779".into())));
+        let mut function = Function::new(0);
+        let entry = function.new_block();
+        let then_n = function.new_block();
+        let join = function.new_block();
+        function.set_entry(entry);
+        function.block_mut(entry).unwrap().0.push(
+            Assign::new(
+                vec![request2.clone().into()],
+                vec![Literal::String(b"FASSet".to_vec()).into()],
+            )
+            .into(),
+        );
+        let mut else_edge = BlockEdge::new(BranchType::Else);
+        else_edge
+            .arguments
+            .push((v1779.clone(), request2.clone().into()));
+        function.set_edges(
+            entry,
+            vec![
+                (then_n, BlockEdge::new(BranchType::Then)),
+                (join, else_edge),
+            ],
+        );
+        let mut then_edge = BlockEdge::new(BranchType::Unconditional);
+        then_edge
+            .arguments
+            .push((v1779.clone(), request2.clone().into()));
+        function.set_edges(then_n, vec![(join, then_edge)]);
+        function.block_mut(join).unwrap().0.push(Statement::If(If::new(
+            Binary::new(
+                v1779.clone().into(),
+                Literal::String(b"DL1Flip".to_vec()).into(),
+                BinaryOperation::Equal,
+            )
+            .into(),
+            ast::Block::default(),
+            ast::Block::default(),
+        )));
+        // Force the n>2000 skip that used to drop the mapping.
+        for _ in 0..2001 {
+            let _ = function.new_block();
+        }
+        assert!(function.graph().node_count() > 2000);
+
+        let mut local_map = FxHashMap::default();
+        remove_unnecessary_params(&mut function, &mut local_map);
+        assert_eq!(
+            local_map.get(&v1779),
+            Some(&request2),
+            "trivial phi must map v1779 → request2 even when n>2000"
+        );
+        apply_local_map(&mut function, local_map);
+        let join_s = function.block(join).unwrap().to_string();
+        assert!(
+            join_s.contains("request2"),
+            "join must compare request2, not a never-written phi:\n{join_s}"
+        );
+        assert!(
+            !join_s.contains("v1779"),
+            "phi name must not survive apply_local_map:\n{join_s}"
+        );
+    }
 }

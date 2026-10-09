@@ -24,6 +24,6 @@ authors = [
 debug = false
 lto = true
 strip = true
-panic = "abort"
+panic = "unwind"
 codegen-units = 1
 opt-level = 3

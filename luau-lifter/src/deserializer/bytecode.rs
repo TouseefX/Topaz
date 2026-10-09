@@ -28,11 +28,11 @@ impl Bytecode {
                     String::from_utf8_lossy(&data[1..]).into_owned(),
                 ))
             }
-            // LBC_VERSION_MAX is currently 11 publicly, but version 12
-            // (proto size prefix + cost model) is already shipping in
-            // experimental / Roblox builds. Accept it so we can skip
-            // unknown trailing fields via the size prefix.
-            3..=12 => Chunk::parse(data, encode_key).map(Bytecode::Chunk),
+            // Studio 0.735 `BytecodeBuilder::getVersion`:
+            //   9  (default) / 11 (call feedback) / 12 (cost model)
+            //   13 (vector double) / 14 (FASTPCALL) / 100 (classes)
+            // Versions >= 12 prefix each proto with a size varint.
+            3..=14 | 100 => Chunk::parse(data, encode_key).map(Bytecode::Chunk),
             other => Err(ParseError {
                 message: format!("unsupported bytecode version {}", other),
                 position: 0,

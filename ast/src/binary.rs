@@ -156,28 +156,103 @@ impl<'a: 'b, 'b> Reduce for Binary {
                 BinaryOperation::Or => right.reduce(),
                 _ => unreachable!(),
             },
-            (left, right, BinaryOperation::And)
-                if !left.has_side_effects() && !right.has_side_effects() && left == right =>
+            (left, right, BinaryOperation::And | BinaryOperation::Or)
+                if !left.has_side_effects() && left == right =>
             {
                 left
             }
             (
                 RValue::Binary(Binary {
-                    left:
-                        box value @ RValue::Unary(Unary {
-                            operation: UnaryOperation::Not,
-                            ..
-                        }),
-                    right: box RValue::Literal(Literal::Boolean(true)),
+                    left,
+                    right,
                     operation: BinaryOperation::And,
                 }),
                 RValue::Literal(Literal::Boolean(false)),
                 BinaryOperation::Or,
-            ) => value,
+            ) if matches!(
+                left.as_ref(),
+                RValue::Unary(Unary {
+                    operation: UnaryOperation::Not,
+                    ..
+                })
+            ) && matches!(right.as_ref(), RValue::Literal(Literal::Boolean(true))) =>
+            {
+                *left
+            }
             (left, right, BinaryOperation::Or) if left == right => left,
             (left, RValue::Literal(Literal::Boolean(false)), BinaryOperation::Or)
             | (left, RValue::Literal(Literal::Nil), BinaryOperation::Or) => left,
-            
+            (
+                RValue::Literal(left),
+                RValue::Literal(right),
+                BinaryOperation::Equal | BinaryOperation::NotEqual,
+            ) => {
+                let equal = left == right;
+                Literal::Boolean(if self.operation == BinaryOperation::Equal {
+                    equal
+                } else {
+                    !equal
+                })
+                .into()
+            }
+            (
+                RValue::Literal(Literal::Number(left)),
+                RValue::Literal(Literal::Number(right)),
+                operation @ (BinaryOperation::Add
+                | BinaryOperation::Sub
+                | BinaryOperation::Mul
+                | BinaryOperation::Div
+                | BinaryOperation::Mod
+                | BinaryOperation::Pow
+                | BinaryOperation::IDiv),
+            ) => Literal::Number(match operation {
+                BinaryOperation::Add => left + right,
+                BinaryOperation::Sub => left - right,
+                BinaryOperation::Mul => left * right,
+                BinaryOperation::Div => left / right,
+                BinaryOperation::Mod => left - (left / right).floor() * right,
+                BinaryOperation::Pow => left.powf(right),
+                BinaryOperation::IDiv => (left / right).floor(),
+                _ => unreachable!(),
+            })
+            .into(),
+            (
+                RValue::Literal(Literal::Integer(left)),
+                RValue::Literal(Literal::Integer(right)),
+                operation @ (BinaryOperation::Add
+                | BinaryOperation::Sub
+                | BinaryOperation::Mul),
+            ) => match operation {
+                BinaryOperation::Add => left
+                    .checked_add(right)
+                    .map(Literal::Integer)
+                    .unwrap_or_else(|| Literal::Number(left as f64 + right as f64)),
+                BinaryOperation::Sub => left
+                    .checked_sub(right)
+                    .map(Literal::Integer)
+                    .unwrap_or_else(|| Literal::Number(left as f64 - right as f64)),
+                BinaryOperation::Mul => left
+                    .checked_mul(right)
+                    .map(Literal::Integer)
+                    .unwrap_or_else(|| Literal::Number(left as f64 * right as f64)),
+                _ => unreachable!(),
+            }
+            .into(),
+            (
+                RValue::Literal(Literal::Number(left)),
+                RValue::Literal(Literal::Number(right)),
+                operation @ (BinaryOperation::LessThan
+                | BinaryOperation::LessThanOrEqual
+                | BinaryOperation::GreaterThan
+                | BinaryOperation::GreaterThanOrEqual),
+            ) => Literal::Boolean(match operation {
+                BinaryOperation::LessThan => left < right,
+                BinaryOperation::LessThanOrEqual => left <= right,
+                BinaryOperation::GreaterThan => left > right,
+                BinaryOperation::GreaterThanOrEqual => left >= right,
+                _ => unreachable!(),
+            })
+            .into(),
             (
                 RValue::Literal(Literal::String(left)),
                 RValue::Literal(Literal::String(right)),

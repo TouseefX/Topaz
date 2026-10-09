@@ -1,9 +1,8 @@
-use cfg::{block::BranchType, function::Function};
+use cfg::{block::BranchType, compute_idoms, compute_post_idoms, function::Function, DomIndex, IDom};
 use itertools::Itertools;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use petgraph::{
-    algo::dominators::{simple_fast, Dominators},
     stable_graph::{EdgeIndex, NodeIndex, StableDiGraph},
     visit::*,
 };
@@ -13,49 +12,71 @@ mod conditional;
 mod jump;
 mod r#loop;
 
-/// Compute post-dominators. Returns dominators on the reversed graph
-/// connected to a temporary super-sink (all exit nodes → fake_exit).
-/// The fake node is added and immediately removed — O(1) overhead.
-pub fn post_dominators<N: Default, E: Default>(
-    graph: &mut StableDiGraph<N, E>,
-) -> Dominators<NodeIndex> {
-    let exits: Vec<NodeIndex> = graph
-        .node_identifiers()
-        .filter(|&n| graph.neighbors(n).count() == 0)
-        .collect();
-    let fake_exit = graph.add_node(Default::default());
-    for exit in exits {
-        graph.add_edge(exit, fake_exit, Default::default());
-    }
-    let res = simple_fast(Reversed(&*graph), fake_exit);
-    assert!(graph.remove_node(fake_exit).is_some());
-    res
+/// Post-dominators of `graph` (virtual super-sink, no mutation).
+pub fn post_dominators<N, E>(graph: &StableDiGraph<N, E>) -> IDom<NodeIndex> {
+    compute_post_idoms(graph)
 }
 
 struct GraphStructurer {
     pub function: Function,
     loop_headers: FxHashSet<NodeIndex>,
     label_to_node: FxHashMap<ast::Label, NodeIndex>,
+    dom_idx: DomIndex,
+    post_idx: DomIndex,
+}
+
+/// Copies that remain on a CFG edge after SSA destruct. Identity
+/// `x = x` args are skipped. Used whenever a collapse would otherwise
+/// drop `edge.arguments` (goto insert, leftover dump, jump merge).
+pub(crate) fn without_identity_args(
+    mut args: Vec<(ast::RcLocal, ast::RValue)>,
+) -> Vec<(ast::RcLocal, ast::RValue)> {
+    args.retain(|(p, a)| !matches!(a, ast::RValue::Local(l) if l == p));
+    args
+}
+
+pub(crate) fn parallel_assign_from_args(
+    args: &[(ast::RcLocal, ast::RValue)],
+) -> Option<ast::Assign> {
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for (p, a) in args {
+        if let ast::RValue::Local(l) = a {
+            if l == p {
+                continue;
+            }
+        }
+        left.push(p.clone().into());
+        right.push(a.clone());
+    }
+    if left.is_empty() {
+        None
+    } else {
+        let mut assign = ast::Assign::new(left, right);
+        assign.parallel = true;
+        Some(assign)
+    }
 }
 
 impl GraphStructurer {
     fn find_loop_headers(&mut self) {
         self.loop_headers.clear();
-        depth_first_search(
-            self.function.graph(),
-            Some(self.function.entry().unwrap()),
-            |event| {
-                if let DfsEvent::BackEdge(_, header) = event {
-                    self.loop_headers.insert(header);
-                }
-            },
-        );
+        let Some(entry) = *self.function.entry() else {
+            return;
+        };
+        depth_first_search(self.function.graph(), Some(entry), |event| {
+            if let DfsEvent::BackEdge(_, header) = event {
+                self.loop_headers.insert(header);
+            }
+        });
     }
     fn new(function: Function) -> Self {
         let mut this = Self {
             function,
             loop_headers: FxHashSet::default(),
             label_to_node: FxHashMap::default(),
+            dom_idx: DomIndex::default(),
+            post_idx: DomIndex::default(),
         };
         this.find_loop_headers();
         this
@@ -68,15 +89,13 @@ impl GraphStructurer {
     fn try_match_pattern(
         &mut self,
         node: NodeIndex,
-        dominators: &Dominators<NodeIndex>,
-        post_dom: &Dominators<NodeIndex>,
+        dominators: &IDom<NodeIndex>,
+        post_dom: &IDom<NodeIndex>,
     ) -> bool {
         let successors = self.function.successor_blocks(node).collect_vec();
 
         
         if self.try_collapse_loop(node, dominators, post_dom) {
-            self.find_loop_headers();
-            
             return true;
         }
 
@@ -86,57 +105,55 @@ impl GraphStructurer {
 
         let changed = match successors.len() {
             0 => false,
-            1 => {
-                
-                self.match_jump(node, Some(successors[0]))
-            }
+            1 => self.match_jump(node, Some(successors[0])),
             2 => {
-                let (then_target, else_target) = self
+                let Some((then_target, else_target)) = self
                     .function
                     .conditional_edges(node)
-                    .unwrap()
-                    .map(|e| e.target());
+                    .map(|e| e.map(|x| x.target()))
+                else {
+                    return false;
+                };
                 self.match_conditional(node, then_target, else_target)
             }
-
-            _ => unreachable!(),
+            _ => false,
         };
 
         
         changed
     }
 
-    fn match_blocks(&mut self) -> bool {
-        let dfs = Dfs::new(self.function.graph(), self.function.entry().unwrap())
+    fn match_blocks(
+        &mut self,
+        dominators: &IDom<NodeIndex>,
+        post_dom: &IDom<NodeIndex>,
+    ) -> bool {
+        let Some(entry) = *self.function.entry() else {
+            return false;
+        };
+        let dfs = Dfs::new(self.function.graph(), entry)
             .iter(self.function.graph())
             .collect::<FxHashSet<_>>();
-        let mut dfs_postorder =
-            DfsPostOrder::new(self.function.graph(), self.function.entry().unwrap());
-
-        // Compute dominators once per pass — they're only invalidated lazily
-        let mut dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
-        let mut post_dom = post_dominators(self.function.graph_mut());
-        let mut changed = false;
-        let mut doms_dirty = false;
-
+        let mut dfs_postorder = DfsPostOrder::new(self.function.graph(), entry);
+        let mut order = Vec::new();
         while let Some(node) = dfs_postorder.next(self.function.graph()) {
-            if doms_dirty {
-                // Only recompute dominators when something actually changed
-                dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
-                post_dom = post_dominators(self.function.graph_mut());
-                doms_dirty = false;
-            }
-            let matched = self.try_match_pattern(node, &dominators, &post_dom);
-            if matched {
-                doms_dirty = true;
-                changed = true;
-            }
+            order.push(node);
         }
 
-        // Recomputation for disconnected nodes pass
-        if doms_dirty {
-            dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
-            post_dom = post_dominators(self.function.graph_mut());
+        let mut changed = false;
+        let mut n_checked = 0u32;
+
+        for node in order {
+            n_checked += 1;
+            if n_checked & 15 == 0 && cfg::past_decompile_deadline() {
+                return changed;
+            }
+            if !self.function.has_block(node) {
+                continue;
+            }
+            if self.try_match_pattern(node, &dominators, &post_dom) {
+                changed = true;
+            }
         }
 
         for node in self
@@ -172,11 +189,25 @@ impl GraphStructurer {
         let (source, target) = self.function.graph().edge_endpoints(edge).unwrap();
         if self.function.graph().edge_weight(edge).unwrap().branch_type == BranchType::Unconditional
             && self.function.predecessor_blocks(target).count() == 1
+            && self.function.successor_blocks(source).count() == 1
         {
-            assert!(self.function.successor_blocks(source).count() == 1);
-            
+            let args = self
+                .function
+                .graph()
+                .edge_weight(edge)
+                .unwrap()
+                .arguments
+                .clone();
             let edges = self.function.remove_edges(target);
-            let block = self.function.remove_block(target).unwrap();
+            let mut block = self.function.remove_block(target).unwrap();
+            if let Some(assign) = parallel_assign_from_args(&args) {
+                let at = if block.first().is_some_and(|s| s.as_label().is_some()) {
+                    1
+                } else {
+                    0
+                };
+                block.0.insert(at, assign.into());
+            }
             self.function.block_mut(source).unwrap().extend(block.0);
             self.function.set_edges(source, edges);
         } else {
@@ -193,9 +224,47 @@ impl GraphStructurer {
                 .unwrap()
                 .push(ast::Goto::new(label).into());
 
-            let edge = self.function.graph_mut().remove_edge(edge).unwrap();
+            let mut edge = self.function.graph_mut().remove_edge(edge).unwrap();
+            if let Some(assign) = parallel_assign_from_args(&edge.arguments) {
+                self.function
+                    .block_mut(goto_block)
+                    .unwrap()
+                    .insert(0, assign.into());
+                edge.arguments.clear();
+            }
             self.function.graph_mut().add_edge(source, goto_block, edge);
         }
+    }
+
+    /// Incoming edge arguments that every remaining predecessor agrees on.
+    fn incoming_trivial_args(&self, node: NodeIndex) -> Vec<(ast::RcLocal, ast::RValue)> {
+        let mut iter = self.function.edges_to_block(node);
+        let Some((_, first)) = iter.next() else {
+            return Vec::new();
+        };
+        let args = first.arguments.clone();
+        if iter.all(|(_, e)| e.arguments == args) {
+            args
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn take_block_applying_args(
+        &mut self,
+        node: NodeIndex,
+        args: &[(ast::RcLocal, ast::RValue)],
+    ) -> ast::Block {
+        let mut block = self.function.remove_block(node).unwrap();
+        if let Some(assign) = parallel_assign_from_args(args) {
+            let at = if block.first().is_some_and(|s| s.as_label().is_some()) {
+                1
+            } else {
+                0
+            };
+            block.insert(at, assign.into());
+        }
+        block
     }
 
     fn remove_last_return(block: ast::Block) -> ast::Block {
@@ -209,60 +278,133 @@ impl GraphStructurer {
     }
 
     fn collapse(&mut self) {
+        let n = self.function.graph().node_count();
+        if n <= 1 {
+            return;
+        }
+        // LunaUX does a 60k-line dump in ~20s. 24×12 CHK dominance runs
+        // on a 15k-node CFG is why we still looked hung: that's hundreds
+        // of full dominator solves. Large graphs: one match per outer
+        // with fresh dominators, then gotos. Small graphs keep the old
+        // inner recompute (cheap when n is tiny).
+        // Nested diamonds collapse one layer per outer. Sequential diamonds
+        // all collapse in one match_blocks pass. Huge CFGs: fewer CHK
+        // solves, more gotos, still full SSA before we get here.
+        let large = n > 2000;
+        // v7 left 61 unstructured fors + 521 gotos on ClientRenderer
+        // because huge CFGs only got 2–4 match rounds. Extra rounds are
+        // still O(n) per pass (not the old O(E·dominators) hang).
+        let (outer_cap, inner_cap, insert_cap) = if n > 25000 {
+            (4u32, 2u32, 2048u32)
+        } else if n > 8000 {
+            (6u32, 2u32, 1024u32)
+        } else if large {
+            (8u32, 2u32, 512u32)
+        } else if n > 400 {
+            (16u32, 6u32, 96u32)
+        } else {
+            (24u32, 12u32, 64u32)
+        };
+
+        let mut guard = 0u32;
         loop {
-            while self.match_blocks() {}
-            if self.function.graph().node_count() == 1 {
+            if cfg::past_decompile_deadline() {
                 break;
             }
-            
+            guard += 1;
+            if guard > outer_cap {
+                break;
+            }
+            self.find_loop_headers();
+            // Terminal for-loops (body always returns) have no back-edge,
+            // so they never become loop headers. Medal-improved collapses
+            // those here; without it they print as unstructured for-IR.
+            // v7 skipped this on n>8000, which is the ClientRenderer
+            // event-handler CFG — 61 leftover init/next sites.
+            let tcap = if n > 25000 { 2u32 } else { 4u32 };
+            let mut t = 0u32;
+            while t < tcap && self.collapse_terminal_for_loop() {
+                t += 1;
+            }
+            let Some(entry) = *self.function.entry() else {
+                break;
+            };
+            let mut dominators = compute_idoms(self.function.graph(), entry);
+            let mut post_dom = if self.loop_headers.is_empty() {
+                IDom::dummy(entry)
+            } else {
+                post_dominators(self.function.graph())
+            };
+            self.dom_idx = DomIndex::build(self.function.graph().node_indices(), &dominators);
+            self.post_idx = DomIndex::build(self.function.graph().node_indices(), &post_dom);
+
+            let mut inner = 0u32;
+            let mut graph_changed = false;
+            while inner < inner_cap {
+                if inner > 0 && !large {
+                    dominators = compute_idoms(self.function.graph(), entry);
+                    post_dom = if self.loop_headers.is_empty() {
+                        IDom::dummy(entry)
+                    } else {
+                        post_dominators(self.function.graph())
+                    };
+                    self.dom_idx =
+                        DomIndex::build(self.function.graph().node_indices(), &dominators);
+                    self.post_idx =
+                        DomIndex::build(self.function.graph().node_indices(), &post_dom);
+                }
+                if !self.match_blocks(&dominators, &post_dom) {
+                    break;
+                }
+                graph_changed = true;
+                inner += 1;
+            }
+            if self.function.graph().node_count() <= 1 {
+                break;
+            }
+
+            let Some(entry) = *self.function.entry() else {
+                break;
+            };
+            // Matching rewrote the CFG — recompute. Otherwise the first
+            // solve is still valid and a second HashMap CHK used to cost
+            // as much as the whole decompile.
+            let dominators = if graph_changed {
+                compute_idoms(self.function.graph(), entry)
+            } else {
+                dominators
+            };
+            let dom_idx = DomIndex::build(self.function.graph().node_indices(), &dominators);
             let edges = self.function.graph().edge_indices().collect::<Vec<_>>();
 
-            // Cache dominators for the edge loop — compute once, not per-edge
-            let dominators = simple_fast(self.function.graph(), self.function.entry().unwrap());
-
-            let mut changed = false;
+            // Insert many gotos in one pass. Matching after every edge was
+            // O(E × dominators) and never returned on large CFGs.
+            let mut inserted = 0u32;
             for &edge in &edges {
+                if inserted >= insert_cap {
+                    break;
+                }
                 if self.function.graph().edge_weight(edge).is_none() {
                     continue;
                 }
-
                 let (source, target) = self.function.graph().edge_endpoints(edge).unwrap();
-                let target_dominators = dominators.dominators(target);
-                let source_dominators = dominators.dominators(source);
-                
-                if target_dominators.is_none() || source_dominators.is_none() {
+                if dom_idx.dominates(source, target) || dom_idx.dominates(target, source) {
                     continue;
                 }
-                let mut target_dominators = target_dominators.unwrap();
-                let mut source_dominators = source_dominators.unwrap();
-                if target_dominators.contains(&source) || source_dominators.contains(&target) {
-                    continue;
-                }
-
                 self.insert_goto_for_edge(edge);
-                self.find_loop_headers();
-                changed = self.match_blocks();
-                if changed {
-                    break;
-                }
+                inserted += 1;
             }
-
-            if !changed {
-                for edge in edges {
-                    if self.function.graph().edge_weight(edge).is_none() {
-                        continue;
-                    }
+            if inserted == 0 {
+                if let Some(&edge) = edges
+                    .iter()
+                    .find(|e| self.function.graph().edge_weight(**e).is_some())
+                {
                     self.insert_goto_for_edge(edge);
-                    self.find_loop_headers();
-                    changed = self.match_blocks();
-                    if changed {
-                        break;
-                    }
-                }
-                if !changed {
+                } else {
                     break;
                 }
             }
+            self.find_loop_headers();
         }
     }
 
@@ -270,7 +412,16 @@ impl GraphStructurer {
         self.collapse();
         if self.function.graph().node_count() != 1 {
             let mut res_block = ast::Block::default();
-            let entry = self.function.entry().unwrap();
+            let Some(entry) = *self.function.entry() else {
+                return res_block;
+            };
+            // Snapshot before remove_block drops predecessor edges.
+            let incoming: FxHashMap<NodeIndex, Vec<(ast::RcLocal, ast::RValue)>> = self
+                .function
+                .graph()
+                .node_indices()
+                .map(|n| (n, self.incoming_trivial_args(n)))
+                .collect();
             let mut stack = vec![entry];
             let mut visited = FxHashSet::default();
             while let Some(node) = stack.pop() {
@@ -306,15 +457,16 @@ impl GraphStructurer {
                     }
                 }
 
-                let block = self.function.remove_block(node).unwrap();
+                let empty: &[(ast::RcLocal, ast::RValue)] = &[];
+                let block =
+                    self.take_block_applying_args(node, incoming.get(&node).map_or(empty, |v| v));
                 let mut goto_destinations = FxHashSet::default();
                 collect_gotos(&block, &mut goto_destinations);
                 for label in goto_destinations {
-                    
-                    
-                    let target_node = self.label_to_node[&label];
-                    if self.function.has_block(target_node) {
-                        stack.push(target_node);
+                    if let Some(&target_node) = self.label_to_node.get(&label) {
+                        if self.function.has_block(target_node) {
+                            stack.push(target_node);
+                        }
                     }
                 }
                 if let Some(ast::Statement::Goto(goto)) = res_block.last()
@@ -333,7 +485,9 @@ impl GraphStructurer {
             }
             
             for node in self.function.graph().node_indices().collect::<Vec<_>>() {
-                let block = self.function.remove_block(node).unwrap();
+                let empty: &[(ast::RcLocal, ast::RValue)] = &[];
+                let block =
+                    self.take_block_applying_args(node, incoming.get(&node).map_or(empty, |v| v));
                 if !block
                     .first()
                     .is_some_and(|s| matches!(s, ast::Statement::Label(_)))
@@ -344,12 +498,12 @@ impl GraphStructurer {
             }
 
             res_block
-        } else {
+        } else if let Some(entry) = *self.function.entry() {
             Self::remove_last_return(
-                self.function
-                    .remove_block(self.function.entry().unwrap())
-                    .unwrap(),
+                self.function.remove_block(entry).unwrap_or_default(),
             )
+        } else {
+            ast::Block::default()
         }
     }
 }

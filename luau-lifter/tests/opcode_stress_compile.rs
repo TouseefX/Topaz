@@ -250,7 +250,7 @@ fn compile_and_decompile_every_stress_source() {
             failures.push((name, "decompiler dropped a handled instruction".into()));
             continue;
         }
-        if !output.starts_with("-- Decomplied with Topaz") {
+        if !output.starts_with("-- Decompiled with Topaz") {
             failures.push((
                 name,
                 format!("output missing standard header; first 80 chars: {:?}", &output[..output.len().min(80)])

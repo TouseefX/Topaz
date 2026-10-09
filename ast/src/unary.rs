@@ -87,13 +87,19 @@ impl Reduce for Unary {
             }
             (
                 RValue::Unary(Unary {
-                    box value,
+                    value,
                     operation: UnaryOperation::Not,
                 }),
                 UnaryOperation::Not,
-            ) => ensure_boolean(value.reduce_condition()),
+            ) => ensure_boolean((*value).reduce_condition()),
             (RValue::Literal(Literal::Number(value)), UnaryOperation::Negate) => {
                 RValue::Literal(Literal::Number(-value))
+            }
+            (RValue::Literal(Literal::Integer(value)), UnaryOperation::Negate) => {
+                RValue::Literal(match value.checked_neg() {
+                    Some(n) => Literal::Integer(n),
+                    None => Literal::Number(-(value as f64)),
+                })
             }
             (RValue::Literal(Literal::String(value)), UnaryOperation::Length) => {
                 
@@ -237,11 +243,11 @@ impl Reduce for Unary {
             }
             (
                 RValue::Unary(Unary {
-                    box value,
+                    value,
                     operation: UnaryOperation::Not,
                 }),
                 UnaryOperation::Not,
-            ) => value.reduce_condition(),
+            ) => (*value).reduce_condition(),
             (RValue::Literal(Literal::Number(value)), UnaryOperation::Negate) => {
                 RValue::Literal(Literal::Number(-value))
             }

@@ -2,7 +2,6 @@ use ast::{LocalRw, Reduce, SideEffects, Traverse, UnaryOperation};
 
 use itertools::Itertools;
 use petgraph::{
-    algo::dominators::Dominators,
     stable_graph::{EdgeIndex, NodeIndex},
     visit::{DfsPostOrder, EdgeRef},
     Direction,
@@ -13,6 +12,7 @@ use tuple::Map;
 use crate::{
     block::{BlockEdge, BranchType},
     function::Function,
+    DomIndex,
 };
 
 #[derive(Debug)]
@@ -71,7 +71,9 @@ fn simplify_condition(function: &mut Function, node: NodeIndex) -> bool {
             && unary.operation == UnaryOperation::Not
         {
             if_stat.condition = *unary.value.clone();
-            let (then_edge, else_edge) = function.conditional_edges(node).unwrap().map(|e| e.id());
+            let Some((then_edge, else_edge)) = function.conditional_edges(node).map(|e| e.map(|x| x.id())) else {
+                return false;
+            };
             let (then_edge, else_edge) = function.graph_mut().index_twice_mut(then_edge, else_edge);
             then_edge.branch_type = BranchType::Else;
             else_edge.branch_type = BranchType::Then;
@@ -176,7 +178,7 @@ fn match_conditional_sequence(
             }
             None
         };
-        let first_terminator = function.conditional_edges(node).unwrap();
+        let first_terminator = function.conditional_edges(node)?;
         let (then_edge, else_edge) = first_terminator;
         if function.predecessor_blocks(then_edge.target()).count() == 1
             && then_edge.weight().arguments.is_empty()
@@ -189,7 +191,7 @@ fn match_conditional_sequence(
             && let Some((second_condition, assign)) =
                 test_pattern(then_edge.target(), else_edge.target(), else_args)
         {
-            let second_terminator = function.conditional_edges(then_edge.target()).unwrap();
+            let second_terminator = function.conditional_edges(then_edge.target())?;
             if second_terminator.0.target() == else_edge.target() {
                 Some(ConditionalSequencePattern {
                     first_node: node,
@@ -230,7 +232,7 @@ fn match_conditional_sequence(
             && let Some((second_condition, assign)) =
                 test_pattern(else_edge.target(), then_edge.target(), then_args)
         {
-            let second_terminator = function.conditional_edges(else_edge.target()).unwrap();
+            let second_terminator = function.conditional_edges(else_edge.target())?;
             if first_terminator.0.target() == second_terminator.0.target() {
                 Some(ConditionalSequencePattern {
                     first_node: node,
@@ -270,31 +272,58 @@ fn match_conditional_sequence(
 
 pub fn structure_conditionals(function: &mut Function) -> bool {
     let mut did_structure = false;
-    
-    let mut dfs = DfsPostOrder::new(function.graph(), function.entry().unwrap());
+    let Some(entry) = *function.entry() else {
+        return false;
+    };
+    // Snapshot first. Walking DfsPostOrder while mutating the graph (the
+    // old loop) never returned on scripts like CameraShaker.
+    let mut dfs = DfsPostOrder::new(function.graph(), entry);
+    let mut order = Vec::new();
     while let Some(node) = dfs.next(function.graph()) {
+        order.push(node);
+    }
+    // One O(n) index; is_truthy_transitive used to rescan every block for
+    // every if (O(n²) — minutes on 60k-line dumps).
+    let defs = index_ssa_defs(function);
+    for node in order {
+        if crate::past_decompile_deadline() {
+            break;
+        }
+        if !function.has_block(node) {
+            continue;
+        }
         if simplify_condition(function, node) {
             did_structure = true;
         }
-        if structure_bool_conditional(function, node) {
+        if function.has_block(node) && try_constant_branch(function, node, &defs) {
+            did_structure = true;
+            continue;
+        }
+        if function.has_block(node) && structure_bool_conditional(function, node, &defs) {
             did_structure = true;
         }
 
+        if !function.has_block(node) {
+            continue;
+        }
         if let Some(pattern) = match_conditional_sequence(function, node)
-            
             && &Some(pattern.second_node) != function.entry()
         {
             let second_to_sc_edges = function
                 .edges(pattern.second_node)
                 .filter(|e| e.target() == pattern.short_circuit)
                 .collect::<Vec<_>>();
-            assert!(second_to_sc_edges.len() == 1);
+            if second_to_sc_edges.len() != 1 {
+                continue;
+            }
             let second_to_sc_args = second_to_sc_edges[0].weight().arguments.clone();
             let first_to_sc_edges = function
                 .edges(pattern.first_node)
                 .filter(|e| e.target() == pattern.short_circuit)
                 .collect::<Vec<_>>();
-            assert!(first_to_sc_edges.len() == 1);
+            if first_to_sc_edges.len() != 1 {
+                continue;
+            }
             let first_to_sc_edge = first_to_sc_edges[0].id();
             for arg in &mut function
                 .graph_mut()
@@ -314,7 +343,9 @@ pub fn structure_conditionals(function: &mut Function) -> bool {
                 second_terminator.0
             };
             let other_edge = other_edge.id();
-            assert!(skip_over_node(function, pattern.first_node, other_edge));
+            if !skip_over_node(function, pattern.first_node, other_edge) {
+                continue;
+            }
 
             let mut removed_block = function.remove_block(pattern.second_node).unwrap();
             let first_node = pattern.first_node;
@@ -345,31 +376,43 @@ pub fn structure_conditionals(function: &mut Function) -> bool {
 }
 
 
-fn is_truthy(rvalue: ast::RValue) -> Option<bool> {
-    match rvalue.reduce_condition() {
-        
+fn is_truthy(rvalue: &ast::RValue) -> Option<bool> {
+    match rvalue {
         ast::RValue::Unary(ast::Unary {
             operation: ast::UnaryOperation::Length,
             ..
         }) => Some(true),
         ast::RValue::Literal(
-            ast::Literal::Boolean(true) | ast::Literal::Number(_) | ast::Literal::String(_),
+            ast::Literal::Boolean(true)
+            | ast::Literal::Number(_)
+            | ast::Literal::Integer(_)
+            | ast::Literal::String(_)
+            | ast::Literal::Vector(..),
         )
         | ast::RValue::Table(_)
         | ast::RValue::Closure(_) => Some(true),
-        ast::RValue::Literal(ast::Literal::Nil | ast::Literal::Boolean(_)) => Some(false),
-        _ => None,
+        // `a .. b` is always a string, and strings are truthy in Lua.
+        ast::RValue::Binary(ast::Binary {
+            operation: ast::BinaryOperation::Concat,
+            ..
+        }) => Some(true),
+        ast::RValue::Literal(ast::Literal::Nil | ast::Literal::Boolean(false)) => Some(false),
+        ast::RValue::Local(_) => None,
+        other => match other.clone().reduce_condition() {
+            ast::RValue::Literal(ast::Literal::Boolean(b)) => Some(b),
+            ast::RValue::Literal(ast::Literal::Nil) => Some(false),
+            _ => None,
+        },
     }
 }
 
-/// Finds the single defining expression of `local` anywhere in `function`.
-/// Only valid while `function` is still in pure SSA form (i.e. before
-/// `Destructor::destruct()` runs), since that's what guarantees each local
-/// has exactly one static assignment to look for.
-fn local_defining_value<'a>(
-    function: &'a Function,
-    local: &ast::RcLocal,
-) -> Option<&'a ast::RValue> {
+enum SsaDef {
+    Copy(ast::RcLocal),
+    Known(bool),
+}
+
+fn index_ssa_defs(function: &Function) -> FxHashMap<ast::RcLocal, SsaDef> {
+    let mut defs = FxHashMap::default();
     for node in function.graph().node_indices() {
         let Some(block) = function.block(node) else {
             continue;
@@ -378,35 +421,46 @@ fn local_defining_value<'a>(
             if let Some(assign) = stat.as_assign()
                 && assign.left.len() == 1
                 && assign.right.len() == 1
-                && assign.left[0].as_local() == Some(local)
+                && let Some(local) = assign.left[0].as_local()
             {
-                return Some(&assign.right[0]);
+                let kind = if let ast::RValue::Local(src) = &assign.right[0] {
+                    SsaDef::Copy(src.clone())
+                } else if let Some(t) = is_truthy(&assign.right[0]) {
+                    SsaDef::Known(t)
+                } else {
+                    continue;
+                };
+                defs.insert(local.clone(), kind);
             }
         }
     }
-    None
+    defs
 }
 
-/// Like `is_truthy`, but when `rvalue` is just a reference to some other
-/// local (e.g. a branch of an `if` that reuses a table built earlier in the
-/// function, rather than constructing one inline), this follows the local's
-/// single SSA definition and checks that instead of giving up. Bounded and
-/// guarded against cycles since copy chains are the only thing we walk
-/// through here.
-fn is_truthy_transitive(function: &Function, mut rvalue: ast::RValue) -> Option<bool> {
-    let mut seen = std::collections::HashSet::new();
-    loop {
-        if let Some(truthy) = is_truthy(rvalue.clone()) {
-            return Some(truthy);
-        }
-        let ast::RValue::Local(local) = &rvalue else {
-            return None;
-        };
-        if !seen.insert(local.clone()) {
-            return None;
-        }
-        rvalue = local_defining_value(function, local)?.clone();
+fn is_truthy_transitive(
+    defs: &FxHashMap<ast::RcLocal, SsaDef>,
+    rvalue: &ast::RValue,
+) -> Option<bool> {
+    if let Some(truthy) = is_truthy(rvalue) {
+        return Some(truthy);
     }
+    let ast::RValue::Local(start) = rvalue else {
+        return None;
+    };
+    let mut cur = start.clone();
+    for _ in 0..64 {
+        match defs.get(&cur) {
+            Some(SsaDef::Known(t)) => return Some(*t),
+            Some(SsaDef::Copy(next)) => {
+                if next == &cur {
+                    return None;
+                }
+                cur = next.clone();
+            }
+            None => return None,
+        }
+    }
+    None
 }
 
 
@@ -415,6 +469,7 @@ fn make_bool_conditional(
     node: NodeIndex,
     mut then_value: ast::RValue,
     mut else_value: ast::RValue,
+    defs: &FxHashMap<ast::RcLocal, SsaDef>,
 ) -> Option<ast::RValue> {
     if let ast::RValue::Literal(ast::Literal::Boolean(then_bool)) = then_value
         && let ast::RValue::Literal(ast::Literal::Boolean(else_bool)) = else_value
@@ -447,15 +502,15 @@ fn make_bool_conditional(
             .condition
             .clone();
 
-        let then_truthy = match is_truthy_transitive(function, then_value.clone()) {
+        let then_truthy = match is_truthy_transitive(defs, &then_value) {
             Some(truthy) => truthy,
             None if !then_value.has_side_effects() => {
                 let value = match &condition {
                     ast::RValue::Binary(ast::Binary {
-                        right: box value,
+                        right,
                         operation: ast::BinaryOperation::And,
                         ..
-                    }) => value,
+                    }) => right.as_ref(),
                     value => value,
                 };
                 !value.has_side_effects() && *value == then_value
@@ -463,7 +518,7 @@ fn make_bool_conditional(
             None => false,
         };
         
-        let else_truthy = is_truthy_transitive(function, else_value.clone()).is_some_and(|v| v);
+        let else_truthy = is_truthy_transitive(defs, &else_value).is_some_and(|v| v);
 
         let block = function.block_mut(node).unwrap();
         let r#if = block.last_mut().unwrap().as_if_mut().unwrap();
@@ -482,12 +537,12 @@ fn make_bool_conditional(
             let cond =
                 std::mem::replace(&mut r#if.condition, ast::Literal::Nil.into()).reduce_condition();
             if let ast::RValue::Unary(ast::Unary {
-                box value,
+                value,
                 operation: ast::UnaryOperation::Not,
             }) = cond
             {
                 std::mem::swap(&mut then_value, &mut else_value);
-                value
+                *value
             } else {
                 cond
             }
@@ -505,7 +560,11 @@ fn make_bool_conditional(
 }
 
 
-fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool {
+fn structure_bool_conditional(
+    function: &mut Function,
+    node: NodeIndex,
+    defs: &FxHashMap<ast::RcLocal, SsaDef>,
+) -> bool {
     let match_triangle = |assigner, next, next_args: FxHashMap<ast::RcLocal, ast::RValue>| {
         if let Some(edge_to_next) = function.unconditional_edge(assigner)
             && edge_to_next.target() == next
@@ -526,7 +585,9 @@ fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool 
     };
 
     if let Some(ast::Statement::If(_)) = function.block(node).unwrap().last() {
-        let (then_edge, else_edge) = function.conditional_edges(node).unwrap();
+        let Some((then_edge, else_edge)) = function.conditional_edges(node) else {
+            return false;
+        };
         if then_edge.target() == else_edge.target() {
             if let Ok((res_local, then_value, else_value)) = then_edge
                 .weight()
@@ -548,7 +609,7 @@ fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool 
                 let then_value = then_value.clone();
                 let else_value = else_value.clone();
 
-                if let Some(res) = make_bool_conditional(function, node, then_value, else_value) {
+                if let Some(res) = make_bool_conditional(function, node, then_value, else_value, defs) {
                     function
                         .graph_mut()
                         .edge_weight_mut(then_edge)
@@ -596,7 +657,7 @@ fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool 
                 else_edge.id(),
             );
             let res_local = res_local.clone();
-            if let Some(res) = make_bool_conditional(function, node, then_value, else_value) {
+            if let Some(res) = make_bool_conditional(function, node, then_value, else_value, defs) {
                 function
                     .graph_mut()
                     .edge_weight_mut(then_edge)
@@ -645,7 +706,7 @@ fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool 
                 function.unconditional_edge(else_block).unwrap().id(),
             );
             let res_local = res_local.clone();
-            if let Some(res) = make_bool_conditional(function, node, then_value, else_value) {
+            if let Some(res) = make_bool_conditional(function, node, then_value, else_value, defs) {
                 function
                     .graph_mut()
                     .edge_weight_mut(then_edge)
@@ -702,7 +763,7 @@ fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool 
                 function.unconditional_edge(then_block).unwrap().id(),
                 function.unconditional_edge(else_block).unwrap().id(),
             );
-            if let Some(res) = make_bool_conditional(function, node, then_value, else_value) {
+            if let Some(res) = make_bool_conditional(function, node, then_value, else_value, defs) {
                 function
                     .graph_mut()
                     .edge_weight_mut(then_edge)
@@ -759,7 +820,7 @@ fn structure_bool_conditional(function: &mut Function, node: NodeIndex) -> bool 
             let then_value = then_value.clone();
             let else_value = else_value.clone();
 
-            if let Some(res) = make_bool_conditional(function, node, then_value, else_value) {
+            if let Some(res) = make_bool_conditional(function, node, then_value, else_value, defs) {
                 function.remove_block(then_target);
                 function.remove_block(else_target);
                 let block = function.block_mut(node).unwrap();
@@ -782,14 +843,12 @@ fn match_method_call(call: &ast::Call) -> Option<(&ast::RValue, &str)> {
     
     if !call.arguments.is_empty()
         && !call.arguments[0].has_side_effects()
-        && let Some(ast::Index {
-            box left,
-            right: box ast::RValue::Literal(ast::Literal::String(index)),
-        }) = call.value.as_index()
-        && left == &call.arguments[0]
+        && let Some(idx) = call.value.as_index()
+        && let ast::RValue::Literal(ast::Literal::String(name)) = idx.right.as_ref()
+        && idx.left.as_ref() == &call.arguments[0]
     {
-        if let Ok(index) = std::str::from_utf8(index) {
-            Some((left, index))
+        if let Ok(method) = std::str::from_utf8(name) {
+            Some((idx.left.as_ref(), method))
         } else {
             None
         }
@@ -893,6 +952,59 @@ fn skip_over_node(
     did_structure
 }
 
+/// Replace `if <always-true> then A else B` with a jump to A (and the
+/// opposite for always-false). Luau emits `JUMPIF` on a concat result
+/// after `if s == "" then t = n.."h" else t = s.." "..n.."h"`; that extra
+/// branch is constant and blocks diamond matching, so collapse dumps gotos.
+fn try_constant_branch(
+    function: &mut Function,
+    node: NodeIndex,
+    defs: &FxHashMap<ast::RcLocal, SsaDef>,
+) -> bool {
+    let Some(block) = function.block(node) else {
+        return false;
+    };
+    let Some(ast::Statement::If(if_stat)) = block.last() else {
+        return false;
+    };
+    let Some(truthy) = is_truthy_transitive(defs, &if_stat.condition) else {
+        return false;
+    };
+    let Some((then_edge, else_edge)) = function.conditional_edges(node) else {
+        return false;
+    };
+    let (keep, args) = if truthy {
+        (then_edge.target(), then_edge.weight().arguments.clone())
+    } else {
+        (else_edge.target(), else_edge.weight().arguments.clone())
+    };
+    let cond = function
+        .block_mut(node)
+        .unwrap()
+        .pop()
+        .unwrap()
+        .into_if()
+        .unwrap()
+        .condition;
+    if cond.has_side_effects() {
+        function.block_mut(node).unwrap().push(
+            ast::Assign {
+                left: vec![ast::RcLocal::default().into()],
+                right: vec![cond],
+                prefix: true,
+                parallel: false,
+                compound_op: None,
+            }
+            .into(),
+        );
+    }
+    function.remove_edges(node);
+    let mut edge = BlockEdge::new(BranchType::Unconditional);
+    edge.arguments = args;
+    function.set_edges(node, vec![(keep, edge)]);
+    true
+}
+
 fn try_remove_unnecessary_condition(function: &mut Function, node: NodeIndex) -> bool {
     let block = function.block(node).unwrap();
     if !block.is_empty()
@@ -959,7 +1071,7 @@ fn is_for_next(function: &Function, node: NodeIndex) -> bool {
 }
 
 
-pub fn structure_jumps(function: &mut Function, dominators: &Dominators<NodeIndex>) -> bool {
+pub fn structure_jumps(function: &mut Function, dom_idx: &DomIndex) -> bool {
     let mut did_structure = false;
     for node in function.graph().node_indices().collect_vec() {
         
@@ -988,11 +1100,7 @@ pub fn structure_jumps(function: &mut Function, dominators: &Dominators<NodeInde
                 }
             }
             if function.predecessor_blocks(jump_target).count() == 1
-                && dominators
-                    .dominators(jump_target)
-                    .map(|mut d| d.contains(&node))
-                    .unwrap_or(false)
-                
+                && dom_idx.dominates(node, jump_target)
                 && function.graph().edge_weight(jump_edge).unwrap().arguments.is_empty()
             {
                 

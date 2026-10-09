@@ -1,3 +1,4 @@
+use std::cell::{Cell, RefCell};
 use std::iter;
 use std::{
     borrow::Cow,
@@ -6,11 +7,61 @@ use std::{
 
 use itertools::Itertools;
 
+use triomphe::Arc;
+
 use crate::{
-    Assign, Binary, BinaryOperation, Block, Call, Closure, GenericFor, If, Index, LValue, Literal,
-    MethodCall, NumericFor, RValue, Reduce, Repeat, Return, Select, Statement, Table, Unary,
-    UnaryOperation, While,
+    Assign, Binary, BinaryOperation, Block, Call, Closure, GenericFor, GenericForInit,
+    GenericForNext, If, Index, LValue, Literal, MethodCall, NumForInit, NumForNext, NumericFor,
+    RValue, Reduce, Repeat, Return, Select, SharedBlock, Statement, Table, Unary, UnaryOperation,
+    While, reset_walk_seen,
 };
+
+thread_local! {
+    static FORMAT_PATH: RefCell<Vec<*const ()>> = const { RefCell::new(Vec::new()) };
+    static FORMAT_STEPS: Cell<u32> = const { Cell::new(0) };
+    static FORMAT_ABORTED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Hard cap on SharedBlock / statement visits per `Formatter::format`.
+/// Path-only cycle detection still reprints DAG-shared bodies (needed so
+/// a then-block used by two `if`s is not empty on the second parent).
+/// Shallow `Statement::clone()` of a 6k-node else-DAG made that
+/// exponential; without a step cap `Display` never returned.
+const MAX_FORMAT_STEPS: u32 = 1_500_000;
+
+fn format_tick() -> bool {
+    if crate::past_post_deadline() {
+        FORMAT_ABORTED.with(|c| c.set(true));
+        return false;
+    }
+    FORMAT_STEPS.with(|c| {
+        let n = c.get().saturating_add(1);
+        c.set(n);
+        if n > MAX_FORMAT_STEPS {
+            FORMAT_ABORTED.with(|a| a.set(true));
+            false
+        } else {
+            true
+        }
+    })
+}
+
+fn format_path_push(ptr: *const ()) -> bool {
+    FORMAT_PATH.with(|p| {
+        if p.borrow().iter().any(|&x| x == ptr) {
+            false
+        } else {
+            p.borrow_mut().push(ptr);
+            true
+        }
+    })
+}
+
+fn format_path_pop() {
+    FORMAT_PATH.with(|p| {
+        p.borrow_mut().pop();
+    });
+}
 
 pub enum IndentationMode {
     Spaces(u8),
@@ -38,7 +89,7 @@ impl fmt::Display for IndentationMode {
 
 impl Default for IndentationMode {
     fn default() -> Self {
-        Self::Tab
+        Self::Spaces(4)
     }
 }
 
@@ -70,12 +121,50 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         output: &'a mut W,
         indentation_mode: IndentationMode,
     ) -> fmt::Result {
+        reset_walk_seen();
+        FORMAT_PATH.with(|p| p.borrow_mut().clear());
+        FORMAT_STEPS.with(|c| c.set(0));
+        FORMAT_ABORTED.with(|c| c.set(false));
         let mut formatter = Self {
             indentation_level: 0,
             indentation_mode,
             output,
         };
-        formatter.format_block_no_indent(main)
+        let result = formatter.format_block_no_indent(main);
+        if FORMAT_ABORTED.with(|c| c.get()) {
+            let _ = writeln!(
+                formatter.output,
+                "\n-- formatter stopped (time budget or step cap)"
+            );
+        }
+        result
+    }
+
+    const MAX_NEST: usize = 256;
+
+    fn format_shared_block(&mut self, shared: &SharedBlock) -> fmt::Result {
+        // Skip only when this Arc is already on the *current* recursion
+        // path (a cycle). A global seen-set treated DAG sharing as a
+        // cycle and printed thousands of empty `if`s: the first parent
+        // got the body, every later parent printed `then end`.
+        if !format_tick() {
+            return Ok(());
+        }
+        let ptr = Arc::as_ptr(shared) as *const ();
+        if !format_path_push(ptr) {
+            return Ok(());
+        }
+        if self.indentation_level > Self::MAX_NEST {
+            format_path_pop();
+            return Ok(());
+        }
+        let result = if let Some(body) = shared.try_lock() {
+            self.format_block(&body)
+        } else {
+            Ok(())
+        };
+        format_path_pop();
+        result
     }
 
     fn indent(&mut self) -> fmt::Result {
@@ -94,7 +183,28 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         )
     }
 
+    /// Medal-improved: `(function() end)[1]()` is valid, but without wrapping
+    /// the callee Lua parses `function() end[1]()` as a syntax error.
+    fn starts_with_parenthesized_rvalue(value: &RValue) -> bool {
+        match value {
+            RValue::Binary(_) | RValue::Unary(_) | RValue::Closure(_) => true,
+            RValue::Index(index) => Self::starts_with_parenthesized_rvalue(&index.left),
+            RValue::Call(call) => Self::starts_with_parenthesized_rvalue(&call.value),
+            RValue::MethodCall(method_call) => {
+                Self::starts_with_parenthesized_rvalue(&method_call.value)
+            }
+            RValue::Select(Select::Call(call)) => Self::starts_with_parenthesized_rvalue(&call.value),
+            RValue::Select(Select::MethodCall(method_call)) => {
+                Self::starts_with_parenthesized_rvalue(&method_call.value)
+            }
+            _ => false,
+        }
+    }
+
     fn format_block(&mut self, block: &Block) -> fmt::Result {
+        if !format_tick() || self.indentation_level > Self::MAX_NEST {
+            return Ok(());
+        }
         self.indentation_level += 1;
         self.format_block_no_indent(block)?;
         self.indentation_level -= 1;
@@ -119,6 +229,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
                 | Statement::Repeat(_)
                 | Statement::NumericFor(_)
                 | Statement::GenericFor(_)
+                | Statement::If(_)
         )
     }
 
@@ -131,6 +242,12 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 
     fn format_block_no_indent(&mut self, block: &Block) -> fmt::Result {
         for (i, statement) in block.iter().enumerate() {
+            if !format_tick() {
+                return Ok(());
+            }
+            if matches!(statement, Statement::Close(_)) {
+                continue;
+            }
             if i != 0 {
                 writeln!(self.output)?;
                 let prev = &block.0[i - 1];
@@ -138,10 +255,27 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
                     writeln!(self.output)?;
                 }
             }
-            self.format_statement(statement)?;
-            if let Some(next_statement) =
-                block.iter().skip(i + 1).find(|s| s.as_comment().is_none())
+            // Lua forbids `return` unless it is last in the block. Wrap a
+            // mid-block return (from unstructured CFG) as `do return end`.
+            if statement.as_return().is_some()
+                && block.iter().skip(i + 1).any(|s| {
+                    s.as_comment().is_none() && !matches!(s, Statement::Close(_))
+                })
             {
+                self.indent()?;
+                writeln!(self.output, "do")?;
+                self.indentation_level += 1;
+                self.format_statement(statement)?;
+                writeln!(self.output)?;
+                self.indentation_level -= 1;
+                self.indent()?;
+                write!(self.output, "end")?;
+            } else {
+                self.format_statement(statement)?;
+            }
+            if let Some(next_statement) = block.iter().skip(i + 1).find(|s| {
+                s.as_comment().is_none() && !matches!(s, Statement::Close(_))
+            }) {
                 fn is_ambiguous(r: &RValue) -> bool {
                     match r {
                         RValue::Local(_)
@@ -322,7 +456,9 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     }
 
     fn format_closure_parameters(&mut self, closure: &Closure) -> fmt::Result {
-        let function = closure.function.lock();
+        let Some(function) = closure.function.try_lock() else {
+            return write!(self.output, "...");
+        };
         write!(
             self.output,
             "{}",
@@ -353,39 +489,14 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         // their statements at the wrong indent and made the trailing
         // `end` look detached from the `function(...)` header — exactly
         // the broken shape in the Welcome-badge screenshot.
-        let function = closure.function.lock();
-        if !function.body.is_empty() || !closure.upvalues.is_empty() {
+        let Some(function) = closure.function.try_lock() else {
+            return write!(self.output, " ");
+        };
+        if !function.body.is_empty() {
             writeln!(self.output)?;
             self.indentation_level += 1;
-
-            if !closure.upvalues.is_empty() {
-                self.indent()?;
-                write!(self.output, "-- upvalues: ")?;
-                let mut it = closure.upvalues.iter().peekable();
-                while let Some(uv) = it.next() {
-                    match uv {
-                        crate::Upvalue::Copy(copy) => {
-                            write!(self.output, "{} (copy)", copy)?;
-                        }
-                        crate::Upvalue::Ref(lref) => {
-                            write!(self.output, "{} (ref)", lref)?;
-                        }
-                    }
-                    if it.peek().is_some() {
-                        write!(self.output, ", ")?;
-                    }
-                }
-                writeln!(self.output)?;
-            }
-
-            if !function.body.is_empty() {
-                // format_block_no_indent (not format_block) so we don't
-                // bump indentation a second time — we're already one
-                // level deeper than the `function`/`end` keywords.
-                self.format_block_no_indent(&function.body)?;
-                writeln!(self.output)?;
-            }
-
+            self.format_block_no_indent(&function.body)?;
+            writeln!(self.output)?;
             self.indentation_level -= 1;
             self.indent()
         } else {
@@ -397,27 +508,13 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 		write!(self.output, "function(")?;
 		self.format_closure_parameters(closure)?;
 		write!(self.output, ")")?;
-		let function = closure.function.lock();
-		let mut has_comment = false;
-		if let Some(name) = &function.name {
-			write!(self.output, " --[[ {} ]]", name)?;
-			has_comment = true;
-		}
-		if let Some(line) = function.line {
-			if line > 0 {
-				write!(self.output, " -- line: {}", line)?;
-				has_comment = true;
-			}
-		}
-		let is_empty = function.body.is_empty() && closure.upvalues.is_empty();
-		drop(function);
+		let is_empty = closure
+			.function
+			.try_lock()
+			.map(|f| f.body.is_empty())
+			.unwrap_or(true);
 		if is_empty {
-			if has_comment {
-				writeln!(self.output)?;
-				self.indent()?;
-			} else {
-				write!(self.output, " ")?;
-			}
+			write!(self.output, " ")?;
 		} else {
 			self.format_closure_body(closure)?;
 		}
@@ -428,23 +525,13 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 		write!(self.output, "function {}(", name)?;
 		self.format_closure_parameters(closure)?;
 		write!(self.output, ")")?;
-		let function = closure.function.lock();
-		let mut has_comment = false;
-		if let Some(line) = function.line {
-			if line > 0 {
-				write!(self.output, " -- line: {}", line)?;
-				has_comment = true;
-			}
-		}
-		let is_empty = function.body.is_empty() && closure.upvalues.is_empty();
-		drop(function);
+		let is_empty = closure
+			.function
+			.try_lock()
+			.map(|f| f.body.is_empty())
+			.unwrap_or(true);
 		if is_empty {
-			if has_comment {
-				writeln!(self.output)?;
-				self.indent()?;
-			} else {
-				write!(self.output, " ")?;
-			}
+			write!(self.output, " ")?;
 		} else {
 			self.format_closure_body(closure)?;
 		}
@@ -503,6 +590,19 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         }
         Ok(())
     }
+    fn index_chain_is_named(index: &crate::Index) -> bool {
+        match index.right.as_ref() {
+            RValue::Literal(Literal::String(key)) if Self::is_valid_name(key) => {
+                match index.left.as_ref() {
+                    RValue::Index(inner) => Self::index_chain_is_named(inner),
+                    RValue::Global(_) | RValue::Local(_) => true,
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn is_valid_name(name: &[u8]) -> bool {
         // Empty strings and strings that don't start with a letter/underscore
         // cannot be bare identifiers. Emitting ` = nil` for an empty-string
@@ -594,7 +694,8 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
         // Check if left needs wrapping to avoid ambiguous syntax.
         // e.g., `(a or b).method [index]` could be parsed as `(a or b).method([index])`.
         // We need to wrap when the left side is itself an Index (chained indexing).
-        let wrap = Self::should_wrap_left_rvalue(&index.left);
+        let wrap = Self::should_wrap_left_rvalue(&index.left)
+            || Self::starts_with_parenthesized_rvalue(&index.left);
         if wrap {
             write!(self.output, "(")?;
         }
@@ -616,7 +717,8 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     }
 
     pub(crate) fn format_call(&mut self, call: &Call) -> fmt::Result {
-        let wrap = Self::should_wrap_left_rvalue(&call.value);
+        let wrap = Self::should_wrap_left_rvalue(&call.value)
+            || Self::starts_with_parenthesized_rvalue(&call.value);
         if wrap {
             write!(self.output, "(")?;
         }
@@ -631,7 +733,8 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     }
 
     pub(crate) fn format_method_call(&mut self, method_call: &MethodCall) -> fmt::Result {
-        let wrap = Self::should_wrap_left_rvalue(&method_call.value);
+        let wrap = Self::should_wrap_left_rvalue(&method_call.value)
+            || Self::starts_with_parenthesized_rvalue(&method_call.value);
         if wrap {
             write!(self.output, "(")?;
         }
@@ -648,38 +751,69 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
     }
 
     pub(crate) fn format_if(&mut self, r#if: &If) -> fmt::Result {
-        let then_block = r#if.then_block.lock();
-        let else_block = r#if.else_block.lock();
-        if then_block.is_empty() && !else_block.is_empty() {
+        if !format_tick() {
+            return Ok(());
+        }
+        // Never hold then and else together, and never recurse into
+        // `else if` while those guards are live. parking_lot::Mutex is
+        // not reentrant: aliased branches (or elseif-in-else) deadlocked
+        // the 64 MB lift thread at 0% CPU after SSA destruct.
+        let then_empty = r#if
+            .then_block
+            .try_lock()
+            .map(|b| b.is_empty())
+            .unwrap_or(true);
+        let else_empty = r#if
+            .else_block
+            .try_lock()
+            .map(|b| b.is_empty())
+            .unwrap_or(true);
+
+        if then_empty && !else_empty {
             write!(self.output, "if ")?;
             let cond = Unary::new(r#if.condition.clone(), UnaryOperation::Not).reduce_condition();
             self.format_rvalue(&cond)?;
             writeln!(self.output, " then")?;
-            self.format_block(&else_block)?;
+            self.format_shared_block(&r#if.else_block)?;
             writeln!(self.output)?;
             self.indent()?;
             return write!(self.output, "end");
         }
 
         write!(self.output, "if ")?;
-
         self.format_rvalue(&r#if.condition)?;
-
         writeln!(self.output, " then")?;
 
-        if !then_block.is_empty() {
-            self.format_block(&then_block)?;
+        if !then_empty {
+            self.format_shared_block(&r#if.then_block)?;
             writeln!(self.output)?;
         }
 
-        if !else_block.is_empty() {
-            self.indent()?;
-            if let Some(else_if) = else_block.iter().exactly_one().ok().and_then(|s| s.as_if()) {
+        if !else_empty {
+            let else_if = r#if.else_block.try_lock().and_then(|else_block| {
+                else_block
+                    .iter()
+                    .exactly_one()
+                    .ok()
+                    .and_then(|s| s.as_if())
+                    .cloned()
+            });
+            if let Some(else_if) = else_if {
+                let else_ptr = Arc::as_ptr(&r#if.else_block) as *const ();
+                if !format_path_push(else_ptr) || self.indentation_level > Self::MAX_NEST {
+                    writeln!(self.output)?;
+                    self.indent()?;
+                    return write!(self.output, "end");
+                }
+                self.indent()?;
                 write!(self.output, "else")?;
-                return self.format_if(else_if);
+                let result = self.format_if(&else_if);
+                format_path_pop();
+                return result;
             }
+            self.indent()?;
             writeln!(self.output, "else")?;
-            self.format_block(&else_block)?;
+            self.format_shared_block(&r#if.else_block)?;
             writeln!(self.output)?;
         }
 
@@ -716,32 +850,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             if let RValue::Closure(closure) = &assign.right[0] {
                 let left = &assign.left[0];
                 if assign.prefix || left.as_global().is_some() || {
-                    if let LValue::Index(index) = left {
-                        let mut index = index;
-                        let mut valid = true;
-                        loop {
-                            if let box RValue::Literal(Literal::String(key)) = &index.right {
-                                if Self::is_valid_name(key) {
-                                    match index.left {
-                                        box RValue::Index(ref i) => {
-                                            index = i;
-                                            continue;
-                                        }
-                                        box RValue::Global(_) | box RValue::Local(_) => {}
-                                        _ => valid = false,
-                                    }
-                                } else {
-                                    valid = false;
-                                }
-                            } else {
-                                valid = false;
-                            }
-                            break;
-                        }
-                        valid
-                    } else {
-                        false
-                    }
+                    matches!(left, LValue::Index(index) if Self::index_chain_is_named(index))
                 } {
                     return self.format_named_function(left, closure);
                 }
@@ -769,10 +878,6 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             self.format_rvalue(rvalue)?;
         }
 
-        if assign.parallel {
-            write!(self.output, " -- parallel")?;
-        }
-
         Ok(())
     }
 
@@ -783,7 +888,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 
         writeln!(self.output, " do")?;
 
-        self.format_block(&r#while.block.lock())?;
+        self.format_shared_block(&r#while.block)?;
         writeln!(self.output)?;
         self.indent()?;
         write!(self.output, "end")
@@ -791,7 +896,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
 
     pub(crate) fn format_repeat(&mut self, r#repeat: &Repeat) -> fmt::Result {
         writeln!(self.output, "repeat")?;
-        self.format_block(&repeat.block.lock())?;
+        self.format_shared_block(&repeat.block)?;
         writeln!(self.output)?;
         self.indent()?;
 
@@ -815,7 +920,7 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             self.format_rvalue(&numeric_for.step)?;
         }
         writeln!(self.output, " do")?;
-        self.format_block(&numeric_for.block.lock())?;
+        self.format_shared_block(&numeric_for.block)?;
         writeln!(self.output)?;
         self.indent()?;
         write!(self.output, "end")
@@ -845,8 +950,63 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             self.format_rvalue(rvalue)?;
         }
         writeln!(self.output, " do")?;
-        self.format_block(&generic_for.block.lock())?;
+        self.format_shared_block(&generic_for.block)?;
         writeln!(self.output)?;
+        self.indent()?;
+        write!(self.output, "end")
+    }
+
+    fn format_generic_for_init(&mut self, init: &GenericForInit) -> fmt::Result {
+        writeln!(self.output, "-- unstructured generic-for init")?;
+        self.indent()?;
+        self.format_assign(&init.0)
+    }
+
+    fn format_generic_for_next(&mut self, nxt: &GenericForNext) -> fmt::Result {
+        writeln!(self.output, "-- unstructured generic-for next")?;
+        self.indent()?;
+        for (i, lvalue) in nxt.res_locals.iter().enumerate() {
+            if i != 0 {
+                write!(self.output, ", ")?;
+            }
+            self.format_lvalue(lvalue)?;
+        }
+        write!(self.output, " = ")?;
+        self.format_rvalue(&nxt.generator)?;
+        write!(self.output, "(")?;
+        self.format_rvalue(&nxt.state)?;
+        write!(self.output, ", {})", nxt.control)?;
+        writeln!(self.output)?;
+        self.indent()?;
+        writeln!(self.output, "if {} ~= nil then", nxt.res_locals[0])?;
+        self.indentation_level += 1;
+        self.indent()?;
+        writeln!(self.output, "{} = {}", nxt.control, nxt.res_locals[0])?;
+        self.indentation_level -= 1;
+        self.indent()?;
+        write!(self.output, "end")
+    }
+
+    fn format_num_for_init(&mut self, init: &NumForInit) -> fmt::Result {
+        writeln!(self.output, "-- unstructured numeric-for init")?;
+        self.indent()?;
+        write!(
+            self.output,
+            "{}, {}, {} = {}, {}, {}",
+            init.counter.0, init.limit.0, init.step.0, init.counter.1, init.limit.1, init.step.1
+        )
+    }
+
+    fn format_num_for_next(&mut self, nxt: &NumForNext) -> fmt::Result {
+        writeln!(self.output, "-- unstructured numeric-for next")?;
+        self.indent()?;
+        writeln!(
+            self.output,
+            "{} = {} + {}",
+            nxt.counter.0, nxt.counter.1, nxt.step
+        )?;
+        self.indent()?;
+        writeln!(self.output, "if {} <= {} then", nxt.counter.0, nxt.limit)?;
         self.indent()?;
         write!(self.output, "end")
     }
@@ -874,7 +1034,11 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             Statement::While(r#while) => self.format_while(r#while),
             Statement::Repeat(repeat) => self.format_repeat(repeat),
             Statement::NumericFor(numeric_for) => self.format_numeric_for(numeric_for),
+            Statement::NumForInit(init) => self.format_num_for_init(init),
+            Statement::NumForNext(nxt) => self.format_num_for_next(nxt),
             Statement::GenericFor(generic_for) => self.format_generic_for(generic_for),
+            Statement::GenericForInit(init) => self.format_generic_for_init(init),
+            Statement::GenericForNext(nxt) => self.format_generic_for_next(nxt),
             Statement::Call(call) => self.format_call(call),
             Statement::MethodCall(method_call) => self.format_method_call(method_call),
             Statement::Return(r#return) => self.format_return(r#return),
@@ -936,5 +1100,84 @@ mod is_valid_name_tests {
         assert!(F::is_valid_name(b"type"));
         assert!(F::is_valid_name(b"typeof"));
         assert!(F::is_valid_name(b"export"));
+    }
+}
+
+#[cfg(test)]
+mod shared_body_tests {
+    use crate::{share_block, Assign, Block, If, Literal, Local, RcLocal, Statement};
+
+    #[test]
+    fn dag_shared_then_block_prints_twice() {
+        let local = RcLocal::new(Local::new(Some("x".into())));
+        let _keep = local.clone();
+        let mut assign = Assign::new(vec![local.into()], vec![Literal::Boolean(true).into()]);
+        assign.prefix = true;
+        let body = share_block(Block(vec![assign.into()]));
+        let block = Block(vec![
+            Statement::If(If {
+                condition: Literal::Boolean(true).into(),
+                then_block: body.clone(),
+                else_block: share_block(Block::default()),
+            }),
+            Statement::If(If {
+                condition: Literal::Boolean(false).into(),
+                then_block: body,
+                else_block: share_block(Block::default()),
+            }),
+        ]);
+        let s = block.to_string();
+        let hits = s.matches("x = true").count();
+        assert_eq!(hits, 2, "DAG-shared then-body should print for both ifs:\n{s}");
+    }
+
+    #[test]
+    fn cyclic_else_still_terminates() {
+        let shared = share_block(Block::default());
+        let inner = If {
+            condition: Literal::Boolean(true).into(),
+            then_block: share_block(Block::default()),
+            else_block: shared.clone(),
+        };
+        shared.lock().0.push(Statement::If(inner));
+        let body = Block(vec![Statement::If(If {
+            condition: Literal::Boolean(false).into(),
+            then_block: share_block(Block::default()),
+            else_block: shared,
+        })]);
+        let s = body.to_string();
+        assert!(s.contains("if"));
+        assert!(s.contains("end"));
+        assert!(s.len() < 64 * 1024, "runaway format: {} bytes", s.len());
+    }
+
+    #[test]
+    fn exponential_else_dag_hits_step_cap() {
+        // Diamond: each level's then *and* else point at the next shared
+        // node. Path-only cycle detection reprints every path (2^n).
+        // Without a step cap this never returns (v12 ClientRenderer).
+        let local = RcLocal::new(Local::new(Some("x".into())));
+        let _keep = local.clone();
+        let mut assign = Assign::new(vec![local.into()], vec![Literal::Boolean(true).into()]);
+        assign.prefix = true;
+        let mut next = share_block(Block(vec![assign.into()]));
+        for _ in 0..22 {
+            next = share_block(Block(vec![Statement::If(If {
+                condition: Literal::Boolean(true).into(),
+                then_block: next.clone(),
+                else_block: next,
+            })]));
+        }
+        let body = Block(vec![Statement::If(If {
+            condition: Literal::Boolean(true).into(),
+            then_block: next.clone(),
+            else_block: next,
+        })]);
+        let s = body.to_string();
+        assert!(
+            s.contains("formatter stopped") || s.len() < 8 * 1024 * 1024,
+            "exponential DAG format did not stop: {} bytes",
+            s.len()
+        );
     }
 }

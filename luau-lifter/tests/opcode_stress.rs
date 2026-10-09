@@ -127,7 +127,7 @@ fn decompile_does_not_panic_on_handled_fixtures() {
     // Just calling `decompile_bytecode_default` and checking the result is
     // non-empty is enough to catch a panic. (If the lifter panics,
     // `decompile_bytecode_default` catches it and returns a string starting
-    // with "-- Decomplied with Topaz" but containing the "failed to
+    // with "-- Decompiled with Topaz" but containing the "failed to
     // decompile" comment instead of real source — caught by the test
     // above. Here we additionally check that the *outer* scaffolding
     // is present, which would catch a more catastrophic failure mode
@@ -136,7 +136,7 @@ fn decompile_does_not_panic_on_handled_fixtures() {
         let bytecode = fs::read(&path).expect("read fixture");
         let output = luau_lifter::decompile_bytecode_default(&bytecode, ENCODE_KEY);
         assert!(
-            output.starts_with("-- Decomplied with Topaz"),
+            output.starts_with("-- Decompiled with Topaz"),
             "fixture {} produced output without the standard header: {:?}",
             path.display(),
             &output[..output.len().min(200)]

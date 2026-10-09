@@ -1,0 +1,665 @@
+-- Disassembled using LunaUX-Decompiler V1.4.6's disassembler. Luau decompiler & disassembler (discord.gg/2mJUD4XDDT)
+-- Disassembled at Wed Oct 7 1:04:28 2026 Pacific Standard Time, took 0.001937 second(s)
+
+; Luau version: 13
+; Types version: 3
+; Magic key: 227
+; Main function id: 11
+; Total functions: 12
+
+; Constants [43]
+	[0x0000000] : "__index"                      ; LBC_CONSTANT_STRING (0x03)
+	[0x0000001] : "debug"                        ; LBC_CONSTANT_STRING (0x03)
+	[0x0000002] : "profilebegin"                 ; LBC_CONSTANT_STRING (0x03)
+	[0x0000003] : debug.profilebegin             ; LBC_CONSTANT_IMPORT (0x04)
+	[0x0000004] : "profileend"                   ; LBC_CONSTANT_STRING (0x03)
+	[0x0000005] : debug.profileend               ; LBC_CONSTANT_IMPORT (0x04)
+	[0x0000006] : "Vector3"                      ; LBC_CONSTANT_STRING (0x03)
+	[0x0000007] : "new"                          ; LBC_CONSTANT_STRING (0x03)
+	[0x0000008] : Vector3.new                    ; LBC_CONSTANT_IMPORT (0x04)
+	[0x0000009] : "CFrame"                       ; LBC_CONSTANT_STRING (0x03)
+	[0x000000A] : CFrame.new                     ; LBC_CONSTANT_IMPORT (0x04)
+	[0x000000B] : "Angles"                       ; LBC_CONSTANT_STRING (0x03)
+	[0x000000C] : CFrame.Angles                  ; LBC_CONSTANT_IMPORT (0x04)
+	[0x000000D] : "math"                         ; LBC_CONSTANT_STRING (0x03)
+	[0x000000E] : "rad"                          ; LBC_CONSTANT_STRING (0x03)
+	[0x000000F] : math.rad                       ; LBC_CONSTANT_IMPORT (0x04)
+	[0x0000010] : "require"                      ; LBC_CONSTANT_STRING (0x03)
+	[0x0000011] : require                        ; LBC_CONSTANT_IMPORT (0x04)
+	[0x0000012] : "script"                       ; LBC_CONSTANT_STRING (0x03)
+	[0x0000013] : script                         ; LBC_CONSTANT_IMPORT (0x04)
+	[0x0000014] : "CameraShakeInstance"          ; LBC_CONSTANT_STRING (0x03)
+	[0x0000015] : "CameraShakeState"             ; LBC_CONSTANT_STRING (0x03)
+	[0x0000016] : "CameraShakePresets"           ; LBC_CONSTANT_STRING (0x03)
+	[0x0000017] : "Presets"                      ; LBC_CONSTANT_STRING (0x03)
+	[0x0000018] : <closure->new>                 ; LBC_CONSTANT_CLOSURE (0x06)
+	[0x0000019] : <closure->Start>               ; LBC_CONSTANT_CLOSURE (0x06)
+	[0x000001A] : "Start"                        ; LBC_CONSTANT_STRING (0x03)
+	[0x000001B] : <closure->Stop>                ; LBC_CONSTANT_CLOSURE (0x06)
+	[0x000001C] : "Stop"                         ; LBC_CONSTANT_STRING (0x03)
+	[0x000001D] : <closure->StopSustained>       ; LBC_CONSTANT_CLOSURE (0x06)
+	[0x000001E] : "StopSustained"                ; LBC_CONSTANT_STRING (0x03)
+	[0x000001F] : <closure->Update>              ; LBC_CONSTANT_CLOSURE (0x06)
+	[0x0000020] : "Update"                       ; LBC_CONSTANT_STRING (0x03)
+	[0x0000021] : <closure->EndCameraShake>      ; LBC_CONSTANT_CLOSURE (0x06)
+	[0x0000022] : "EndCameraShake"               ; LBC_CONSTANT_STRING (0x03)
+	[0x0000023] : <closure->Shake>               ; LBC_CONSTANT_CLOSURE (0x06)
+	[0x0000024] : "Shake"                        ; LBC_CONSTANT_STRING (0x03)
+	[0x0000025] : <closure->ShakeSustain>        ; LBC_CONSTANT_CLOSURE (0x06)
+	[0x0000026] : "ShakeSustain"                 ; LBC_CONSTANT_STRING (0x03)
+	[0x0000027] : <closure->ShakeOnce>           ; LBC_CONSTANT_CLOSURE (0x06)
+	[0x0000028] : "ShakeOnce"                    ; LBC_CONSTANT_STRING (0x03)
+	[0x0000029] : <closure->StartShake>          ; LBC_CONSTANT_CLOSURE (0x06)
+	[0x000002A] : "StartShake"                   ; LBC_CONSTANT_STRING (0x03)
+
+; Block 0 [ENTRY] [EXIT] (B0) | PC 0 -> 89
+[00000] [00000] [0x0000041]	    PREPVARARGS                    A=0                      ; -- Prepare for any number (top) of variables as ...
+[00001] [00001] [0x0000035]	    NEWTABLE [0x0000000]           A=0  B=5                 ; var0 = {}
+[00002] [00003] [0x0000010]	    SETTABLEKS [0x0000000]         A=0  B=0  C=110          ; var0.__index = var0
+[00003] [00005] [0x000000C]	    GETIMPORT [0x80100800]         A=1  D=3                 ; var1 = debug.profilebegin
+[00004] [00007] [0x000000C]	    GETIMPORT [0x80101000]         A=2  D=5                 ; var2 = debug.profileend
+[00005] [00009] [0x000000C]	    GETIMPORT [0x80601C00]         A=3  D=8                 ; var3 = Vector3.new
+[00006] [00011] [0x000000C]	    GETIMPORT [0x80901C00]         A=4  D=10                ; var4 = CFrame.new
+[00007] [00013] [0x000000C]	    GETIMPORT [0x80902C00]         A=5  D=12                ; var5 = CFrame.Angles
+[00008] [00015] [0x000000C]	    GETIMPORT [0x80D03800]         A=6  D=15                ; var6 = math.rad
+[00009] [00017] [0x0000004]	    LOADN                          A=8  D=0                 ; var8 = 0
+[00010] [00018] [0x0000004]	    LOADN                          A=9  D=0                 ; var9 = 0
+[00011] [00019] [0x0000004]	    LOADN                          A=10  D=0                ; var10 = 0
+[00012] [00020] [0x0000004]	    LOADN                          A=11  D=0                ; var11 = 0
+[00013] [00021] [0x0000004]	    LOADN                          A=12  D=0                ; var12 = 0
+[00014] [00022] [0x0000004]	    LOADN                          A=13  D=0                ; var13 = 0
+[00015] [00023] [0x0000004]	    LOADN                          A=14  D=0                ; var14 = 0
+[00016] [00024] [0x0000044]	    FASTCALL                                                ; ... = vector(...) -- Uses args and results from the CALL instruction located in [00025]. If successful goto [00025]
+[00017] [00025] [0x0000006]	    MOVE                           A=7  B=3                 ; var7 = var3
+[00018] [00026] [0x0000015]	    CALL                           A=7  B=8  C=2            ; var7 = var7(var8, var9, var10, var11, var12, var13, var14)
+[00019] [00027] [0x000000C]	    GETIMPORT [0x41000000]         A=8  D=17                ; var8 = require
+[00020] [00029] [0x000000C]	    GETIMPORT [0x41200000]         A=9  D=19                ; var9 = script
+[00021] [00031] [0x000000F]	    GETTABLEKS [0x0000014]         A=9  B=9  C=202          ; var9 = var9.CameraShakeInstance
+[00022] [00033] [0x0000015]	    CALL                           A=8  B=2  C=2            ; var8 = var8(var9)
+[00023] [00034] [0x000000F]	    GETTABLEKS [0x0000015]         A=9  B=8  C=57           ; var9 = var8.CameraShakeState
+[00024] [00036] [0x0000010]	    SETTABLEKS [0x0000014]         A=8  B=0  C=202          ; var0.CameraShakeInstance = var8
+[00025] [00038] [0x000000C]	    GETIMPORT [0x41000000]         A=10  D=17               ; var10 = require
+[00026] [00040] [0x000000C]	    GETIMPORT [0x41200000]         A=11  D=19               ; var11 = script
+[00027] [00042] [0x000000F]	    GETTABLEKS [0x0000016]         A=11  B=11  C=39         ; var11 = var11.CameraShakePresets
+[00028] [00044] [0x0000015]	    CALL                           A=10  B=2  C=2           ; var10 = var10(var11)
+[00029] [00045] [0x0000010]	    SETTABLEKS [0x0000017]         A=10  B=0  C=82          ; var0.Presets = var10
+local function new(var0, var1) --[[ Line: 88, Id: 0 ]]
+	; Constants [21]
+		[0x0000000] : "type"                         ; LBC_CONSTANT_STRING (0x03)
+		[0x0000001] : type                           ; LBC_CONSTANT_IMPORT (0x04)
+		[0x0000002] : "number"                       ; LBC_CONSTANT_STRING (0x03)
+		[0x0000003] : "RenderPriority must be a number (e.g.: Enum.RenderPriority.Camera.Value)" ; LBC_CONSTANT_STRING (0x03)
+		[0x0000004] : "assert"                       ; LBC_CONSTANT_STRING (0x03)
+		[0x0000005] : assert                         ; LBC_CONSTANT_IMPORT (0x04)
+		[0x0000006] : "function"                     ; LBC_CONSTANT_STRING (0x03)
+		[0x0000007] : "Callback must be a function"  ; LBC_CONSTANT_STRING (0x03)
+		[0x0000008] : "_running"                     ; LBC_CONSTANT_STRING (0x03)
+		[0x0000009] : false                          ; LBC_CONSTANT_BOOLEAN (0x01)
+		[0x000000A] : "_renderName"                  ; LBC_CONSTANT_STRING (0x03)
+		[0x000000B] : "CameraShaker"                 ; LBC_CONSTANT_STRING (0x03)
+		[0x000000C] : "_renderPriority"              ; LBC_CONSTANT_STRING (0x03)
+		[0x000000D] : "_posAddShake"                 ; LBC_CONSTANT_STRING (0x03)
+		[0x000000E] : "_rotAddShake"                 ; LBC_CONSTANT_STRING (0x03)
+		[0x000000F] : "_camShakeInstances"           ; LBC_CONSTANT_STRING (0x03)
+		[0x0000010] : "_removeInstances"             ; LBC_CONSTANT_STRING (0x03)
+		[0x0000011] : "_callback"                    ; LBC_CONSTANT_STRING (0x03)
+		[0x0000012] : { _running = false, _renderName = "CameraShaker", _renderPriority = nil, _posAddShake = nil, _rotAddShake = nil, _camShakeInstances = nil, _removeInstances = nil, _callback = nil } ; LBC_CONSTANT_TABLE_WITH_CONSTANTS (0x08)
+		[0x0000013] : "setmetatable"                 ; LBC_CONSTANT_STRING (0x03)
+		[0x0000014] : setmetatable                   ; LBC_CONSTANT_IMPORT (0x04)
+
+	; Block 0 [ENTRY] (B0) | PC 0 -> 5
+	[00000] [00000] [0x0000049]	    FASTCALL1                      A=40  B=0  C=3           ; ... = type(var0) -- Uses args and results from the CALL instruction located in [00002]. If successful goto >= [00003]
+	[00001] [00001] [0x0000006]	    MOVE                           A=5  B=0                 ; var5 = var0
+	[00002] [00002] [0x000000C]	    GETIMPORT [0x40000000]         A=4  D=1                 ; var4 = type
+	[00003] [00004] [0x0000015]	    CALL                           A=4  B=2  C=2            ; var4 = var4(var5)
+	[00004] [00005] [0x0000050]	    JUMPXEQKS [0x0000002]          A=4  D=2                 ; if var4 == "number" then goto #7 [B1] else goto #8 [B2]
+
+	; Block 1 (B1) | PC 7 -> 7
+	[00000] [00007] [0x0000003]	    LOADB                          A=3  B=0  C=1            ; var3 = false ; goto #9 [B2]
+
+	; Block 2 (B2) | PC 8 -> 8
+	[00000] [00008] [0x0000003]	    LOADB                          A=3  B=1  C=0            ; var3 = true
+
+	; Block 3 (B3) | PC 9 -> 20
+	[00000] [00009] [0x000004B]	    FASTCALL2K [0x0000003]         A=1  B=3  C=4            ; ... = assert(var3, "RenderPriority must be a number (e.g.: Enum.RenderPriority.Camera.Value)") -- Uses args and results from the CALL instruction located in [00012]. If successful goto >= [00013]
+	[00001] [00011] [0x0000005]	    LOADK                          A=4  D=3                 ; var4 = "RenderPriority must be a number (e.g.: Enum.RenderPriority.Camera.Value)"
+	[00002] [00012] [0x000000C]	    GETIMPORT [0x40400000]         A=2  D=5                 ; var2 = assert
+	[00003] [00014] [0x0000015]	    CALL                           A=2  B=3  C=1            ; var2(var3, var4)
+	[00004] [00015] [0x0000049]	    FASTCALL1                      A=40  B=1  C=3           ; ... = type(var1) -- Uses args and results from the CALL instruction located in [00017]. If successful goto >= [00018]
+	[00005] [00016] [0x0000006]	    MOVE                           A=5  B=1                 ; var5 = var1
+	[00006] [00017] [0x000000C]	    GETIMPORT [0x40000000]         A=4  D=1                 ; var4 = type
+	[00007] [00019] [0x0000015]	    CALL                           A=4  B=2  C=2            ; var4 = var4(var5)
+	[00008] [00020] [0x0000050]	    JUMPXEQKS [0x0000006]          A=4  D=2                 ; if var4 == "function" then goto #22 [B4] else goto #23 [B5]
+
+	; Block 4 (B4) | PC 22 -> 22
+	[00000] [00022] [0x0000003]	    LOADB                          A=3  B=0  C=1            ; var3 = false ; goto #24 [B5]
+
+	; Block 5 (B5) | PC 23 -> 23
+	[00000] [00023] [0x0000003]	    LOADB                          A=3  B=1  C=0            ; var3 = true
+
+	; Block 6 [EXIT] (B6) | PC 24 -> 55
+	[00000] [00024] [0x000004B]	    FASTCALL2K [0x0000007]         A=1  B=3  C=4            ; ... = assert(var3, "Callback must be a function") -- Uses args and results from the CALL instruction located in [00027]. If successful goto >= [00028]
+	[00001] [00026] [0x0000005]	    LOADK                          A=4  D=7                 ; var4 = "Callback must be a function"
+	[00002] [00027] [0x000000C]	    GETIMPORT [0x40400000]         A=2  D=5                 ; var2 = assert
+	[00003] [00029] [0x0000015]	    CALL                           A=2  B=3  C=1            ; var2(var3, var4)
+	[00004] [00030] [0x0000036]	    DUPTABLE                       A=3  D=18                ; var3 = { _running = false, _renderName = "CameraShaker", _renderPriority = nil, _posAddShake = nil, _rotAddShake = nil, _camShakeInstances = nil, _removeInstances = nil, _callback = nil }
+	[00005] [00031] [0x0000010]	    SETTABLEKS [0x000000C]         A=0  B=3  C=163          ; var3._renderPriority = var0
+	[00006] [00033] [0x0000009]	    GETUPVAL                       A=4  B=0                 ; var4 = up_0
+	[00007] [00034] [0x0000010]	    SETTABLEKS [0x000000D]         A=4  B=3  C=23           ; var3._posAddShake = var4
+	[00008] [00036] [0x0000009]	    GETUPVAL                       A=4  B=0                 ; var4 = up_0
+	[00009] [00037] [0x0000010]	    SETTABLEKS [0x000000E]         A=4  B=3  C=89           ; var3._rotAddShake = var4
+	[00010] [00039] [0x0000035]	    NEWTABLE [0x0000000]           A=4  B=0                 ; var4 = {}
+	[00011] [00041] [0x0000010]	    SETTABLEKS [0x000000F]         A=4  B=3  C=129          ; var3._camShakeInstances = var4
+	[00012] [00043] [0x0000035]	    NEWTABLE [0x0000000]           A=4  B=0                 ; var4 = {}
+	[00013] [00045] [0x0000010]	    SETTABLEKS [0x0000010]         A=4  B=3  C=185          ; var3._removeInstances = var4
+	[00014] [00047] [0x0000010]	    SETTABLEKS [0x0000011]         A=1  B=3  C=108          ; var3._callback = var1
+	[00015] [00049] [0x0000009]	    GETUPVAL                       A=4  B=1                 ; var4 = up_1
+	[00016] [00050] [0x000004A]	    FASTCALL2 [0x0000004]          A=61  B=3  C=3           ; ... = setmetatable(var3, var4) -- Uses args and results from the CALL instruction located in [00052]. If successful goto >= [00053]
+	[00017] [00052] [0x000000C]	    GETIMPORT [0x41300000]         A=2  D=20                ; var2 = setmetatable
+	[00018] [00054] [0x0000015]	    CALL                           A=2  B=3  C=2            ; var2 = var2(var3, var4)
+	[00019] [00055] [0x0000016]	    RETURN                         A=2  B=2                 ; return var2
+end
+[00030] [00047] [0x0000040]	    DUPCLOSURE                     A=10  D=24               ; var10 = new
+[00031] [00048] [0x0000046]	    CAPTURE                        A=0  B=7                 ; up_0 = var7 -- Readable
+[00032] [00049] [0x0000046]	    CAPTURE                        A=0  B=0                 ; up_1 = var0 -- Readable
+[00033] [00050] [0x0000010]	    SETTABLEKS [0x0000007]         A=10  B=0  C=239         ; var0.new = var10
+local function Start(var0) --[[ Line: 109, Id: 2 ]]
+	; Constants [9]
+		[0x0000000] : "_running"                     ; LBC_CONSTANT_STRING (0x03)
+		[0x0000001] : "_callback"                    ; LBC_CONSTANT_STRING (0x03)
+		[0x0000002] : "game"                         ; LBC_CONSTANT_STRING (0x03)
+		[0x0000003] : game                           ; LBC_CONSTANT_IMPORT (0x04)
+		[0x0000004] : "RunService"                   ; LBC_CONSTANT_STRING (0x03)
+		[0x0000005] : "GetService"                   ; LBC_CONSTANT_STRING (0x03)
+		[0x0000006] : "_renderName"                  ; LBC_CONSTANT_STRING (0x03)
+		[0x0000007] : "_renderPriority"              ; LBC_CONSTANT_STRING (0x03)
+		[0x0000008] : "BindToRenderStep"             ; LBC_CONSTANT_STRING (0x03)
+
+	; Block 0 [ENTRY] (B0) | PC 0 -> 2
+	[00000] [00000] [0x000000F]	    GETTABLEKS [0x0000000]         A=1  B=0  C=246          ; var1 = var0._running
+	[00001] [00002] [0x000001A]	    JUMPIFNOT                      A=1  D=1                 ; if not var1 then goto #4 [B2] else goto #3 [B1]
+
+	; Block 1 [EXIT] (B1) | PC 3 -> 3
+	[00000] [00003] [0x0000016]	    RETURN                         A=0  B=1                 ; return
+
+	; Block 2 [EXIT] (B2) | PC 4 -> 30
+	[00000] [00004] [0x0000003]	    LOADB                          A=1  B=1  C=0            ; var1 = true
+	[00001] [00005] [0x0000010]	    SETTABLEKS [0x0000000]         A=1  B=0  C=246          ; var0._running = var1
+	[00002] [00007] [0x000000F]	    GETTABLEKS [0x0000001]         A=1  B=0  C=108          ; var1 = var0._callback
+	[00003] [00009] [0x000000C]	    GETIMPORT [0x40200000]         A=2  D=3                 ; var2 = game
+	[00004] [00011] [0x0000005]	    LOADK                          A=4  D=4                 ; var4 = "RunService"
+	[00005] [00012] [0x0000014]	    NAMECALL [0x0000005]           A=2  B=2  C=22           ; <self>var3 = var2 -> var2.GetService -- Next CALL/CALLFB instruction must be a __namecall invoker
+	[00006] [00014] [0x0000057]	    CALLFB [0x0000000]             A=2  B=3  C=2            ; var2 = var2(var3, var4)
+	[00007] [00016] [0x000000F]	    GETTABLEKS [0x0000006]         A=4  B=0  C=82           ; var4 = var0._renderName
+	[00008] [00018] [0x000000F]	    GETTABLEKS [0x0000007]         A=5  B=0  C=163          ; var5 = var0._renderPriority
+	local function <closure->1>(var0) --[[ Line: 113, Id: 1 ]]
+		; Constants [3]
+			[0x0000000] : "CameraShakerUpdate"           ; LBC_CONSTANT_STRING (0x03)
+			[0x0000001] : "Update"                       ; LBC_CONSTANT_STRING (0x03)
+			[0x0000002] : "Stop"                         ; LBC_CONSTANT_STRING (0x03)
+
+		; Block 0 [ENTRY] (B0) | PC 0 -> 13
+		[00000] [00000] [0x0000009]	    GETUPVAL                       A=1  B=0                 ; var1 = up_0
+		[00001] [00001] [0x0000005]	    LOADK                          A=2  D=0                 ; var2 = "CameraShakerUpdate"
+		[00002] [00002] [0x0000057]	    CALLFB [0x0000000]             A=1  B=2  C=1            ; var1(var2)
+		[00003] [00004] [0x0000009]	    GETUPVAL                       A=1  B=1                 ; var1 = up_1
+		[00004] [00005] [0x0000006]	    MOVE                           A=3  B=0                 ; var3 = var0
+		[00005] [00006] [0x0000014]	    NAMECALL [0x0000001]           A=1  B=1  C=38           ; <self>var2 = var1 -> var1.Update -- Next CALL/CALLFB instruction must be a __namecall invoker
+		[00006] [00008] [0x0000057]	    CALLFB [0x0000001]             A=1  B=3  C=2            ; var1 = var1(var2, var3)
+		[00007] [00010] [0x0000009]	    GETUPVAL                       A=2  B=2                 ; var2 = up_2
+		[00008] [00011] [0x0000057]	    CALLFB [0x0000002]             A=2  B=1  C=2            ; var2 = var2()
+		[00009] [00013] [0x000001E]	    JUMPIFNOTEQ [0x0000002]        A=1  D=7                 ; if var1 == var2 then goto #15 [B1] else goto #21 [B2]
+
+		; Block 1 [EXIT] (B1) | PC 15 -> 20
+		[00000] [00015] [0x0000009]	    GETUPVAL                       A=2  B=1                 ; var2 = up_1
+		[00001] [00016] [0x0000014]	    NAMECALL [0x0000002]           A=2  B=2  C=250          ; <self>var3 = var2 -> var2.Stop -- Next CALL/CALLFB instruction must be a __namecall invoker
+		[00002] [00018] [0x0000057]	    CALLFB [0x0000003]             A=2  B=2  C=1            ; var2(var3)
+		[00003] [00020] [0x0000016]	    RETURN                         A=0  B=1                 ; return
+
+		; Block 2 [EXIT] (B2) | PC 21 -> 28
+		[00000] [00021] [0x0000009]	    GETUPVAL                       A=2  B=3                 ; var2 = up_3
+		[00001] [00022] [0x0000057]	    CALLFB [0x0000004]             A=2  B=1  C=1            ; var2()
+		[00002] [00024] [0x0000009]	    GETUPVAL                       A=2  B=4                 ; var2 = up_4
+		[00003] [00025] [0x0000006]	    MOVE                           A=3  B=1                 ; var3 = var1
+		[00004] [00026] [0x0000057]	    CALLFB [0x0000005]             A=2  B=2  C=1            ; var2(var3)
+		[00005] [00028] [0x0000016]	    RETURN                         A=0  B=1                 ; return
+	end
+	[00009] [00020] [0x0000013]	    NEWCLOSURE                     A=6  D=0                 ; var6 = <closure->1>
+	[00010] [00021] [0x0000046]	    CAPTURE                        A=2  B=0                 ; up_0 = up_0
+	[00011] [00022] [0x0000046]	    CAPTURE                        A=0  B=0                 ; up_1 = var0 -- Readable
+	[00012] [00023] [0x0000046]	    CAPTURE                        A=2  B=1                 ; up_2 = up_1
+	[00013] [00024] [0x0000046]	    CAPTURE                        A=2  B=2                 ; up_3 = up_2
+	[00014] [00025] [0x0000046]	    CAPTURE                        A=0  B=1                 ; up_4 = var1 -- Readable
+	[00015] [00026] [0x0000014]	    NAMECALL [0x0000008]           A=2  B=2  C=111          ; <self>var3 = var2 -> var2.BindToRenderStep -- Next CALL/CALLFB instruction must be a __namecall invoker
+	[00016] [00028] [0x0000057]	    CALLFB [0x0000001]             A=2  B=5  C=1            ; var2(var3, var4, var5, var6)
+	[00017] [00030] [0x0000016]	    RETURN                         A=0  B=1                 ; return
+end
+[00034] [00052] [0x0000040]	    DUPCLOSURE                     A=10  D=25               ; var10 = Start
+[00035] [00053] [0x0000046]	    CAPTURE                        A=0  B=1                 ; up_0 = var1 -- Readable
+[00036] [00054] [0x0000046]	    CAPTURE                        A=0  B=4                 ; up_1 = var4 -- Readable
+[00037] [00055] [0x0000046]	    CAPTURE                        A=0  B=2                 ; up_2 = var2 -- Readable
+[00038] [00056] [0x0000010]	    SETTABLEKS [0x000001A]         A=10  B=0  C=28          ; var0.Start = var10
+local function Stop(var0) --[[ Line: 126, Id: 3 ]]
+	; Constants [7]
+		[0x0000000] : "_running"                     ; LBC_CONSTANT_STRING (0x03)
+		[0x0000001] : "game"                         ; LBC_CONSTANT_STRING (0x03)
+		[0x0000002] : game                           ; LBC_CONSTANT_IMPORT (0x04)
+		[0x0000003] : "RunService"                   ; LBC_CONSTANT_STRING (0x03)
+		[0x0000004] : "GetService"                   ; LBC_CONSTANT_STRING (0x03)
+		[0x0000005] : "_renderName"                  ; LBC_CONSTANT_STRING (0x03)
+		[0x0000006] : "UnbindFromRenderStep"         ; LBC_CONSTANT_STRING (0x03)
+
+	; Block 0 [ENTRY] (B0) | PC 0 -> 2
+	[00000] [00000] [0x000000F]	    GETTABLEKS [0x0000000]         A=1  B=0  C=246          ; var1 = var0._running
+	[00001] [00002] [0x0000019]	    JUMPIF                         A=1  D=1                 ; if var1 then goto #4 [B2] else goto #3 [B1]
+
+	; Block 1 [EXIT] (B1) | PC 3 -> 3
+	[00000] [00003] [0x0000016]	    RETURN                         A=0  B=1                 ; return
+
+	; Block 2 [EXIT] (B2) | PC 4 -> 20
+	[00000] [00004] [0x000000C]	    GETIMPORT [0x40100000]         A=1  D=2                 ; var1 = game
+	[00001] [00006] [0x0000005]	    LOADK                          A=3  D=3                 ; var3 = "RunService"
+	[00002] [00007] [0x0000014]	    NAMECALL [0x0000004]           A=1  B=1  C=22           ; <self>var2 = var1 -> var1.GetService -- Next CALL/CALLFB instruction must be a __namecall invoker
+	[00003] [00009] [0x0000057]	    CALLFB [0x0000000]             A=1  B=3  C=2            ; var1 = var1(var2, var3)
+	[00004] [00011] [0x000000F]	    GETTABLEKS [0x0000005]         A=3  B=0  C=82           ; var3 = var0._renderName
+	[00005] [00013] [0x0000014]	    NAMECALL [0x0000006]           A=1  B=1  C=39           ; <self>var2 = var1 -> var1.UnbindFromRenderStep -- Next CALL/CALLFB instruction must be a __namecall invoker
+	[00006] [00015] [0x0000057]	    CALLFB [0x0000001]             A=1  B=3  C=1            ; var1(var2, var3)
+	[00007] [00017] [0x0000003]	    LOADB                          A=1  B=0  C=0            ; var1 = false
+	[00008] [00018] [0x0000010]	    SETTABLEKS [0x0000000]         A=1  B=0  C=246          ; var0._running = var1
+	[00009] [00020] [0x0000016]	    RETURN                         A=0  B=1                 ; return
+end
+[00039] [00058] [0x0000040]	    DUPCLOSURE                     A=10  D=27               ; var10 = Stop
+[00040] [00059] [0x0000010]	    SETTABLEKS [0x000001C]         A=10  B=0  C=250         ; var0.Stop = var10
+local function StopSustained(var0, var1) --[[ Line: 133, Id: 4 ]]
+	; Constants [7]
+		[0x0000000] : "pairs"                        ; LBC_CONSTANT_STRING (0x03)
+		[0x0000001] : pairs                          ; LBC_CONSTANT_IMPORT (0x04)
+		[0x0000002] : "_camShakeInstances"           ; LBC_CONSTANT_STRING (0x03)
+		[0x0000003] : "fadeOutDuration"              ; LBC_CONSTANT_STRING (0x03)
+		[0x0000004] : 0                              ; LBC_CONSTANT_NUMBER (0x02)
+		[0x0000005] : "fadeInDuration"               ; LBC_CONSTANT_STRING (0x03)
+		[0x0000006] : "StartFadeOut"                 ; LBC_CONSTANT_STRING (0x03)
+
+	; Block 0 [ENTRY] (B0) | PC 0 -> 6
+	[00000] [00000] [0x000000C]	    GETIMPORT [0x40000000]         A=2  D=1                 ; var2 = pairs
+	[00001] [00002] [0x000000F]	    GETTABLEKS [0x0000002]         A=3  B=0  C=129          ; var3 = var0._camShakeInstances
+	[00002] [00004] [0x0000057]	    CALLFB [0x0000000]             A=2  B=2  C=4            ; var2, var3, var4 = var2(var3)
+	[00003] [00006] [0x000003D]	    FORGPREP_NEXT                  A=2  D=12                ; for var5->... in var2, var3, var4 do goto #19 [B5]
+
+	; Block 1 (B1) | PC 7 -> 9
+	[00000] [00007] [0x000000F]	    GETTABLEKS [0x0000003]         A=7  B=6  C=170          ; var7 = var6.fadeOutDuration
+	[00001] [00009] [0x000004F]	    JUMPXEQKN [0x80000004]         A=7  D=9                 ; if var7 ~= 0 then goto #19 [B5] else goto #11 [B2]
+
+	; Block 2 (B2) | PC 11 -> 12
+	[00000] [00011] [0x0000006]	    MOVE                           A=9  B=1                 ; var9 = var1
+	[00001] [00012] [0x0000019]	    JUMPIF                         A=9  D=2                 ; if var9 then goto #15 [B4] else goto #13 [B3]
+
+	; Block 3 (B3) | PC 13 -> 13
+	[00000] [00013] [0x000000F]	    GETTABLEKS [0x0000005]         A=9  B=6  C=45           ; var9 = var6.fadeInDuration
+
+	; Block 4 (B4) | PC 15 -> 17
+	[00000] [00015] [0x0000014]	    NAMECALL [0x0000006]           A=7  B=6  C=187          ; <self>var8 = var7 -> var6.StartFadeOut -- Next CALL/CALLFB instruction must be a __namecall invoker
+	[00001] [00017] [0x0000057]	    CALLFB [0x0000001]             A=7  B=3  C=1            ; var7(var8, var9)
+
+	; Block 5 (B5) | PC 19 -> 19
+	[00000] [00019] [0x000003A]	    FORGLOOP [0x0000002]           A=2  D=-13               ; var5, var6 = var2(var3, var4); if var5 ~= nil then goto #7 [B1] else goto #21 [B6]
+
+	; Block 6 [EXIT] (B6) | PC 21 -> 21
+	[00000] [00021] [0x0000016]	    RETURN                         A=0  B=1                 ; return
+end
+[00041] [00061] [0x0000040]	    DUPCLOSURE                     A=10  D=29               ; var10 = StopSustained
+[00042] [00062] [0x0000010]	    SETTABLEKS [0x000001E]         A=10  B=0  C=46          ; var0.StopSustained = var10
+local function Update(var0, var1) --[[ Line: 142, Id: 5 ]]
+	; Constants [15]
+		[0x0000000] : "_camShakeInstances"           ; LBC_CONSTANT_STRING (0x03)
+		[0x0000001] : "GetState"                     ; LBC_CONSTANT_STRING (0x03)
+		[0x0000002] : "Inactive"                     ; LBC_CONSTANT_STRING (0x03)
+		[0x0000003] : "DeleteOnInactive"             ; LBC_CONSTANT_STRING (0x03)
+		[0x0000004] : "_removeInstances"             ; LBC_CONSTANT_STRING (0x03)
+		[0x0000005] : 1                              ; LBC_CONSTANT_NUMBER (0x02)
+		[0x0000006] : "UpdateShake"                  ; LBC_CONSTANT_STRING (0x03)
+		[0x0000007] : "PositionInfluence"            ; LBC_CONSTANT_STRING (0x03)
+		[0x0000008] : "RotationInfluence"            ; LBC_CONSTANT_STRING (0x03)
+		[0x0000009] : "table"                        ; LBC_CONSTANT_STRING (0x03)
+		[0x000000A] : "remove"                       ; LBC_CONSTANT_STRING (0x03)
+		[0x000000B] : table.remove                   ; LBC_CONSTANT_IMPORT (0x04)
+		[0x000000C] : "Y"                            ; LBC_CONSTANT_STRING (0x03)
+		[0x000000D] : "X"                            ; LBC_CONSTANT_STRING (0x03)
+		[0x000000E] : "Z"                            ; LBC_CONSTANT_STRING (0x03)
+
+	; Block 0 [ENTRY] (B0) | PC 0 -> 7
+	[00000] [00000] [0x0000009]	    GETUPVAL                       A=2  B=0                 ; var2 = up_0
+	[00001] [00001] [0x0000009]	    GETUPVAL                       A=3  B=0                 ; var3 = up_0
+	[00002] [00002] [0x000000F]	    GETTABLEKS [0x0000000]         A=4  B=0  C=129          ; var4 = var0._camShakeInstances
+	[00003] [00004] [0x0000004]	    LOADN                          A=7  D=1                 ; var7 = 1
+	[00004] [00005] [0x0000034]	    LENGTH                         A=5  B=4                 ; var5 = #var4
+	[00005] [00006] [0x0000004]	    LOADN                          A=6  D=1                 ; var6 = 1
+	[00006] [00007] [0x0000038]	    FORNPREP                       A=5  D=40                ; for var7 = var7, var5, var6 do goto #8 [B1]
+
+	; Block 1 (B1) | PC 8 -> 16
+	[00000] [00008] [0x000000D]	    GETTABLE                       A=8  B=4  C=7            ; var8 = var4[var7]
+	[00001] [00009] [0x0000014]	    NAMECALL [0x0000001]           A=9  B=8  C=118          ; <self>var10 = var9 -> var8.GetState -- Next CALL/CALLFB instruction must be a __namecall invoker
+	[00002] [00011] [0x0000057]	    CALLFB [0x0000000]             A=9  B=2  C=2            ; var9 = var9(var10)
+	[00003] [00013] [0x0000009]	    GETUPVAL                       A=10  B=1                ; var10 = up_1
+	[00004] [00014] [0x000000F]	    GETTABLEKS [0x0000002]         A=10  B=10  C=185        ; var10 = var10.Inactive
+	[00005] [00016] [0x000001E]	    JUMPIFNOTEQ [0x000000A]        A=9  D=12                ; if var9 == var10 then goto #18 [B2] else goto #29 [B4]
+
+	; Block 2 (B2) | PC 18 -> 20
+	[00000] [00018] [0x000000F]	    GETTABLEKS [0x0000003]         A=10  B=8  C=13          ; var10 = var8.DeleteOnInactive
+	[00001] [00020] [0x000001A]	    JUMPIFNOT                      A=10  D=8                ; if not var10 then goto #29 [B4] else goto #21 [B3]
+
+	; Block 3 (B3) | PC 21 -> 28
+	[00000] [00021] [0x000000F]	    GETTABLEKS [0x0000004]         A=10  B=0  C=185         ; var10 = var0._removeInstances
+	[00001] [00023] [0x000000F]	    GETTABLEKS [0x0000004]         A=13  B=0  C=185         ; var13 = var0._removeInstances
+	[00002] [00025] [0x0000034]	    LENGTH                         A=12  B=13               ; var12 = #var13
+	[00003] [00026] [0x0000027]	    ADDK                           A=11  B=12               ; var11 = var12 + 1
+	[00004] [00027] [0x000000E]	    SETTABLE                       A=7  B=10  C=11          ; var10[var11] = var7
+	[00005] [00028] [0x0000017]	    JUMP                           D=18                     ; goto #47 [B6]
+
+	; Block 4 (B4) | PC 29 -> 32
+	[00000] [00029] [0x0000009]	    GETUPVAL                       A=10  B=1                ; var10 = up_1
+	[00001] [00030] [0x000000F]	    GETTABLEKS [0x0000002]         A=10  B=10  C=185        ; var10 = var10.Inactive
+	[00002] [00032] [0x000001B]	    JUMPIFEQ [0x000000A]           A=9  D=14                ; if var9 == var10 then goto #47 [B6] else goto #34 [B5]
+
+	; Block 5 (B5) | PC 34 -> 46
+	[00000] [00034] [0x0000006]	    MOVE                           A=12  B=1                ; var12 = var1
+	[00001] [00035] [0x0000014]	    NAMECALL [0x0000006]           A=10  B=8  C=235         ; <self>var11 = var10 -> var8.UpdateShake -- Next CALL/CALLFB instruction must be a __namecall invoker
+	[00002] [00037] [0x0000057]	    CALLFB [0x0000001]             A=10  B=3  C=2           ; var10 = var10(var11, var12)
+	[00003] [00039] [0x000000F]	    GETTABLEKS [0x0000007]         A=12  B=8  C=114         ; var12 = var8.PositionInfluence
+	[00004] [00041] [0x0000023]	    MUL                            A=11  B=10  C=12         ; var11 = var10 * var12
+	[00005] [00042] [0x0000021]	    ADD                            A=2  B=2  C=11           ; var2 = var2 + var11
+	[00006] [00043] [0x000000F]	    GETTABLEKS [0x0000008]         A=12  B=8  C=236         ; var12 = var8.RotationInfluence
+	[00007] [00045] [0x0000023]	    MUL                            A=11  B=10  C=12         ; var11 = var10 * var12
+	[00008] [00046] [0x0000021]	    ADD                            A=3  B=3  C=11           ; var3 = var3 + var11
+
+	; Block 6 (B6) | PC 47 -> 47
+	[00000] [00047] [0x0000039]	    FORNLOOP                       A=5  D=-40               ; var7 += var6; if var7 <= var5 then goto #8 [B1] else goto #48 [B7]
+
+	; Block 7 (B7) | PC 48 -> 53
+	[00000] [00048] [0x000000F]	    GETTABLEKS [0x0000004]         A=8  B=0  C=185          ; var8 = var0._removeInstances
+	[00001] [00050] [0x0000034]	    LENGTH                         A=7  B=8                 ; var7 = #var8
+	[00002] [00051] [0x0000004]	    LOADN                          A=5  D=1                 ; var5 = 1
+	[00003] [00052] [0x0000004]	    LOADN                          A=6  D=-1                ; var6 = -1
+	[00004] [00053] [0x0000038]	    FORNPREP                       A=5  D=14                ; for var7 = var7, var5, var6 do goto #54 [B8]
+
+	; Block 8 (B8) | PC 54 -> 66
+	[00000] [00054] [0x000000F]	    GETTABLEKS [0x0000004]         A=9  B=0  C=185          ; var9 = var0._removeInstances
+	[00001] [00056] [0x000000D]	    GETTABLE                       A=8  B=9  C=7            ; var8 = var9[var7]
+	[00002] [00057] [0x000000C]	    GETIMPORT [0x80902800]         A=9  D=11                ; var9 = table.remove
+	[00003] [00059] [0x0000006]	    MOVE                           A=10  B=4                ; var10 = var4
+	[00004] [00060] [0x0000006]	    MOVE                           A=11  B=8                ; var11 = var8
+	[00005] [00061] [0x0000057]	    CALLFB [0x0000002]             A=9  B=3  C=1            ; var9(var10, var11)
+	[00006] [00063] [0x000000F]	    GETTABLEKS [0x0000004]         A=9  B=0  C=185          ; var9 = var0._removeInstances
+	[00007] [00065] [0x0000002]	    LOADNIL                        A=10                     ; var10 = nil
+	[00008] [00066] [0x000000E]	    SETTABLE                       A=10  B=9  C=7           ; var9[var7] = var10
+
+	; Block 9 (B9) | PC 67 -> 67
+	[00000] [00067] [0x0000039]	    FORNLOOP                       A=5  D=-14               ; var7 += var6; if var7 <= var5 then goto #54 [B8] else goto #68 [B10]
+
+	; Block 10 [EXIT] (B10) | PC 68 -> 98
+	[00000] [00068] [0x0000009]	    GETUPVAL                       A=7  B=2                 ; var7 = up_2
+	[00001] [00069] [0x0000006]	    MOVE                           A=8  B=2                 ; var8 = var2
+	[00002] [00070] [0x0000057]	    CALLFB [0x0000003]             A=7  B=2  C=2            ; var7 = var7(var8)
+	[00003] [00072] [0x0000009]	    GETUPVAL                       A=8  B=3                 ; var8 = up_3
+	[00004] [00073] [0x0000004]	    LOADN                          A=9  D=0                 ; var9 = 0
+	[00005] [00074] [0x000000F]	    GETTABLEKS [0x000000C]         A=11  B=3  C=120         ; var11 = var3.Y
+	[00006] [00076] [0x0000049]	    FASTCALL1                      A=22  B=11  C=1          ; ... = math.rad(var11) -- Uses args and results from the CALL instruction located in [00076]. If successful goto >= [00077]
+	[00007] [00077] [0x0000009]	    GETUPVAL                       A=10  B=4                ; var10 = up_4
+	[00008] [00078] [0x0000015]	    CALL                           A=10  B=2  C=2           ; var10 = var10(var11)
+	[00009] [00079] [0x0000004]	    LOADN                          A=11  D=0                ; var11 = 0
+	[00010] [00080] [0x0000057]	    CALLFB [0x0000004]             A=8  B=4  C=2            ; var8 = var8(var9, var10, var11)
+	[00011] [00082] [0x0000023]	    MUL                            A=6  B=7  C=8            ; var6 = var7 * var8
+	[00012] [00083] [0x0000009]	    GETUPVAL                       A=7  B=3                 ; var7 = up_3
+	[00013] [00084] [0x000000F]	    GETTABLEKS [0x000000D]         A=9  B=3  C=121          ; var9 = var3.X
+	[00014] [00086] [0x0000049]	    FASTCALL1                      A=22  B=9  C=1           ; ... = math.rad(var9) -- Uses args and results from the CALL instruction located in [00086]. If successful goto >= [00087]
+	[00015] [00087] [0x0000009]	    GETUPVAL                       A=8  B=4                 ; var8 = up_4
+	[00016] [00088] [0x0000015]	    CALL                           A=8  B=2  C=2            ; var8 = var8(var9)
+	[00017] [00089] [0x0000004]	    LOADN                          A=9  D=0                 ; var9 = 0
+	[00018] [00090] [0x000000F]	    GETTABLEKS [0x000000E]         A=11  B=3  C=123         ; var11 = var3.Z
+	[00019] [00092] [0x0000049]	    FASTCALL1                      A=22  B=11  C=1          ; ... = math.rad(var11) -- Uses args and results from the CALL instruction located in [00092]. If successful goto >= [00093]
+	[00020] [00093] [0x0000009]	    GETUPVAL                       A=10  B=4                ; var10 = up_4
+	[00021] [00094] [0x0000015]	    CALL                           A=10  B=2  C=2           ; var10 = var10(var11)
+	[00022] [00095] [0x0000057]	    CALLFB [0x0000005]             A=7  B=4  C=2            ; var7 = var7(var8, var9, var10)
+	[00023] [00097] [0x0000023]	    MUL                            A=5  B=6  C=7            ; var5 = var6 * var7
+	[00024] [00098] [0x0000016]	    RETURN                         A=5  B=2                 ; return var5
+end
+[00043] [00064] [0x0000040]	    DUPCLOSURE                     A=10  D=31               ; var10 = Update
+[00044] [00065] [0x0000046]	    CAPTURE                        A=0  B=7                 ; up_0 = var7 -- Readable
+[00045] [00066] [0x0000046]	    CAPTURE                        A=0  B=9                 ; up_1 = var9 -- Readable
+[00046] [00067] [0x0000046]	    CAPTURE                        A=0  B=4                 ; up_2 = var4 -- Readable
+[00047] [00068] [0x0000046]	    CAPTURE                        A=0  B=5                 ; up_3 = var5 -- Readable
+[00048] [00069] [0x0000046]	    CAPTURE                        A=0  B=6                 ; up_4 = var6 -- Readable
+[00049] [00070] [0x0000010]	    SETTABLEKS [0x0000020]         A=10  B=0  C=38          ; var0.Update = var10
+local function EndCameraShake(var0) --[[ Line: 178, Id: 6 ]]
+	; Constants [3]
+		[0x0000000] : "_camShakeInstances"           ; LBC_CONSTANT_STRING (0x03)
+		[0x0000001] : "_removeInstances"             ; LBC_CONSTANT_STRING (0x03)
+		[0x0000002] : 1                              ; LBC_CONSTANT_NUMBER (0x02)
+
+	; Block 0 [ENTRY] (B0) | PC 0 -> 5
+	[00000] [00000] [0x0000004]	    LOADN                          A=3  D=1                 ; var3 = 1
+	[00001] [00001] [0x000000F]	    GETTABLEKS [0x0000000]         A=4  B=0  C=129          ; var4 = var0._camShakeInstances
+	[00002] [00003] [0x0000034]	    LENGTH                         A=1  B=4                 ; var1 = #var4
+	[00003] [00004] [0x0000004]	    LOADN                          A=2  D=1                 ; var2 = 1
+	[00004] [00005] [0x0000038]	    FORNPREP                       A=1  D=8                 ; for var3 = var3, var1, var2 do goto #6 [B1]
+
+	; Block 1 (B1) | PC 6 -> 12
+	[00000] [00006] [0x000000F]	    GETTABLEKS [0x0000001]         A=4  B=0  C=185          ; var4 = var0._removeInstances
+	[00001] [00008] [0x000000F]	    GETTABLEKS [0x0000001]         A=7  B=0  C=185          ; var7 = var0._removeInstances
+	[00002] [00010] [0x0000034]	    LENGTH                         A=6  B=7                 ; var6 = #var7
+	[00003] [00011] [0x0000027]	    ADDK                           A=5  B=6                 ; var5 = var6 + 1
+	[00004] [00012] [0x000000E]	    SETTABLE                       A=3  B=4  C=5            ; var4[var5] = var3
+
+	; Block 2 (B2) | PC 13 -> 13
+	[00000] [00013] [0x0000039]	    FORNLOOP                       A=1  D=-8                ; var3 += var2; if var3 <= var1 then goto #6 [B1] else goto #14 [B3]
+
+	; Block 3 [EXIT] (B3) | PC 14 -> 14
+	[00000] [00014] [0x0000016]	    RETURN                         A=0  B=1                 ; return
+end
+[00050] [00072] [0x0000040]	    DUPCLOSURE                     A=10  D=33               ; var10 = EndCameraShake
+[00051] [00073] [0x0000010]	    SETTABLEKS [0x0000022]         A=10  B=0  C=28          ; var0.EndCameraShake = var10
+local function Shake(var0, var1) --[[ Line: 184, Id: 7 ]]
+	; Constants [9]
+		[0x0000000] : "type"                         ; LBC_CONSTANT_STRING (0x03)
+		[0x0000001] : type                           ; LBC_CONSTANT_IMPORT (0x04)
+		[0x0000002] : "table"                        ; LBC_CONSTANT_STRING (0x03)
+		[0x0000003] : "_camShakeInstance"            ; LBC_CONSTANT_STRING (0x03)
+		[0x0000004] : "ShakeInstance must be of type CameraShakeInstance" ; LBC_CONSTANT_STRING (0x03)
+		[0x0000005] : "assert"                       ; LBC_CONSTANT_STRING (0x03)
+		[0x0000006] : assert                         ; LBC_CONSTANT_IMPORT (0x04)
+		[0x0000007] : "_camShakeInstances"           ; LBC_CONSTANT_STRING (0x03)
+		[0x0000008] : 1                              ; LBC_CONSTANT_NUMBER (0x02)
+
+	; Block 0 [ENTRY] (B0) | PC 0 -> 6
+	[00000] [00000] [0x0000003]	    LOADB                          A=3  B=0  C=0            ; var3 = false
+	[00001] [00001] [0x0000049]	    FASTCALL1                      A=40  B=1  C=3           ; ... = type(var1) -- Uses args and results from the CALL instruction located in [00003]. If successful goto >= [00004]
+	[00002] [00002] [0x0000006]	    MOVE                           A=5  B=1                 ; var5 = var1
+	[00003] [00003] [0x000000C]	    GETIMPORT [0x40000000]         A=4  D=1                 ; var4 = type
+	[00004] [00005] [0x0000015]	    CALL                           A=4  B=2  C=2            ; var4 = var4(var5)
+	[00005] [00006] [0x0000050]	    JUMPXEQKS [0x80000002]         A=4  D=3                 ; if var4 ~= "table" then goto #10 [B2] else goto #8 [B1]
+
+	; Block 1 (B1) | PC 8 -> 8
+	[00000] [00008] [0x000000F]	    GETTABLEKS [0x0000003]         A=3  B=1  C=117          ; var3 = var1._camShakeInstance
+
+	; Block 2 [EXIT] (B2) | PC 10 -> 23
+	[00000] [00010] [0x000004B]	    FASTCALL2K [0x0000004]         A=1  B=3  C=4            ; ... = assert(var3, "ShakeInstance must be of type CameraShakeInstance") -- Uses args and results from the CALL instruction located in [00013]. If successful goto >= [00014]
+	[00001] [00012] [0x0000005]	    LOADK                          A=4  D=4                 ; var4 = "ShakeInstance must be of type CameraShakeInstance"
+	[00002] [00013] [0x000000C]	    GETIMPORT [0x40500000]         A=2  D=6                 ; var2 = assert
+	[00003] [00015] [0x0000015]	    CALL                           A=2  B=3  C=1            ; var2(var3, var4)
+	[00004] [00016] [0x000000F]	    GETTABLEKS [0x0000007]         A=2  B=0  C=129          ; var2 = var0._camShakeInstances
+	[00005] [00018] [0x000000F]	    GETTABLEKS [0x0000007]         A=5  B=0  C=129          ; var5 = var0._camShakeInstances
+	[00006] [00020] [0x0000034]	    LENGTH                         A=4  B=5                 ; var4 = #var5
+	[00007] [00021] [0x0000027]	    ADDK                           A=3  B=4                 ; var3 = var4 + 1
+	[00008] [00022] [0x000000E]	    SETTABLE                       A=1  B=2  C=3            ; var2[var3] = var1
+	[00009] [00023] [0x0000016]	    RETURN                         A=1  B=2                 ; return var1
+end
+[00052] [00075] [0x0000040]	    DUPCLOSURE                     A=10  D=35               ; var10 = Shake
+[00053] [00076] [0x0000010]	    SETTABLEKS [0x0000024]         A=10  B=0  C=140         ; var0.Shake = var10
+local function ShakeSustain(var0, var1) --[[ Line: 191, Id: 8 ]]
+	; Constants [11]
+		[0x0000000] : "type"                         ; LBC_CONSTANT_STRING (0x03)
+		[0x0000001] : type                           ; LBC_CONSTANT_IMPORT (0x04)
+		[0x0000002] : "table"                        ; LBC_CONSTANT_STRING (0x03)
+		[0x0000003] : "_camShakeInstance"            ; LBC_CONSTANT_STRING (0x03)
+		[0x0000004] : "ShakeInstance must be of type CameraShakeInstance" ; LBC_CONSTANT_STRING (0x03)
+		[0x0000005] : "assert"                       ; LBC_CONSTANT_STRING (0x03)
+		[0x0000006] : assert                         ; LBC_CONSTANT_IMPORT (0x04)
+		[0x0000007] : "_camShakeInstances"           ; LBC_CONSTANT_STRING (0x03)
+		[0x0000008] : 1                              ; LBC_CONSTANT_NUMBER (0x02)
+		[0x0000009] : "fadeInDuration"               ; LBC_CONSTANT_STRING (0x03)
+		[0x000000A] : "StartFadeIn"                  ; LBC_CONSTANT_STRING (0x03)
+
+	; Block 0 [ENTRY] (B0) | PC 0 -> 6
+	[00000] [00000] [0x0000003]	    LOADB                          A=3  B=0  C=0            ; var3 = false
+	[00001] [00001] [0x0000049]	    FASTCALL1                      A=40  B=1  C=3           ; ... = type(var1) -- Uses args and results from the CALL instruction located in [00003]. If successful goto >= [00004]
+	[00002] [00002] [0x0000006]	    MOVE                           A=5  B=1                 ; var5 = var1
+	[00003] [00003] [0x000000C]	    GETIMPORT [0x40000000]         A=4  D=1                 ; var4 = type
+	[00004] [00005] [0x0000015]	    CALL                           A=4  B=2  C=2            ; var4 = var4(var5)
+	[00005] [00006] [0x0000050]	    JUMPXEQKS [0x80000002]         A=4  D=3                 ; if var4 ~= "table" then goto #10 [B2] else goto #8 [B1]
+
+	; Block 1 (B1) | PC 8 -> 8
+	[00000] [00008] [0x000000F]	    GETTABLEKS [0x0000003]         A=3  B=1  C=117          ; var3 = var1._camShakeInstance
+
+	; Block 2 [EXIT] (B2) | PC 10 -> 29
+	[00000] [00010] [0x000004B]	    FASTCALL2K [0x0000004]         A=1  B=3  C=4            ; ... = assert(var3, "ShakeInstance must be of type CameraShakeInstance") -- Uses args and results from the CALL instruction located in [00013]. If successful goto >= [00014]
+	[00001] [00012] [0x0000005]	    LOADK                          A=4  D=4                 ; var4 = "ShakeInstance must be of type CameraShakeInstance"
+	[00002] [00013] [0x000000C]	    GETIMPORT [0x40500000]         A=2  D=6                 ; var2 = assert
+	[00003] [00015] [0x0000015]	    CALL                           A=2  B=3  C=1            ; var2(var3, var4)
+	[00004] [00016] [0x000000F]	    GETTABLEKS [0x0000007]         A=2  B=0  C=129          ; var2 = var0._camShakeInstances
+	[00005] [00018] [0x000000F]	    GETTABLEKS [0x0000007]         A=5  B=0  C=129          ; var5 = var0._camShakeInstances
+	[00006] [00020] [0x0000034]	    LENGTH                         A=4  B=5                 ; var4 = #var5
+	[00007] [00021] [0x0000027]	    ADDK                           A=3  B=4                 ; var3 = var4 + 1
+	[00008] [00022] [0x000000E]	    SETTABLE                       A=1  B=2  C=3            ; var2[var3] = var1
+	[00009] [00023] [0x000000F]	    GETTABLEKS [0x0000009]         A=4  B=1  C=45           ; var4 = var1.fadeInDuration
+	[00010] [00025] [0x0000014]	    NAMECALL [0x000000A]           A=2  B=1  C=166          ; <self>var3 = var2 -> var1.StartFadeIn -- Next CALL/CALLFB instruction must be a __namecall invoker
+	[00011] [00027] [0x0000057]	    CALLFB [0x0000000]             A=2  B=3  C=1            ; var2(var3, var4)
+	[00012] [00029] [0x0000016]	    RETURN                         A=1  B=2                 ; return var1
+end
+[00054] [00078] [0x0000040]	    DUPCLOSURE                     A=10  D=37               ; var10 = ShakeSustain
+[00055] [00079] [0x0000010]	    SETTABLEKS [0x0000026]         A=10  B=0  C=90          ; var0.ShakeSustain = var10
+local function ShakeOnce(var0, var1, var2, var3, var4, var5, var6) --[[ Line: 199, Id: 9 ]]
+	; Constants [10]
+		[0x0000000] : "new"                          ; LBC_CONSTANT_STRING (0x03)
+		[0x0000001] : "typeof"                       ; LBC_CONSTANT_STRING (0x03)
+		[0x0000002] : typeof                         ; LBC_CONSTANT_IMPORT (0x04)
+		[0x0000003] : "Vector3"                      ; LBC_CONSTANT_STRING (0x03)
+		[0x0000004] : Vector3.new(0.15000000596046448, 0.15000000596046448, 0.15000000596046448) ; LBC_CONSTANT_VECTOR (0x07)
+		[0x0000005] : "PositionInfluence"            ; LBC_CONSTANT_STRING (0x03)
+		[0x0000006] : Vector3.new(1, 1, 1)           ; LBC_CONSTANT_VECTOR (0x07)
+		[0x0000007] : "RotationInfluence"            ; LBC_CONSTANT_STRING (0x03)
+		[0x0000008] : "_camShakeInstances"           ; LBC_CONSTANT_STRING (0x03)
+		[0x0000009] : 1                              ; LBC_CONSTANT_NUMBER (0x02)
+
+	; Block 0 [ENTRY] (B0) | PC 0 -> 14
+	[00000] [00000] [0x0000009]	    GETUPVAL                       A=7  B=0                 ; var7 = up_0
+	[00001] [00001] [0x000000F]	    GETTABLEKS [0x0000000]         A=7  B=7  C=239          ; var7 = var7.new
+	[00002] [00003] [0x0000006]	    MOVE                           A=8  B=1                 ; var8 = var1
+	[00003] [00004] [0x0000006]	    MOVE                           A=9  B=2                 ; var9 = var2
+	[00004] [00005] [0x0000006]	    MOVE                           A=10  B=3                ; var10 = var3
+	[00005] [00006] [0x0000006]	    MOVE                           A=11  B=4                ; var11 = var4
+	[00006] [00007] [0x0000057]	    CALLFB [0x0000000]             A=7  B=5  C=2            ; var7 = var7(var8, var9, var10, var11)
+	[00007] [00009] [0x0000049]	    FASTCALL1                      A=44  B=5  C=3           ; ... = typeof(var5) -- Uses args and results from the CALL instruction located in [00011]. If successful goto >= [00012]
+	[00008] [00010] [0x0000006]	    MOVE                           A=10  B=5                ; var10 = var5
+	[00009] [00011] [0x000000C]	    GETIMPORT [0x40100000]         A=9  D=2                 ; var9 = typeof
+	[00010] [00013] [0x0000015]	    CALL                           A=9  B=2  C=2            ; var9 = var9(var10)
+	[00011] [00014] [0x0000050]	    JUMPXEQKS [0x80000003]         A=9  D=3                 ; if var9 ~= "Vector3" then goto #18 [B2] else goto #16 [B1]
+
+	; Block 1 (B1) | PC 16 -> 17
+	[00000] [00016] [0x0000006]	    MOVE                           A=8  B=5                 ; var8 = var5
+	[00001] [00017] [0x0000019]	    JUMPIF                         A=8  D=1                 ; if var8 then goto #19 [B3] else goto #18 [B2]
+
+	; Block 2 (B2) | PC 18 -> 18
+	[00000] [00018] [0x0000005]	    LOADK                          A=8  D=4                 ; var8 = Vector3.new(0.15000000596046448, 0.15000000596046448, 0.15000000596046448)
+
+	; Block 3 (B3) | PC 19 -> 26
+	[00000] [00019] [0x0000010]	    SETTABLEKS [0x0000005]         A=8  B=7  C=114          ; var7.PositionInfluence = var8
+	[00001] [00021] [0x0000049]	    FASTCALL1                      A=44  B=6  C=3           ; ... = typeof(var6) -- Uses args and results from the CALL instruction located in [00023]. If successful goto >= [00024]
+	[00002] [00022] [0x0000006]	    MOVE                           A=10  B=6                ; var10 = var6
+	[00003] [00023] [0x000000C]	    GETIMPORT [0x40100000]         A=9  D=2                 ; var9 = typeof
+	[00004] [00025] [0x0000015]	    CALL                           A=9  B=2  C=2            ; var9 = var9(var10)
+	[00005] [00026] [0x0000050]	    JUMPXEQKS [0x80000003]         A=9  D=3                 ; if var9 ~= "Vector3" then goto #30 [B5] else goto #28 [B4]
+
+	; Block 4 (B4) | PC 28 -> 29
+	[00000] [00028] [0x0000006]	    MOVE                           A=8  B=6                 ; var8 = var6
+	[00001] [00029] [0x0000019]	    JUMPIF                         A=8  D=1                 ; if var8 then goto #31 [B6] else goto #30 [B5]
+
+	; Block 5 (B5) | PC 30 -> 30
+	[00000] [00030] [0x0000005]	    LOADK                          A=8  D=6                 ; var8 = Vector3.new(1, 1, 1)
+
+	; Block 6 [EXIT] (B6) | PC 31 -> 40
+	[00000] [00031] [0x0000010]	    SETTABLEKS [0x0000007]         A=8  B=7  C=236          ; var7.RotationInfluence = var8
+	[00001] [00033] [0x000000F]	    GETTABLEKS [0x0000008]         A=8  B=0  C=129          ; var8 = var0._camShakeInstances
+	[00002] [00035] [0x000000F]	    GETTABLEKS [0x0000008]         A=11  B=0  C=129         ; var11 = var0._camShakeInstances
+	[00003] [00037] [0x0000034]	    LENGTH                         A=10  B=11               ; var10 = #var11
+	[00004] [00038] [0x0000027]	    ADDK                           A=9  B=10                ; var9 = var10 + 1
+	[00005] [00039] [0x000000E]	    SETTABLE                       A=7  B=8  C=9            ; var8[var9] = var7
+	[00006] [00040] [0x0000016]	    RETURN                         A=7  B=2                 ; return var7
+end
+[00056] [00081] [0x0000040]	    DUPCLOSURE                     A=10  D=39               ; var10 = ShakeOnce
+[00057] [00082] [0x0000046]	    CAPTURE                        A=0  B=8                 ; up_0 = var8 -- Readable
+[00058] [00083] [0x0000010]	    SETTABLEKS [0x0000028]         A=10  B=0  C=28          ; var0.ShakeOnce = var10
+local function StartShake(var0, var1, var2, var3, var4, var5) --[[ Line: 208, Id: 10 ]]
+	; Constants [11]
+		[0x0000000] : "new"                          ; LBC_CONSTANT_STRING (0x03)
+		[0x0000001] : "typeof"                       ; LBC_CONSTANT_STRING (0x03)
+		[0x0000002] : typeof                         ; LBC_CONSTANT_IMPORT (0x04)
+		[0x0000003] : "Vector3"                      ; LBC_CONSTANT_STRING (0x03)
+		[0x0000004] : Vector3.new(0.15000000596046448, 0.15000000596046448, 0.15000000596046448) ; LBC_CONSTANT_VECTOR (0x07)
+		[0x0000005] : "PositionInfluence"            ; LBC_CONSTANT_STRING (0x03)
+		[0x0000006] : Vector3.new(1, 1, 1)           ; LBC_CONSTANT_VECTOR (0x07)
+		[0x0000007] : "RotationInfluence"            ; LBC_CONSTANT_STRING (0x03)
+		[0x0000008] : "StartFadeIn"                  ; LBC_CONSTANT_STRING (0x03)
+		[0x0000009] : "_camShakeInstances"           ; LBC_CONSTANT_STRING (0x03)
+		[0x000000A] : 1                              ; LBC_CONSTANT_NUMBER (0x02)
+
+	; Block 0 [ENTRY] (B0) | PC 0 -> 13
+	[00000] [00000] [0x0000009]	    GETUPVAL                       A=6  B=0                 ; var6 = up_0
+	[00001] [00001] [0x000000F]	    GETTABLEKS [0x0000000]         A=6  B=6  C=239          ; var6 = var6.new
+	[00002] [00003] [0x0000006]	    MOVE                           A=7  B=1                 ; var7 = var1
+	[00003] [00004] [0x0000006]	    MOVE                           A=8  B=2                 ; var8 = var2
+	[00004] [00005] [0x0000006]	    MOVE                           A=9  B=3                 ; var9 = var3
+	[00005] [00006] [0x0000057]	    CALLFB [0x0000000]             A=6  B=4  C=2            ; var6 = var6(var7, var8, var9)
+	[00006] [00008] [0x0000049]	    FASTCALL1                      A=44  B=4  C=3           ; ... = typeof(var4) -- Uses args and results from the CALL instruction located in [00010]. If successful goto >= [00011]
+	[00007] [00009] [0x0000006]	    MOVE                           A=9  B=4                 ; var9 = var4
+	[00008] [00010] [0x000000C]	    GETIMPORT [0x40100000]         A=8  D=2                 ; var8 = typeof
+	[00009] [00012] [0x0000015]	    CALL                           A=8  B=2  C=2            ; var8 = var8(var9)
+	[00010] [00013] [0x0000050]	    JUMPXEQKS [0x80000003]         A=8  D=3                 ; if var8 ~= "Vector3" then goto #17 [B2] else goto #15 [B1]
+
+	; Block 1 (B1) | PC 15 -> 16
+	[00000] [00015] [0x0000006]	    MOVE                           A=7  B=4                 ; var7 = var4
+	[00001] [00016] [0x0000019]	    JUMPIF                         A=7  D=1                 ; if var7 then goto #18 [B3] else goto #17 [B2]
+
+	; Block 2 (B2) | PC 17 -> 17
+	[00000] [00017] [0x0000005]	    LOADK                          A=7  D=4                 ; var7 = Vector3.new(0.15000000596046448, 0.15000000596046448, 0.15000000596046448)
+
+	; Block 3 (B3) | PC 18 -> 25
+	[00000] [00018] [0x0000010]	    SETTABLEKS [0x0000005]         A=7  B=6  C=114          ; var6.PositionInfluence = var7
+	[00001] [00020] [0x0000049]	    FASTCALL1                      A=44  B=5  C=3           ; ... = typeof(var5) -- Uses args and results from the CALL instruction located in [00022]. If successful goto >= [00023]
+	[00002] [00021] [0x0000006]	    MOVE                           A=9  B=5                 ; var9 = var5
+	[00003] [00022] [0x000000C]	    GETIMPORT [0x40100000]         A=8  D=2                 ; var8 = typeof
+	[00004] [00024] [0x0000015]	    CALL                           A=8  B=2  C=2            ; var8 = var8(var9)
+	[00005] [00025] [0x0000050]	    JUMPXEQKS [0x80000003]         A=8  D=3                 ; if var8 ~= "Vector3" then goto #29 [B5] else goto #27 [B4]
+
+	; Block 4 (B4) | PC 27 -> 28
+	[00000] [00027] [0x0000006]	    MOVE                           A=7  B=5                 ; var7 = var5
+	[00001] [00028] [0x0000019]	    JUMPIF                         A=7  D=1                 ; if var7 then goto #30 [B6] else goto #29 [B5]
+
+	; Block 5 (B5) | PC 29 -> 29
+	[00000] [00029] [0x0000005]	    LOADK                          A=7  D=6                 ; var7 = Vector3.new(1, 1, 1)
+
+	; Block 6 [EXIT] (B6) | PC 30 -> 44
+	[00000] [00030] [0x0000010]	    SETTABLEKS [0x0000007]         A=7  B=6  C=236          ; var6.RotationInfluence = var7
+	[00001] [00032] [0x0000006]	    MOVE                           A=9  B=3                 ; var9 = var3
+	[00002] [00033] [0x0000014]	    NAMECALL [0x0000008]           A=7  B=6  C=166          ; <self>var8 = var7 -> var6.StartFadeIn -- Next CALL/CALLFB instruction must be a __namecall invoker
+	[00003] [00035] [0x0000057]	    CALLFB [0x0000001]             A=7  B=3  C=1            ; var7(var8, var9)
+	[00004] [00037] [0x000000F]	    GETTABLEKS [0x0000009]         A=7  B=0  C=129          ; var7 = var0._camShakeInstances
+	[00005] [00039] [0x000000F]	    GETTABLEKS [0x0000009]         A=10  B=0  C=129         ; var10 = var0._camShakeInstances
+	[00006] [00041] [0x0000034]	    LENGTH                         A=9  B=10                ; var9 = #var10
+	[00007] [00042] [0x0000027]	    ADDK                           A=8  B=9                 ; var8 = var9 + 1
+	[00008] [00043] [0x000000E]	    SETTABLE                       A=6  B=7  C=8            ; var7[var8] = var6
+	[00009] [00044] [0x0000016]	    RETURN                         A=6  B=2                 ; return var6
+end
+[00059] [00085] [0x0000040]	    DUPCLOSURE                     A=10  D=41               ; var10 = StartShake
+[00060] [00086] [0x0000046]	    CAPTURE                        A=0  B=8                 ; up_0 = var8 -- Readable
+[00061] [00087] [0x0000010]	    SETTABLEKS [0x000002A]         A=10  B=0  C=198         ; var0.StartShake = var10
+[00062] [00089] [0x0000016]	    RETURN                         A=0  B=2                 ; return var0

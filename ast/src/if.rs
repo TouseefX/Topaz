@@ -1,7 +1,7 @@
-use parking_lot::Mutex;
-use triomphe::Arc;
-
-use crate::{formatter::Formatter, LocalRw, RcLocal, SideEffects, Traverse};
+use crate::{
+    LocalRw, RcLocal, SharedBlock, SideEffects, Traverse, formatter::Formatter, share_block,
+    shared_blocks_equal,
+};
 
 use super::{Block, RValue};
 
@@ -10,14 +10,15 @@ use std::fmt;
 #[derive(Debug, Clone)]
 pub struct If {
     pub condition: RValue,
-    pub then_block: Arc<Mutex<Block>>,
-    pub else_block: Arc<Mutex<Block>>,
+    pub then_block: SharedBlock,
+    pub else_block: SharedBlock,
 }
 
 impl PartialEq for If {
-    fn eq(&self, _other: &Self) -> bool {
-        
-        false
+    fn eq(&self, other: &Self) -> bool {
+        self.condition == other.condition
+            && shared_blocks_equal(&self.then_block, &other.then_block)
+            && shared_blocks_equal(&self.else_block, &other.else_block)
     }
 }
 
@@ -25,8 +26,8 @@ impl If {
     pub fn new(condition: RValue, then_block: Block, else_block: Block) -> Self {
         Self {
             condition,
-            then_block: Arc::new(then_block.into()),
-            else_block: Arc::new(else_block.into()),
+            then_block: share_block(then_block),
+            else_block: share_block(else_block),
         }
     }
 }
@@ -42,9 +43,21 @@ impl Traverse for If {
 }
 
 impl SideEffects for If {
-    
     fn has_side_effects(&self) -> bool {
-        true
+        // Do not walk then/else. Nested ifs made that O(n²) on 60k-line
+        // ASTs. Non-empty bodies are treated as effecting; empty ones
+        // still fold when the condition is pure.
+        self.condition.has_side_effects()
+            || self
+                .then_block
+                .try_lock()
+                .map(|b| !b.is_empty())
+                .unwrap_or(true)
+            || self
+                .else_block
+                .try_lock()
+                .map(|b| !b.is_empty())
+                .unwrap_or(true)
     }
 }
 

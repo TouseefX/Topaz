@@ -1,4 +1,5 @@
 use crate::{Block, RValue, Reduce, Statement, Traverse, Unary, UnaryOperation};
+use triomphe::Arc;
 
 /// What statement is semantically equivalent to "falling off the end" of the
 /// block currently being processed.
@@ -84,18 +85,35 @@ impl ExitKind {
 }
 
 pub fn apply_guard_clauses(block: &mut Block) {
+    crate::reset_walk_seen();
+    crate::reset_done_funcs();
     apply_guard_clauses_ctx(block, ExitKind::Return);
 }
 
 fn apply_guard_clauses_ctx(block: &mut Block, exit_kind: ExitKind) {
+    if crate::past_post_deadline() {
+        return;
+    }
     let mut i = 0;
     while i < block.0.len() {
+        if i & 15 == 0 && crate::past_post_deadline() {
+            return;
+        }
         // Recurse into closures first. Closures start a brand new function,
         // so their body's fallthrough always means `return`, regardless of
         // whatever loop we might currently be nested inside of.
         block.0[i].traverse_rvalues(&mut |rv| {
+            if crate::past_post_deadline() {
+                return;
+            }
             if let RValue::Closure(closure) = rv {
-                apply_guard_clauses_ctx(&mut closure.function.lock().body, ExitKind::Return);
+                let ptr = Arc::as_ptr(&closure.function.0) as *const ();
+                if !crate::mark_func_done(ptr) {
+                    return;
+                }
+                if let Some(mut f) = closure.function.try_lock() {
+                    apply_guard_clauses_ctx(&mut f.body, ExitKind::Return);
+                }
             }
         });
 
@@ -129,36 +147,59 @@ fn apply_guard_clauses_ctx(block: &mut Block, exit_kind: ExitKind) {
         // above already guards against for the `If` case.
         match &mut block.0[i] {
             Statement::If(r#if) => {
-                apply_guard_clauses_ctx(&mut r#if.then_block.lock(), branch_exit_kind);
-                apply_guard_clauses_ctx(&mut r#if.else_block.lock(), branch_exit_kind);
+                crate::visit_shared_mut(&r#if.then_block, &mut |b| {
+                    apply_guard_clauses_ctx(b, branch_exit_kind);
+                });
+                crate::visit_shared_mut(&r#if.else_block, &mut |b| {
+                    apply_guard_clauses_ctx(b, branch_exit_kind);
+                });
             }
             Statement::While(r#while) => {
-                apply_guard_clauses_ctx(&mut r#while.block.lock(), ExitKind::Continue)
+                crate::visit_shared_mut(&r#while.block, &mut |b| {
+                    apply_guard_clauses_ctx(b, ExitKind::Continue);
+                });
             }
             Statement::Repeat(repeat) => {
-                apply_guard_clauses_ctx(&mut repeat.block.lock(), ExitKind::Continue)
+                crate::visit_shared_mut(&repeat.block, &mut |b| {
+                    apply_guard_clauses_ctx(b, ExitKind::Continue);
+                });
             }
             Statement::NumericFor(nf) => {
-                apply_guard_clauses_ctx(&mut nf.block.lock(), ExitKind::Continue)
+                crate::visit_shared_mut(&nf.block, &mut |b| {
+                    apply_guard_clauses_ctx(b, ExitKind::Continue);
+                });
             }
             Statement::GenericFor(gf) => {
-                apply_guard_clauses_ctx(&mut gf.block.lock(), ExitKind::Continue)
+                crate::visit_shared_mut(&gf.block, &mut |b| {
+                    apply_guard_clauses_ctx(b, ExitKind::Continue);
+                });
             }
             _ => {}
         }
 
-        // Case 1: Redundant else removal after terminator
-        let mut did_case1 = false;
+        // Case 1: Redundant else removal after terminator.
+        // Take the else-body while `r#if` is borrowed, then splice after
+        // that borrow ends (E0499: splice vs `&mut block.0[i]`).
+        let mut case1_stmts = None;
         if let Statement::If(r#if) = &mut block.0[i] {
-            let ends_term = ends_in_terminator(&r#if.then_block.lock().0);
-            let else_not_empty = !r#if.else_block.lock().0.is_empty();
+            let ends_term = r#if
+                .then_block
+                .try_lock()
+                .map(|b| ends_in_terminator(&b.0))
+                .unwrap_or(false);
+            let else_not_empty = r#if
+                .else_block
+                .try_lock()
+                .map(|b| !b.0.is_empty())
+                .unwrap_or(false);
             if ends_term && else_not_empty {
-                let stmts = std::mem::take(&mut r#if.else_block.lock().0);
-                block.0.splice(i + 1..i + 1, stmts);
-                did_case1 = true;
+                if let Some(mut else_b) = r#if.else_block.try_lock() {
+                    case1_stmts = Some(std::mem::take(&mut else_b.0));
+                }
             }
         }
-        if did_case1 {
+        if let Some(stmts) = case1_stmts {
+            block.0.splice(i + 1..i + 1, stmts);
             i += 1;
             continue;
         }
@@ -172,10 +213,18 @@ fn apply_guard_clauses_ctx(block: &mut Block, exit_kind: ExitKind) {
         // fallthrough into an incorrect early exit).
         if is_tail_position {
             if let Some(exit_stmt) = exit_kind.make_statement() {
-                let mut did_case2 = false;
+                let mut case2_stmts = None;
                 if let Statement::If(r#if) = &mut block.0[i] {
-                    let else_empty = r#if.else_block.lock().0.is_empty();
-                    let then_len = r#if.then_block.lock().0.len();
+                    let else_empty = r#if
+                        .else_block
+                        .try_lock()
+                        .map(|b| b.0.is_empty())
+                        .unwrap_or(false);
+                    let then_len = r#if
+                        .then_block
+                        .try_lock()
+                        .map(|b| b.0.len())
+                        .unwrap_or(0);
                     let is_negated = match &r#if.condition {
                         RValue::Unary(u) => u.operation == UnaryOperation::Not,
                         _ => false,
@@ -186,21 +235,28 @@ fn apply_guard_clauses_ctx(block: &mut Block, exit_kind: ExitKind) {
                     // block doesn't actually fall through, so inverting it
                     // and appending a synthetic exit would silently
                     // duplicate/alter control flow.
-                    let then_already_terminates = ends_in_terminator(&r#if.then_block.lock().0);
+                    let then_already_terminates = r#if
+                        .then_block
+                        .try_lock()
+                        .map(|b| ends_in_terminator(&b.0))
+                        .unwrap_or(true);
                     if !then_already_terminates
                         && else_empty
                         && (then_len >= 2 || (then_len >= 1 && is_negated))
                     {
                         let new_cond =
                             Unary::new(r#if.condition.clone(), UnaryOperation::Not).reduce_condition();
-                        let stmts = std::mem::take(&mut r#if.then_block.lock().0);
-                        r#if.then_block.lock().0.push(exit_stmt);
-                        r#if.condition = new_cond;
-                        block.0.splice(i + 1..i + 1, stmts);
-                        did_case2 = true;
+                        if let Some(mut then_b) = r#if.then_block.try_lock() {
+                            let stmts = std::mem::take(&mut then_b.0);
+                            then_b.0.push(exit_stmt);
+                            drop(then_b);
+                            r#if.condition = new_cond;
+                            case2_stmts = Some(stmts);
+                        }
                     }
                 }
-                if did_case2 {
+                if let Some(stmts) = case2_stmts {
+                    block.0.splice(i + 1..i + 1, stmts);
                     i += 1;
                     continue;
                 }

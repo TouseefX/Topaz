@@ -33,6 +33,11 @@ pub enum Commands {
         /// Roblox client dumps (key 203).
         #[arg(long, default_value_t = false, alias = "ruau")]
         luaur: bool,
+
+        /// Wall-clock decompile budget in seconds (default 180).
+        /// Overrides the `TOPAZ_TIME_BUDGET_SECS` environment variable.
+        #[arg(long, value_name = "SECS")]
+        time_budget: Option<u64>,
     },
 
     

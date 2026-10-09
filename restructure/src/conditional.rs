@@ -1,13 +1,12 @@
 use ast::Reduce;
 use cfg::block::{BlockEdge, BranchType};
 use itertools::Itertools;
-use parking_lot::Mutex;
 use petgraph::visit::EdgeRef;
-use triomphe::Arc;
 use tuple::Map;
 
 use crate::GraphStructurer;
-use petgraph::{algo::dominators::Dominators, stable_graph::NodeIndex};
+use cfg::IDom;
+use petgraph::stable_graph::NodeIndex;
 
 impl GraphStructurer {
     fn simplify_if(if_stat: &mut ast::If) {
@@ -108,11 +107,11 @@ impl GraphStructurer {
                     if let Some(if_stat) = block.last_mut().unwrap().as_if_mut() {
                         if then_target == entry {
                             if_stat.then_block =
-                                Arc::new(Mutex::new(vec![ast::Continue {}.into()].into()));
+                                ast::share_block(vec![ast::Continue {}.into()].into());
                             true
                         } else if else_target == entry {
                             if_stat.else_block =
-                                Arc::new(Mutex::new(vec![ast::Continue {}.into()].into()));
+                                ast::share_block(vec![ast::Continue {}.into()].into());
                             true
                         } else {
                             false
@@ -143,14 +142,34 @@ impl GraphStructurer {
             return false;
         }
 
+        let exit_args = then_successors.first().and_then(|&exit| {
+            let then_args = self
+                .function
+                .edges(then_node)
+                .find(|e| e.target() == exit)
+                .map(|e| e.weight().arguments.clone())
+                .unwrap_or_default();
+            let else_args = self
+                .function
+                .edges(else_node)
+                .find(|e| e.target() == exit)
+                .map(|e| e.weight().arguments.clone())
+                .unwrap_or_default();
+            if then_args == else_args {
+                Some(crate::without_identity_args(then_args))
+            } else {
+                None
+            }
+        });
+
         let then_block = self.function.remove_block(then_node).unwrap();
         let else_block = self.function.remove_block(else_node).unwrap();
 
         let block = self.function.block_mut(entry).unwrap();
         
         let if_stat = block.last_mut().unwrap().as_if_mut().unwrap();
-        if_stat.then_block = Arc::new(then_block.into());
-        if_stat.else_block = Arc::new(else_block.into());
+        if_stat.then_block = ast::share_block(then_block);
+        if_stat.else_block = ast::share_block(else_block);
         Self::simplify_if(if_stat);
 
         let after = Self::expand_if(if_stat);
@@ -167,10 +186,11 @@ impl GraphStructurer {
 
         let exit = then_successors.first().cloned();
         if let Some(exit) = exit {
-            self.function.set_edges(
-                entry,
-                vec![(exit, BlockEdge::new(BranchType::Unconditional))],
-            );
+            let mut edge = BlockEdge::new(BranchType::Unconditional);
+            if let Some(args) = exit_args {
+                edge.arguments = args;
+            }
+            self.function.set_edges(entry, vec![(exit, edge)]);
         } else {
             self.function.remove_edges(entry);
         }
@@ -201,11 +221,24 @@ impl GraphStructurer {
                 return false;
             }
 
+            let then_args = self
+                .function
+                .edges(then_node)
+                .find(|e| e.target() == else_node)
+                .map(|e| e.weight().arguments.clone())
+                .unwrap_or_default();
+            let else_args = self
+                .function
+                .edges(entry)
+                .find(|e| e.target() == else_node)
+                .map(|e| e.weight().arguments.clone())
+                .unwrap_or_default();
+
             let then_block = self.function.remove_block(then_node).unwrap();
 
             let block = self.function.block_mut(entry).unwrap();
             let if_stat = block.last_mut().unwrap().as_if_mut().unwrap();
-            if_stat.then_block = Arc::new(then_block.into());
+            if_stat.then_block = ast::share_block(then_block);
 
             if inverted {
                 if_stat.condition =
@@ -213,11 +246,11 @@ impl GraphStructurer {
                         .reduce_condition()
             }
 
-            
-            self.function.set_edges(
-                entry,
-                vec![(else_node, BlockEdge::new(BranchType::Unconditional))],
-            );
+            let mut edge = BlockEdge::new(BranchType::Unconditional);
+            if then_args == else_args {
+                edge.arguments = crate::without_identity_args(then_args);
+            }
+            self.function.set_edges(entry, vec![(else_node, edge)]);
 
             self.match_jump(entry, Some(else_node));
 
@@ -231,7 +264,7 @@ impl GraphStructurer {
     
     pub(crate) fn refine_virtual_edge_jump(
         &mut self,
-        post_dom: &Dominators<NodeIndex>,
+        _post_dom: &IDom<NodeIndex>,
         entry: NodeIndex,
         node: NodeIndex,
         header: NodeIndex,
@@ -243,11 +276,7 @@ impl GraphStructurer {
                 .function
                 .predecessor_blocks(header)
                 .filter(|&n| n != entry)
-                .any(|n| {
-                    post_dom
-                        .dominators(entry)
-                        .is_some_and(|mut p| p.contains(&n))
-                })
+                .any(|n| self.post_idx.dominates(n, entry))
             {
                 return false;
             }
@@ -263,7 +292,7 @@ impl GraphStructurer {
 
     pub(crate) fn refine_virtual_edge_conditional(
         &mut self,
-        post_dom: &Dominators<NodeIndex>,
+        _post_dom: &IDom<NodeIndex>,
         entry: NodeIndex,
         then_node: NodeIndex,
         else_node: NodeIndex,
@@ -274,38 +303,30 @@ impl GraphStructurer {
             .function
             .predecessor_blocks(header)
             .filter(|&n| n != entry)
-            .any(|n| {
-                post_dom
-                    .dominators(then_node)
-                    .is_some_and(|mut p| p.contains(&n))
-            });
+            .any(|n| self.post_idx.dominates(n, then_node));
 
         let else_main_cont = self
             .function
             .predecessor_blocks(header)
             .filter(|&n| n != entry)
-            .any(|n| {
-                post_dom
-                    .dominators(else_node)
-                    .is_some_and(|mut p| p.contains(&n))
-            });
+            .any(|n| self.post_idx.dominates(n, else_node));
 
         let mut changed = false;
         let header_successors = self.function.successor_blocks(header).collect_vec();
         let block = self.function.block_mut(entry).unwrap();
         if let Some(if_stat) = block.last_mut().unwrap().as_if_mut() {
             if then_node == header && !header_successors.contains(&entry) && then_main_cont {
-                if_stat.then_block = Arc::new(Mutex::new(vec![ast::Continue {}.into()].into()));
+                if_stat.then_block = ast::share_block(vec![ast::Continue {}.into()].into());
                 changed = true;
             } else if Some(then_node) == next {
-                if_stat.then_block = Arc::new(Mutex::new(vec![ast::Break {}.into()].into()));
+                if_stat.then_block = ast::share_block(vec![ast::Break {}.into()].into());
                 changed = true;
             }
             if else_node == header && !header_successors.contains(&entry) && else_main_cont {
-                if_stat.else_block = Arc::new(Mutex::new(vec![ast::Continue {}.into()].into()));
+                if_stat.else_block = ast::share_block(vec![ast::Continue {}.into()].into());
                 changed = true;
             } else if Some(else_node) == next {
-                if_stat.else_block = Arc::new(Mutex::new(vec![ast::Break {}.into()].into()));
+                if_stat.else_block = ast::share_block(vec![ast::Break {}.into()].into());
                 changed = true;
             }
             if !if_stat.then_block.lock().is_empty() && if_stat.else_block.lock().is_empty() {

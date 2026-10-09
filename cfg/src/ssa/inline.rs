@@ -5,6 +5,21 @@ use itertools::{Either, Itertools};
 use petgraph::visit::EdgeRef;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+/// `Clone()`, `{ ...frame ids... }`, nested functions. Inlining a
+/// constructor into the next index (`Beam:Clone().Weld`) or DCE'ing it
+/// as unused (after SETLIST fold, usages==0 because the only consumer
+/// is a nested closure) drops POLBeam's clone and 44 rbxassetid literals.
+fn keep_identity(rv: &ast::RValue) -> bool {
+    matches!(
+        rv,
+        ast::RValue::Call(_)
+            | ast::RValue::MethodCall(_)
+            | ast::RValue::Table(_)
+            | ast::RValue::Closure(_)
+            | ast::RValue::Select(_)
+    )
+}
+
 struct TraverseSelf<'a, T: Traverse>(&'a mut T);
 
 impl<'a> Traverse for TraverseSelf<'a, ast::RValue> {
@@ -67,7 +82,7 @@ impl<'a> Inliner<'a> {
                                     operation,
                                 }) if operation.is_comparator()
                                     && left.has_side_effects()
-                                    && let &mut box ast::RValue::Local(ref local) = right
+                                    && let ast::RValue::Local(local) = right.as_ref()
                                     && local == read =>
                                 {
                                     *right = std::mem::replace(
@@ -126,6 +141,10 @@ impl<'a> Inliner<'a> {
     
     fn inline_rvalues(self) {
         let node_indices = self.function.graph().node_indices().collect::<Vec<_>>();
+        let graph_n = self.function.graph().node_count();
+        // Full lookback is O(stmts²) per block. After jump folding a
+        // 60k-line function can be a few thousand-stmt blocks.
+        let lookback = if graph_n > 800 { 24usize } else { usize::MAX };
         for node in node_indices {
             let block = self.function.block_mut(node).unwrap();
 
@@ -155,7 +174,12 @@ impl<'a> Inliner<'a> {
             'w: while index < block.len() {
                 let mut groups_written = FxHashSet::default();
                 let mut allow_side_effects = true;
-                for stat_index in (0..index).rev() {
+                let lo = if lookback == usize::MAX {
+                    0
+                } else {
+                    index.saturating_sub(lookback)
+                };
+                for stat_index in (lo..index).rev() {
                     let mut values_read = stat_to_values_read[index]
                         .iter_mut()
                         .filter(|l| l.is_some())
@@ -191,7 +215,9 @@ impl<'a> Inliner<'a> {
                                 .values_read()
                                 .iter()
                                 .any(|v| self.upvalue_to_group.contains_key(*v));
-                        if !new_rvalue_has_side_effects || allow_side_effects {
+                        if !keep_identity(new_rvalue)
+                            && (!new_rvalue_has_side_effects || allow_side_effects)
+                        {
                             if let Ok(ast::LValue::Local(local)) = &assign.left.iter().exactly_one()
                                 && let Some(read) = stat_to_values_read[index]
                                     .iter_mut()
@@ -240,13 +266,22 @@ impl<'a> Inliner<'a> {
                                 }
                             } else if let Some(generic_for_init) =
                                 block[index].as_generic_for_init()
-                                && generic_for_init
-                                    .0
-                                    .right
-                                    .iter()
-                                    .rev()
-                                    .map_while(|r| r.as_local())
-                                    .eq_by(assign.left.iter().rev(), |a, b| Some(a) == b.as_local())
+                                && {
+                                    let mut rights = generic_for_init
+                                        .0
+                                        .right
+                                        .iter()
+                                        .rev()
+                                        .map_while(|r| r.as_local());
+                                    let mut lefts = assign.left.iter().rev();
+                                    loop {
+                                        match (rights.next(), lefts.next()) {
+                                            (None, None) => break true,
+                                            (Some(a), Some(b)) if Some(a) == b.as_local() => {}
+                                            _ => break false,
+                                        }
+                                    }
+                                }
                                 && assign.left.iter().all(|l| {
                                     l.as_local().is_some_and(|l| {
                                         stat_to_values_read[index]
@@ -343,7 +378,13 @@ impl<'a> Inliner<'a> {
                 let mut index = 0;
                 'w: while index < arg_to_values_read.len() {
                     let mut groups_written = FxHashSet::default();
-                    for stat_index in (0..self.function.block(node).unwrap().len()).rev() {
+                    let blen = self.function.block(node).unwrap().len();
+                    let lo = if lookback == usize::MAX {
+                        0
+                    } else {
+                        blen.saturating_sub(lookback)
+                    };
+                    for stat_index in (lo..blen).rev() {
                         let mut values_read = arg_to_values_read[index]
                             .iter_mut()
                             .filter(|l| l.is_some())
@@ -381,7 +422,8 @@ impl<'a> Inliner<'a> {
                                     .values_read()
                                     .iter()
                                     .any(|v| self.upvalue_to_group.contains_key(*v));
-                            if !new_rvalue_has_side_effects
+                            if !keep_identity(new_rvalue)
+                                && !new_rvalue_has_side_effects
                                 && let Ok(ast::LValue::Local(local)) =
                                     &assign.left.iter().exactly_one()
                                 && let Some(read) = arg_to_values_read[index]
@@ -465,10 +507,18 @@ pub fn inline(
     }
 
     let mut changed = true;
-    // Limit retries to avoid infinite loops on pathological inputs
+    // Limit retries to avoid infinite loops on pathological inputs.
+    // Large CFGs don't need 4 full inliner sweeps — 2 is enough and
+    // keeps 60k-line dumps in the same ballpark as Oracle (~2s).
     let mut retries = 0;
-    const MAX_RETRIES: usize = 10;
-    while changed && retries < MAX_RETRIES {
+    let max_retries = if function.graph().node_count() > 2000 {
+        1
+    } else if function.graph().node_count() > 800 {
+        2
+    } else {
+        4
+    };
+    while changed && retries < max_retries {
         retries += 1;
         changed = false;
         Inliner::new(
@@ -493,7 +543,10 @@ pub fn inline(
                     if !upvalue_to_group.contains_key(local)
                         && local_usages.get(local).map_or(true, |&u| u == 0)
                     {
-                        if has_side_effects {
+                        if keep_identity(rvalue) {
+                            // Keep Clone()/tables/closures even when this
+                            // CFG doesn't read them — a nested function may.
+                        } else if has_side_effects {
                             let new_stat = match rvalue {
                                 ast::RValue::Call(call)
                                 | ast::RValue::Select(ast::Select::Call(call)) => {
@@ -536,10 +589,9 @@ pub fn inline(
                         && let ast::Statement::Assign(field_assign) = &block[i]
                         && field_assign.left.len() == 1
                         && field_assign.right.len() == 1
-                        && let ast::LValue::Index(ast::Index {
-                            left: box ast::RValue::Local(local),
-                            ..
-                        }) = &field_assign.left[0]
+                        && let ast::LValue::Index(ast::Index { left, .. }) =
+                            &field_assign.left[0]
+                        && let ast::RValue::Local(local) = left.as_ref()
                         && local == &object_local
                     {
                         let right = &field_assign.right[0];
@@ -550,23 +602,19 @@ pub fn inline(
                         let field_assign = std::mem::replace(&mut block[i], ast::Empty {}.into())
                             .into_assign()
                             .unwrap();
+                        let key = *field_assign
+                            .left
+                            .into_iter()
+                            .next()
+                            .unwrap()
+                            .into_index()
+                            .unwrap()
+                            .right;
+                        let value = field_assign.right.into_iter().next().unwrap();
                         block[table_index].as_assign_mut().unwrap().right[0]
                             .as_table_mut()
                             .unwrap()
-                            .0
-                            .push((
-                                Some(Box::into_inner(
-                                    field_assign
-                                        .left
-                                        .into_iter()
-                                        .next()
-                                        .unwrap()
-                                        .into_index()
-                                        .unwrap()
-                                        .right,
-                                )),
-                                field_assign.right.into_iter().next().unwrap(),
-                            ));
+                            .put_field(key, value);
                         changed = true;
                         i += 1;
                     }
@@ -575,26 +623,18 @@ pub fn inline(
                 }
             }
 
-            // Fold set_list into table constructor
-            for i in 1..block.len() {
-                if let ast::Statement::SetList(set_list) = &block[i] {
-                    let object_local = set_list.object_local.clone();
-                    let mut found_idx = None;
-                    for j in (0..i).rev() {
-                        if block[j].values_read().iter().any(|&l| l == &object_local)
-                            || block[j].values_written().iter().any(|&l| l == &object_local)
-                        {
-                            if let Some(assign) = block[j].as_assign()
-                                && assign.left == [object_local.clone().into()]
-                                && assign.right.len() == 1
-                                && assign.right[0].as_table().is_some()
-                            {
-                                found_idx = Some(j);
-                            }
-                            break;
-                        }
-                    }
-                    if let Some(j) = found_idx {
+            // Fold set_list into table constructor in O(n): track the last
+            // `t = { ... }` not followed by another use of t. The old
+            // reverse scan per SETLIST was O(s²) per block.
+            let mut last_table: FxHashMap<ast::RcLocal, usize> = FxHashMap::default();
+            let mut i = 0;
+            while i < block.len() {
+                let object_local = match &block[i] {
+                    ast::Statement::SetList(set_list) => Some(set_list.object_local.clone()),
+                    _ => None,
+                };
+                if let Some(object_local) = object_local {
+                    if let Some(&j) = last_table.get(&object_local) {
                         let assign_stmt = std::mem::replace(&mut block[j], ast::Empty {}.into());
                         let set_list = std::mem::replace(&mut block[i], assign_stmt)
                             .into_set_list()
@@ -613,8 +653,31 @@ pub fn inline(
                             table.0.push((None, tail));
                         }
                         changed = true;
+                        last_table.remove(&object_local);
+                        last_table.insert(object_local, i);
                     }
+                    i += 1;
+                    continue;
                 }
+
+                let invalidate: Vec<ast::RcLocal> = block[i]
+                    .values_read()
+                    .into_iter()
+                    .chain(block[i].values_written())
+                    .cloned()
+                    .collect();
+                for l in &invalidate {
+                    last_table.remove(l);
+                }
+                if let Some(assign) = block[i].as_assign()
+                    && assign.left.len() == 1
+                    && assign.right.len() == 1
+                    && assign.right[0].as_table().is_some()
+                    && let Some(local) = assign.left[0].as_local()
+                {
+                    last_table.insert(local.clone(), i);
+                }
+                i += 1;
             }
         }
     }

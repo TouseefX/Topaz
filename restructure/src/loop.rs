@@ -1,4 +1,3 @@
-use array_tool::vec::Intersect;
 use ast::{Reduce, SideEffects};
 use cfg::block::{BlockEdge, BranchType};
 use itertools::Itertools;
@@ -6,7 +5,8 @@ use rustc_hash::FxHashSet;
 use tuple::Map;
 
 use crate::GraphStructurer;
-use petgraph::{algo::dominators::Dominators, stable_graph::NodeIndex, visit::EdgeRef};
+use cfg::IDom;
+use petgraph::{stable_graph::NodeIndex, visit::EdgeRef};
 
 impl GraphStructurer {
     pub(crate) fn is_loop_header(&self, node: NodeIndex) -> bool {
@@ -28,7 +28,7 @@ impl GraphStructurer {
     }
 
     
-    fn find_for_init(&mut self, for_loop: NodeIndex) -> (NodeIndex, usize) {
+    fn find_for_init(&mut self, for_loop: NodeIndex) -> Option<(NodeIndex, usize)> {
         let predecessors = self
             .function
             .predecessor_blocks(for_loop)
@@ -55,14 +55,120 @@ impl GraphStructurer {
                     }
                 })
         });
-        init_blocks.exactly_one().unwrap()
+        init_blocks.exactly_one().ok()
+    }
+
+    /// Medal-improved: a for-next whose body never leaves (all paths
+    /// `return`) is not a DFS back-edge header, so `try_collapse_loop`
+    /// skips it and the init/next IR prints as `-- unstructured *-for`.
+    pub(crate) fn collapse_terminal_for_loop(&mut self) -> bool {
+        let headers: Vec<_> = self
+            .function
+            .graph()
+            .node_indices()
+            .filter(|&n| self.function.has_block(n) && self.is_for_next(n))
+            .collect();
+        for header in headers {
+            let Some((then_edge, else_edge)) = self.function.conditional_edges(header) else {
+                continue;
+            };
+            let body = then_edge.target();
+            let next = else_edge.target();
+            if !self.function.has_block(body) || !self.function.has_block(next) {
+                continue;
+            }
+            if self.function.successor_blocks(body).next().is_some() {
+                continue;
+            }
+            let Some((init_block, init_index)) = self.find_for_init(header) else {
+                continue;
+            };
+            if init_block == header || !self.function.has_block(init_block) {
+                continue;
+            }
+            let init_len = self.function.block(init_block).map(|b| b.len()).unwrap_or(0);
+            if init_index >= init_len {
+                continue;
+            }
+            let body_ast = self.function.block(body).cloned().unwrap_or_default();
+            let init_statement = self
+                .function
+                .block_mut(init_block)
+                .unwrap()
+                .remove(init_index);
+            let next_statement = match self.function.block_mut(header).unwrap().pop() {
+                Some(s) => s,
+                None => {
+                    self.function
+                        .block_mut(init_block)
+                        .unwrap()
+                        .insert(init_index, init_statement);
+                    continue;
+                }
+            };
+            let loop_statement = match (init_statement, next_statement) {
+                (
+                    ast::Statement::NumForInit(init),
+                    ast::Statement::NumForNext(next_statement),
+                ) if next_statement.counter.0.as_local().is_some() => ast::NumericFor::new(
+                    init.counter.1,
+                    init.limit.1,
+                    init.step.1,
+                    next_statement.counter.0.as_local().unwrap().clone(),
+                    body_ast,
+                )
+                .into(),
+                (
+                    ast::Statement::GenericForInit(init),
+                    ast::Statement::GenericForNext(next_statement),
+                ) => ast::GenericFor::new(
+                    next_statement
+                        .res_locals
+                        .iter()
+                        .filter_map(|local| local.as_local().cloned())
+                        .collect(),
+                    init.0.right,
+                    body_ast,
+                )
+                .into(),
+                (init_statement, next_statement) => {
+                    self.function
+                        .block_mut(init_block)
+                        .unwrap()
+                        .insert(init_index, init_statement);
+                    self.function
+                        .block_mut(header)
+                        .unwrap()
+                        .push(next_statement);
+                    continue;
+                }
+            };
+
+            let body_is_unique = self.function.predecessor_blocks(body).count() == 1;
+            self.function.remove_block(header);
+            if body_is_unique && body != init_block && body != next {
+                self.function.remove_block(body);
+            }
+            self.function
+                .block_mut(init_block)
+                .unwrap()
+                .push(loop_statement);
+            self.function.set_edges(
+                init_block,
+                vec![(next, BlockEdge::new(BranchType::Unconditional))],
+            );
+            self.find_loop_headers();
+            self.match_jump(init_block, Some(next));
+            return true;
+        }
+        false
     }
 
     pub(crate) fn try_collapse_loop(
         &mut self,
         header: NodeIndex,
-        dominators: &Dominators<NodeIndex>,
-        post_dom: &Dominators<NodeIndex>,
+        _dominators: &IDom<NodeIndex>,
+        post_dom: &IDom<NodeIndex>,
     ) -> bool {
         if !self.is_loop_header(header) {
             if self.is_for_next(header) {
@@ -79,7 +185,9 @@ impl GraphStructurer {
                     return false;
                 }
 
-                let (init_block, init_index) = self.find_for_init(header);
+                let Some((init_block, init_index)) = self.find_for_init(header) else {
+                    return false;
+                };
                 if then_node != else_node
                     && self.function.predecessor_blocks(then_node).count() != 1
                 {
@@ -244,10 +352,11 @@ impl GraphStructurer {
                     }
                     _ => unreachable!(),
                 };
+                let Some((init_block, init_index)) = self.find_for_init(header) else {
+                    return false;
+                };
                 let statement = self.function.block_mut(header).unwrap().pop().unwrap();
                 let statements = std::mem::take(&mut self.function.block_mut(header).unwrap().0);
-
-                let (init_block, init_index) = self.find_for_init(header);
 
                 let body_ast: ast::Block = statements.to_vec().into();
                 let init_ast = &mut self.function.block_mut(init_block).unwrap();
@@ -326,35 +435,28 @@ impl GraphStructurer {
             let continues = self
                 .function
                 .predecessor_blocks(header)
-                
                 .filter(|&n| n != header)
-                .filter(|&n| {
-                    dominators
-                        .dominators(n)
-                        .map(|mut x| x.contains(&header))
-                        .unwrap_or(false)
-                })
+                .filter(|&n| self.dom_idx.dominates(header, n))
                 .collect_vec();
 
             let mut changed = false;
-            let common_post_doms = post_dom
-                .dominators(body)
-                .map(|d| d.collect_vec())
-                .unwrap_or_default()
-                .intersect(
-                    post_dom
-                        .dominators(next)
-                        .map(|d| d.collect_vec())
-                        .unwrap_or_default(),
-                );
-            
+            // Walk post-dom ancestors of `body` (O(depth), O(1) per query)
+            // instead of materialising both ancestor lists and intersecting.
+            let mut new_next_cand = None;
+            let mut walk = Some(body);
+            while let Some(p) = walk {
+                if self.function.has_block(p)
+                    && self.post_idx.dominates(p, next)
+                    && continues.iter().all(|&n| self.post_idx.dominates(p, n))
+                {
+                    new_next_cand = Some(p);
+                    break;
+                }
+                walk = post_dom.immediate_dominator(p);
+            }
+
             if !self.is_for_next(header)
-                && let Some(new_next) = common_post_doms.into_iter().find(|&p| {
-                    self.function.has_block(p)
-                        && continues
-                            .iter()
-                            .all(|&n| post_dom.dominators(n).unwrap().contains(&p))
-                })
+                && let Some(new_next) = new_next_cand
                 && new_next != next
             {
                 
@@ -388,24 +490,17 @@ impl GraphStructurer {
                 .function
                 .predecessor_blocks(next)
                 .filter(|&n| n != header)
-                .filter(|&n| dominators.dominators(n).unwrap().contains(&body))
+                .filter(|&n| self.dom_idx.dominates(body, n))
                 .collect_vec();
-            
 
             if self
                 .function
                 .predecessor_blocks(header)
                 .filter(|&n| n != header)
                 .any(|n| {
-                    !dominators
-                        .dominators(n)
-                        .is_some_and(|mut d| d.contains(&body))
-                        && dominators
-                            .dominators(n)
-                            .is_some_and(|mut d| d.contains(&header))
-                        && dominators
-                            .dominators(n)
-                            .is_some_and(|mut d| d.contains(&next))
+                    !self.dom_idx.dominates(body, n)
+                        && self.dom_idx.dominates(header, n)
+                        && self.dom_idx.dominates(next, n)
                 })
                 && self.function.successor_blocks(body).exactly_one().ok() != Some(header)
             {
@@ -413,9 +508,7 @@ impl GraphStructurer {
             }
 
             let next = if self.function.successor_blocks(body).exactly_one().ok() == Some(header)
-                || post_dom
-                    .dominators(header)
-                    .is_some_and(|mut p| p.contains(&next))
+                || self.post_idx.dominates(next, header)
             {
                 Some(next)
             } else {
@@ -492,9 +585,11 @@ impl GraphStructurer {
                     self.match_jump(header, Some(next));
                     return true;
                 } else {
+                    let Some((init_block, init_index)) = self.find_for_init(header) else {
+                        return false;
+                    };
                     let statements =
                         std::mem::take(&mut self.function.block_mut(header).unwrap().0);
-                    let (init_block, init_index) = self.find_for_init(header);
 
                     let mut body_ast = self.function.remove_block(body).unwrap();
                     body_ast.extend(statements.iter().cloned());

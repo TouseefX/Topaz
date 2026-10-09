@@ -1,8 +1,7 @@
 use std::fmt;
 
 use by_address::ByAddress;
-use parking_lot::Mutex;
-use triomphe::Arc;
+use crate::SharedFunction;
 
 use crate::{
     formatter::Formatter,
@@ -27,7 +26,7 @@ pub struct Function {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Closure {
-    pub function: ByAddress<Arc<Mutex<Function>>>,
+    pub function: ByAddress<SharedFunction>,
     pub upvalues: Vec<Upvalue>,
 }
 

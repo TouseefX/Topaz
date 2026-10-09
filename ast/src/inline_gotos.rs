@@ -29,30 +29,134 @@
 //!
 //! 4. Existing **short-tail inlining** for gotos into a short terminating tail.
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
+use triomphe::Arc;
 
 use crate::{
-    Binary, BinaryOperation, Block, If, RValue, Statement, Traverse, Unary, UnaryOperation,
+    deep_clone_statement, Binary, BinaryOperation, Block, If, Literal, RValue, Repeat, Statement,
+    Traverse, Unary, UnaryOperation, While,
 };
 
+/// Recurse into nested `if`/`while`/`for` bodies without re-entering a
+/// mutex this thread already holds, and without walking an `Arc` twice
+/// (aliased `else`-chains used to expand forever).
+fn for_each_nested(stmt: &Statement, f: &mut impl FnMut(&Block)) {
+    match stmt {
+        Statement::If(r#if) => {
+            crate::visit_shared(&r#if.then_block, f);
+            crate::visit_shared(&r#if.else_block, f);
+        }
+        Statement::While(w) => crate::visit_shared(&w.block, f),
+        Statement::Repeat(r) => crate::visit_shared(&r.block, f),
+        Statement::NumericFor(n) => crate::visit_shared(&n.block, f),
+        Statement::GenericFor(g) => crate::visit_shared(&g.block, f),
+        _ => {}
+    }
+}
+
+fn for_each_nested_mut(stmt: &mut Statement, f: &mut impl FnMut(&mut Block)) {
+    match stmt {
+        Statement::If(r#if) => {
+            crate::visit_shared_mut(&r#if.then_block, f);
+            crate::visit_shared_mut(&r#if.else_block, f);
+        }
+        Statement::While(w) => crate::visit_shared_mut(&w.block, f),
+        Statement::Repeat(r) => crate::visit_shared_mut(&r.block, f),
+        Statement::NumericFor(n) => crate::visit_shared_mut(&n.block, f),
+        Statement::GenericFor(g) => crate::visit_shared_mut(&g.block, f),
+        _ => {}
+    }
+}
+
+fn cycle_debug_level() -> u8 {
+    match std::env::var("TOPAZ_DEBUG_CYCLES") {
+        Ok(s) if s == "2" || s.eq_ignore_ascii_case("verbose") => 2,
+        Ok(s) if s == "0" || s.eq_ignore_ascii_case("false") || s.is_empty() => 0,
+        Ok(_) => 1,
+        Err(_) => 0,
+    }
+}
+
 pub fn inline_short_gotos(block: &mut Block) {
-    for _ in 0..64 {
+    let depth = crate::goto_depth_enter();
+    struct DepthGuard(u32);
+    impl Drop for DepthGuard {
+        fn drop(&mut self) {
+            crate::goto_depth_leave(self.0);
+        }
+    }
+    let _depth_guard = DepthGuard(depth);
+    if depth == 0 {
+        crate::reset_done_funcs();
+    }
+    if crate::past_post_deadline() {
+        return;
+    }
+    let dbg = cycle_debug_level();
+    let t0 = std::time::Instant::now();
+    let rounds = if block.0.len() > 20_000 {
+        2
+    } else if block.0.len() > 4_000 {
+        4
+    } else {
+        16
+    };
+    let mut last_round = 0usize;
+    let mut last_tails = 0usize;
+    for _round in 0..rounds {
+        if crate::past_post_deadline() {
+            break;
+        }
+        last_round = _round;
         let mut changed = false;
+        crate::reset_walk_seen();
         changed |= eliminate_join_gotos(block);
+        if crate::past_post_deadline() {
+            break;
+        }
+        crate::reset_walk_seen();
         changed |= rewrite_skip_rest_gotos(block);
+        if crate::past_post_deadline() {
+            break;
+        }
+        crate::reset_walk_seen();
+        changed |= rewrite_back_edge_loops(block);
+        crate::reset_walk_seen();
         let tails = collect_short_tails(block);
+        last_tails = tails.len();
+        // Level 1: one line per round on the root body only. Nested
+        // closures used to dump 569k lines *inside* the 180s budget.
+        if dbg >= 2 || (dbg >= 1 && depth == 0) {
+            eprintln!("[goto] round {}: {} tails", _round, tails.len());
+        }
         if !tails.is_empty() {
+            crate::reset_walk_seen();
             replace_gotos(block, &tails, &mut changed);
         }
         if !changed {
             break;
         }
     }
-    let tails = collect_short_tails(block);
-    prune_unused_labels(block, &tails);
-    remove_orphan_labels(block);
-    drop_unresolved_trailing_gotos(block);
-    descend_into_closures(block);
+    if dbg >= 1 && depth == 0 {
+        eprintln!(
+            "[goto] done: last_round={} tails={} {:.1}s",
+            last_round,
+            last_tails,
+            t0.elapsed().as_secs_f64()
+        );
+    }
+    if !crate::past_post_deadline() {
+        crate::reset_walk_seen();
+        let tails = collect_short_tails(block);
+        crate::reset_walk_seen();
+        prune_unused_labels(block, &tails);
+        crate::reset_walk_seen();
+        remove_orphan_labels(block);
+        crate::reset_walk_seen();
+        drop_unresolved_trailing_gotos(block);
+        crate::reset_walk_seen();
+        descend_into_closures(block);
+    }
 }
 
 /// Final cleanup: `goto L` with no matching `::L::` left in the function.
@@ -67,17 +171,7 @@ fn collect_label_names(block: &Block, labels: &mut std::collections::HashSet<Str
         if let Statement::Label(l) = s {
             labels.insert(l.0.clone());
         }
-        match s {
-            Statement::If(r#if) => {
-                collect_label_names(&r#if.then_block.lock(), labels);
-                collect_label_names(&r#if.else_block.lock(), labels);
-            }
-            Statement::While(w) => collect_label_names(&w.block.lock(), labels),
-            Statement::Repeat(r) => collect_label_names(&r.block.lock(), labels),
-            Statement::NumericFor(n) => collect_label_names(&n.block.lock(), labels),
-            Statement::GenericFor(g) => collect_label_names(&g.block.lock(), labels),
-            _ => {}
-        }
+        for_each_nested(s, &mut |b| collect_label_names(b, labels));
     }
 }
 
@@ -87,65 +181,44 @@ fn strip_gotos_not_in(block: &mut Block, labels: &std::collections::HashSet<Stri
         _ => true,
     });
     for s in block.0.iter_mut() {
-        match s {
-            Statement::If(r#if) => {
-                strip_gotos_not_in(&mut r#if.then_block.lock(), labels);
-                strip_gotos_not_in(&mut r#if.else_block.lock(), labels);
-            }
-            Statement::While(w) => strip_gotos_not_in(&mut w.block.lock(), labels),
-            Statement::Repeat(r) => strip_gotos_not_in(&mut r.block.lock(), labels),
-            Statement::NumericFor(n) => strip_gotos_not_in(&mut n.block.lock(), labels),
-            Statement::GenericFor(g) => strip_gotos_not_in(&mut g.block.lock(), labels),
-            _ => {}
-        }
+        for_each_nested_mut(s, &mut |b| strip_gotos_not_in(b, labels));
     }
 }
 
 fn descend_into_closures(block: &mut Block) {
+    if crate::past_post_deadline() {
+        return;
+    }
     for statement in block.0.iter_mut() {
         statement.traverse_rvalues(&mut |rv: &mut RValue| {
+            if crate::past_post_deadline() {
+                return;
+            }
             if let RValue::Closure(closure) = rv {
-                inline_short_gotos(&mut closure.function.lock().body);
+                let ptr = triomphe::Arc::as_ptr(&closure.function.0) as *const ();
+                if !crate::mark_func_done(ptr) {
+                    return;
+                }
+                if let Some(mut f) = closure.function.try_lock() {
+                    inline_short_gotos(&mut f.body);
+                }
             }
         });
-        match statement {
-            Statement::If(r#if) => {
-                descend_into_closures(&mut r#if.then_block.lock());
-                descend_into_closures(&mut r#if.else_block.lock());
-            }
-            Statement::While(r#while) => descend_into_closures(&mut r#while.block.lock()),
-            Statement::Repeat(repeat) => descend_into_closures(&mut repeat.block.lock()),
-            Statement::NumericFor(nf) => descend_into_closures(&mut nf.block.lock()),
-            Statement::GenericFor(gf) => descend_into_closures(&mut gf.block.lock()),
-            _ => {}
-        }
+        for_each_nested_mut(statement, &mut |b| descend_into_closures(b));
     }
 }
 
 /// Remove join-point gotos that restructure left as structured control flow.
 fn eliminate_join_gotos(block: &mut Block) -> bool {
+    if crate::past_post_deadline() {
+        return false;
+    }
     let mut changed = false;
     // Recurse first for else/fallthrough patterns (nested joins).
     for statement in block.0.iter_mut() {
-        match statement {
-            Statement::If(r#if) => {
-                changed |= eliminate_join_gotos(&mut r#if.then_block.lock());
-                changed |= eliminate_join_gotos(&mut r#if.else_block.lock());
-            }
-            Statement::While(r#while) => {
-                changed |= eliminate_join_gotos(&mut r#while.block.lock());
-            }
-            Statement::Repeat(repeat) => {
-                changed |= eliminate_join_gotos(&mut repeat.block.lock());
-            }
-            Statement::NumericFor(nf) => {
-                changed |= eliminate_join_gotos(&mut nf.block.lock());
-            }
-            Statement::GenericFor(gf) => {
-                changed |= eliminate_join_gotos(&mut gf.block.lock());
-            }
-            _ => {}
-        }
+        for_each_nested_mut(statement, &mut |b| {
+            changed |= eliminate_join_gotos(b);
+        });
     }
 
     changed |= rewrite_else_join_labels(block);
@@ -188,11 +261,16 @@ fn strip_trailing_goto_deep(stmts: &mut Vec<Statement>, name: &str) -> bool {
     let mut changed = strip_trailing_goto(stmts, name);
     // Walk from the end: if last stmt is if with empty else ending in goto name, strip there.
     if let Some(Statement::If(r#if)) = stmts.last_mut() {
-        let else_empty = r#if.else_block.lock().0.is_empty();
+        let else_empty = r#if
+            .else_block
+            .try_lock()
+            .map(|b| b.0.is_empty())
+            .unwrap_or(false);
         if else_empty {
-            let mut then_b = r#if.then_block.lock();
-            if strip_trailing_goto_deep(&mut then_b.0, name) {
-                changed = true;
+            if let Some(mut then_b) = r#if.then_block.try_lock() {
+                if strip_trailing_goto_deep(&mut then_b.0, name) {
+                    changed = true;
+                }
             }
         }
     }
@@ -234,8 +312,8 @@ fn rewrite_else_join_labels(block: &mut Block) -> bool {
 }
 
 fn try_rewrite_if_else_join(r#if: &If) -> Option<Vec<Statement>> {
-    let then_block = r#if.then_block.lock();
-    let else_block = r#if.else_block.lock();
+    let then_block = r#if.then_block.try_lock()?;
+    let else_block = r#if.else_block.try_lock()?;
 
     // else must start with ::L::
     let label = label_name(else_block.0.first()?)?;
@@ -258,8 +336,8 @@ fn try_rewrite_if_else_join(r#if: &If) -> Option<Vec<Statement>> {
     // Case 2: then is only `if D then goto L end` (empty else on inner)
     if then_block.0.len() == 1 {
         if let Statement::If(inner) = &then_block.0[0] {
-            let inner_then = inner.then_block.lock();
-            let inner_else = inner.else_block.lock();
+            let inner_then = inner.then_block.try_lock()?;
+            let inner_else = inner.else_block.try_lock()?;
             let only_goto = inner_then.0.len() == 1
                 && goto_name(&inner_then.0[0]) == Some(label.as_str())
                 && inner_else.0.is_empty();
@@ -300,8 +378,14 @@ fn try_rewrite_if_else_join(r#if: &If) -> Option<Vec<Statement>> {
             let mut skip_conds: Vec<RValue> = Vec::new();
             for stmt in &then_prefix {
                 if let Statement::If(inner) = stmt {
-                    let inner_then = inner.then_block.lock();
-                    let inner_else = inner.else_block.lock();
+                    let Some(inner_then) = inner.then_block.try_lock() else {
+                        a_stmts.push(stmt.clone());
+                        continue;
+                    };
+                    let Some(inner_else) = inner.else_block.try_lock() else {
+                        a_stmts.push(stmt.clone());
+                        continue;
+                    };
                     let pure_skip = inner_then.0.len() == 1
                         && goto_name(&inner_then.0[0]) == Some(label.as_str())
                         && inner_else.0.is_empty();
@@ -365,14 +449,15 @@ fn rewrite_fallthrough_joins(block: &mut Block) -> bool {
         };
 
         if let Statement::If(r#if) = &mut block.0[i] {
-            let mut then_b = r#if.then_block.lock();
-            // 1) Preserve skip-forward semantics for every remaining goto L.
-            while rewrite_one_skip_forward_to_label(&mut then_b.0, &label) {
-                changed = true;
-            }
-            // 2) Only now remove the trailing join jump at end of then.
-            if strip_trailing_goto(&mut then_b.0, &label) {
-                changed = true;
+            if let Some(mut then_b) = r#if.then_block.try_lock() {
+                // 1) Preserve skip-forward semantics for every remaining goto L.
+                while rewrite_one_skip_forward_to_label(&mut then_b.0, &label) {
+                    changed = true;
+                }
+                // 2) Only now remove the trailing join jump at end of then.
+                if strip_trailing_goto(&mut then_b.0, &label) {
+                    changed = true;
+                }
             }
         }
 
@@ -422,8 +507,12 @@ fn rewrite_one_skip_forward_to_label(stmts: &mut Vec<Statement>, label: &str) ->
             let Statement::If(r#if) = &stmts[i] else {
                 continue;
             };
-            let then_b = r#if.then_block.lock();
-            let else_b = r#if.else_block.lock();
+            let Some(then_b) = r#if.then_block.try_lock() else {
+                continue;
+            };
+            let Some(else_b) = r#if.else_block.try_lock() else {
+                continue;
+            };
             (
                 else_b.0.is_empty(),
                 ends_with_goto_named(&then_b.0, label),
@@ -433,10 +522,16 @@ fn rewrite_one_skip_forward_to_label(stmts: &mut Vec<Statement>, label: &str) ->
         if else_empty && then_ends && then_len >= 1 && i + 1 < stmts.len() {
             let rest: Vec<Statement> = stmts.drain(i + 1..).collect();
             if let Statement::If(r#if) = &mut stmts[i] {
-                strip_trailing_goto(&mut r#if.then_block.lock().0, label);
-                r#if.else_block.lock().0 = rest;
+                if let Some(mut then_b) = r#if.then_block.try_lock() {
+                    strip_trailing_goto(&mut then_b.0, label);
+                }
+                if let Some(mut else_b) = r#if.else_block.try_lock() {
+                    else_b.0 = rest;
+                    return true;
+                }
             }
-            return true;
+            stmts.extend(rest);
+            return false;
         }
     }
 
@@ -447,11 +542,17 @@ fn rewrite_one_skip_forward_to_label(stmts: &mut Vec<Statement>, label: &str) ->
             let Statement::If(outer) = &stmts[i] else {
                 continue;
             };
-            let else_b = outer.else_block.lock();
-            if !else_b.0.is_empty() {
+            let else_empty = outer
+                .else_block
+                .try_lock()
+                .map(|b| b.0.is_empty())
+                .unwrap_or(false);
+            if !else_empty {
                 continue;
             }
-            let then_b = outer.then_block.lock();
+            let Some(then_b) = outer.then_block.try_lock() else {
+                continue;
+            };
             if then_b.0.is_empty() {
                 continue;
             }
@@ -459,36 +560,54 @@ fn rewrite_one_skip_forward_to_label(stmts: &mut Vec<Statement>, label: &str) ->
             let Statement::If(inner) = last else {
                 continue;
             };
-            let inner_then = inner.then_block.lock();
-            let inner_else = inner.else_block.lock();
-            let ok = inner_else.0.is_empty() && ends_with_goto_named(&inner_then.0, label);
-            ok
+            let Some(inner_then) = inner.then_block.try_lock() else {
+                continue;
+            };
+            let Some(inner_else) = inner.else_block.try_lock() else {
+                continue;
+            };
+            inner_else.0.is_empty() && ends_with_goto_named(&inner_then.0, label)
         };
         if !nested || i + 1 >= stmts.len() {
             continue;
         }
         let rest: Vec<Statement> = stmts.drain(i + 1..).collect();
         if let Statement::If(outer) = &mut stmts[i] {
-            // Outer false path must still run rest.
-            outer.else_block.lock().0 = rest.clone();
-            let mut then_b = outer.then_block.lock();
-            // Inner if is last in then: absorb rest into its else, strip goto.
-            if let Some(Statement::If(inner)) = then_b.0.last_mut() {
-                strip_trailing_goto(&mut inner.then_block.lock().0, label);
-                inner.else_block.lock().0 = rest;
+            // Outer false path must still run rest. Detach so the two else
+            // arms do not share nested `Arc<Mutex<Block>>`s — a shallow
+            // `rest.clone()` aliased them and the next walker self-deadlocked.
+            if let Some(mut else_b) = outer.else_block.try_lock() {
+                else_b.0 = rest.iter().map(deep_clone_statement).collect();
+            }
+            if let Some(mut then_b) = outer.then_block.try_lock() {
+                // Inner if is last in then: absorb rest into its else, strip goto.
+                if let Some(Statement::If(inner)) = then_b.0.last_mut() {
+                    if let Some(mut inner_then) = inner.then_block.try_lock() {
+                        strip_trailing_goto(&mut inner_then.0, label);
+                    }
+                    if let Some(mut inner_else) = inner.else_block.try_lock() {
+                        inner_else.0 = rest;
+                        return true;
+                    }
+                }
             }
         }
-        return true;
+        stmts.extend(rest);
+        return false;
     }
 
     // Recurse into nested if bodies for deeper skip-forward gotos.
     for s in stmts.iter_mut() {
         if let Statement::If(r#if) = s {
-            if rewrite_one_skip_forward_to_label(&mut r#if.then_block.lock().0, label) {
-                return true;
+            if let Some(mut then_b) = r#if.then_block.try_lock() {
+                if rewrite_one_skip_forward_to_label(&mut then_b.0, label) {
+                    return true;
+                }
             }
-            if rewrite_one_skip_forward_to_label(&mut r#if.else_block.lock().0, label) {
-                return true;
+            if let Some(mut else_b) = r#if.else_block.try_lock() {
+                if rewrite_one_skip_forward_to_label(&mut else_b.0, label) {
+                    return true;
+                }
             }
         }
     }
@@ -505,12 +624,16 @@ fn find_join_after_if(block: &Block, if_idx: usize) -> Option<(String, usize, bo
     let Statement::If(r#if) = &block.0[if_idx] else {
         return None;
     };
-    let then_b = r#if.then_block.lock();
-    let else_b = r#if.else_block.lock();
-    // Allow empty else; if else is non-empty this is not a fallthrough join.
-    if !else_b.0.is_empty() {
+    // Never hold then and else together: aliased branches deadlock.
+    let else_empty = r#if
+        .else_block
+        .try_lock()
+        .map(|b| b.0.is_empty())
+        .unwrap_or(false);
+    if !else_empty {
         return None;
     }
+    let then_b = r#if.then_block.try_lock()?;
     let label = goto_name(then_b.0.last()?)?.to_string();
 
     // then must end with goto L; optionally allow nested structure that ends that way.
@@ -518,7 +641,6 @@ fn find_join_after_if(block: &Block, if_idx: usize) -> Option<(String, usize, bo
         return None;
     }
     drop(then_b);
-    drop(else_b);
 
     // Find ::L:: after if_idx. Prefer the first label L that is only targeted
     // by the then-arm and optional single goto L just before the label.
@@ -578,6 +700,9 @@ fn find_join_after_if(block: &Block, if_idx: usize) -> Option<(String, usize, bo
 /// end
 /// ```
 fn rewrite_skip_rest_gotos(block: &mut Block) -> bool {
+    if crate::past_post_deadline() {
+        return false;
+    }
     let mut changed = false;
 
     // Handle this block first so patterns like
@@ -588,13 +713,18 @@ fn rewrite_skip_rest_gotos(block: &mut Block) -> bool {
         // Case: if D then ...; goto L end; rest...
         // where L is not defined later in this block → goto meant "skip rest".
         if let Statement::If(r#if) = &block.0[i] {
-            let then_b = r#if.then_block.lock();
-            let else_b = r#if.else_block.lock();
-            let else_empty = else_b.0.is_empty();
-            let label = then_b.0.last().and_then(goto_name).map(|s| s.to_string());
-            let then_len = then_b.0.len();
-            drop(then_b);
-            drop(else_b);
+            let else_empty = r#if
+                .else_block
+                .try_lock()
+                .map(|b| b.0.is_empty())
+                .unwrap_or(false);
+            let (label, then_len) = match r#if.then_block.try_lock() {
+                Some(then_b) => (
+                    then_b.0.last().and_then(goto_name).map(|s| s.to_string()),
+                    then_b.0.len(),
+                ),
+                None => (None, 0),
+            };
 
             if else_empty {
                 if let Some(label) = label {
@@ -605,22 +735,26 @@ fn rewrite_skip_rest_gotos(block: &mut Block) -> bool {
                     let goto_later = block.0[i + 1..]
                         .iter()
                         .any(|s| goto_name(s) == Some(label.as_str()));
+                    // A label *before* this if is a back-edge (loop), not
+                    // "skip the rest". Leave it for `rewrite_back_edge_loops`.
+                    let label_earlier = block.0[..i]
+                        .iter()
+                        .any(|s| label_name(s) == Some(label.as_str()));
 
-                    if !label_later && !goto_later && then_len >= 1 {
+                    if !label_earlier && !label_later && !goto_later && then_len >= 1 {
                         // Move statements after this if into the else-arm; strip goto from then.
                         let rest: Vec<Statement> = block.0.drain(i + 1..).collect();
                         if let Statement::If(r#if) = &mut block.0[i] {
-                            {
-                                let mut then_b = r#if.then_block.lock();
+                            if let Some(mut then_b) = r#if.then_block.try_lock() {
                                 strip_trailing_goto(&mut then_b.0, &label);
                             }
-                            {
-                                let mut else_b = r#if.else_block.lock();
+                            if let Some(mut else_b) = r#if.else_block.try_lock() {
                                 else_b.0 = rest;
+                                changed = true;
+                                break;
                             }
                         }
-                        changed = true;
-                        // done with this block scan; rest was absorbed
+                        block.0.extend(rest);
                         break;
                     }
                 }
@@ -634,20 +768,153 @@ fn rewrite_skip_rest_gotos(block: &mut Block) -> bool {
 
     // Then recurse into nested blocks.
     for statement in block.0.iter_mut() {
-        match statement {
-            Statement::If(r#if) => {
-                changed |= rewrite_skip_rest_gotos(&mut r#if.then_block.lock());
-                changed |= rewrite_skip_rest_gotos(&mut r#if.else_block.lock());
-            }
-            Statement::While(w) => changed |= rewrite_skip_rest_gotos(&mut w.block.lock()),
-            Statement::Repeat(r) => changed |= rewrite_skip_rest_gotos(&mut r.block.lock()),
-            Statement::NumericFor(n) => changed |= rewrite_skip_rest_gotos(&mut n.block.lock()),
-            Statement::GenericFor(g) => changed |= rewrite_skip_rest_gotos(&mut g.block.lock()),
-            _ => {}
-        }
+        for_each_nested_mut(statement, &mut |b| {
+            changed |= rewrite_skip_rest_gotos(b);
+        });
     }
 
     changed
+}
+
+/// Turn remaining back-edges into `while`/`repeat` so we never inline a
+/// loop tail into itself (the shallow-clone deadlock) and so the output
+/// is valid Luau (no `goto`).
+///
+/// ```text
+/// ::L:: body; goto L                 →  while true do body end
+/// ::L:: if c then B; goto L end      →  while c do B end
+/// ::L:: A; if c then goto L end      →  repeat A until not c
+/// ```
+fn rewrite_back_edge_loops(block: &mut Block) -> bool {
+    if crate::past_post_deadline() {
+        return false;
+    }
+    let mut changed = false;
+    for statement in block.0.iter_mut() {
+        for_each_nested_mut(statement, &mut |b| {
+            changed |= rewrite_back_edge_loops(b);
+        });
+    }
+
+    let mut i = 0;
+    while i < block.0.len() {
+        let Some(label) = label_name(&block.0[i]).map(str::to_owned) else {
+            i += 1;
+            continue;
+        };
+        let mut region_end = i + 1;
+        while region_end < block.0.len() && label_name(&block.0[region_end]).is_none() {
+            region_end += 1;
+        }
+
+        let mut edge: Option<(usize, bool)> = None;
+        for j in (i + 1..region_end).rev() {
+            if goto_name(&block.0[j]) == Some(label.as_str()) {
+                edge = Some((j, true));
+                break;
+            }
+            if trailing_if_back_edge(&block.0[j], &label) {
+                edge = Some((j, false));
+                break;
+            }
+        }
+        let Some((j, bare_goto)) = edge else {
+            i += 1;
+            continue;
+        };
+
+        let prefix_has_goto = block.0[i + 1..j].iter().any(|s| stmt_contains_goto(s, &label));
+        if prefix_has_goto {
+            i += 1;
+            continue;
+        }
+
+        let loop_stmts: Vec<Statement> = if bare_goto {
+            let body: Vec<Statement> = block.0[i + 1..j].iter().map(deep_clone_statement).collect();
+            vec![Statement::While(While::new(
+                Literal::Boolean(true).into(),
+                body.into(),
+            ))]
+        } else {
+            let prefix: Vec<Statement> =
+                block.0[i + 1..j].iter().map(deep_clone_statement).collect();
+            match if_back_edge_to_loop(&block.0[j], &label, &prefix) {
+                Some(stmts) => stmts,
+                None => {
+                    i += 1;
+                    continue;
+                }
+            }
+        };
+        let n = loop_stmts.len();
+        block.0.splice(i + 1..=j, loop_stmts);
+        changed = true;
+        i += 1 + n;
+    }
+    changed
+}
+
+fn trailing_if_back_edge(stmt: &Statement, label: &str) -> bool {
+    let Statement::If(r#if) = stmt else {
+        return false;
+    };
+    let else_empty = r#if
+        .else_block
+        .try_lock()
+        .map(|b| b.0.is_empty())
+        .unwrap_or(false);
+    if !else_empty {
+        return false;
+    }
+    r#if.then_block
+        .try_lock()
+        .map(|b| ends_with_goto_named(&b.0, label))
+        .unwrap_or(false)
+}
+
+fn if_back_edge_to_loop(
+    stmt: &Statement,
+    label: &str,
+    prefix: &[Statement],
+) -> Option<Vec<Statement>> {
+    let Statement::If(r#if) = stmt else {
+        return None;
+    };
+    let else_empty = r#if
+        .else_block
+        .try_lock()
+        .map(|b| b.0.is_empty())
+        .unwrap_or(false);
+    if !else_empty {
+        return None;
+    }
+    let then_b = r#if.then_block.try_lock()?;
+    if !ends_with_goto_named(&then_b.0, label) {
+        return None;
+    }
+    let then_prefix = &then_b.0[..then_b.0.len() - 1];
+    if then_prefix.iter().any(|s| stmt_contains_goto(s, label)) {
+        return None;
+    }
+    let cond = r#if.condition.clone();
+    let then_body: Vec<Statement> = then_prefix.iter().map(deep_clone_statement).collect();
+    drop(then_b);
+
+    if prefix.is_empty() {
+        Some(vec![Statement::While(While::new(cond, then_body.into()))])
+    } else if then_body.is_empty() {
+        Some(vec![Statement::Repeat(Repeat::new(
+            make_not(cond),
+            prefix.to_vec().into(),
+        ))])
+    } else {
+        // ::L:: A; if c then B; goto L end  →  A; while c do B; A end
+        let mut while_body = then_body;
+        while_body.extend(prefix.iter().map(deep_clone_statement));
+        let mut out = prefix.to_vec();
+        out.push(Statement::While(While::new(cond, while_body.into())));
+        Some(out)
+    }
 }
 
 fn remove_orphan_labels(block: &mut Block) {
@@ -658,17 +925,7 @@ fn remove_orphan_labels(block: &mut Block) {
         _ => true,
     });
     for statement in block.0.iter_mut() {
-        match statement {
-            Statement::If(r#if) => {
-                remove_orphan_labels(&mut r#if.then_block.lock());
-                remove_orphan_labels(&mut r#if.else_block.lock());
-            }
-            Statement::While(r#while) => remove_orphan_labels(&mut r#while.block.lock()),
-            Statement::Repeat(repeat) => remove_orphan_labels(&mut repeat.block.lock()),
-            Statement::NumericFor(nf) => remove_orphan_labels(&mut nf.block.lock()),
-            Statement::GenericFor(gf) => remove_orphan_labels(&mut gf.block.lock()),
-            _ => {}
-        }
+        for_each_nested_mut(statement, &mut |b| remove_orphan_labels(b));
     }
 }
 
@@ -684,24 +941,82 @@ fn walk_for_tails(block: &Block, out: &mut FxHashMap<String, Vec<Statement>>) {
     for (idx, statement) in block.0.iter().enumerate() {
         if let Statement::Label(label) = statement {
             if let Some(tail) = extract_short_tail(&block.0, idx + 1) {
-                out.entry(label.0.clone()).or_insert(tail);
+                // A tail that jumps back to its own label is a loop, not a
+                // terminating copy. Inlining it splices the `If` into its
+                // own `then_block` (shallow `Statement::clone()`) and the
+                // next walker deadlocks on parking_lot.
+                if !stmts_contain_goto(&tail, &label.0) {
+                    out.entry(label.0.clone()).or_insert(tail);
+                }
             }
         }
-        match statement {
-            Statement::If(r#if) => {
-                walk_for_tails(&r#if.then_block.lock(), out);
-                walk_for_tails(&r#if.else_block.lock(), out);
-            }
-            Statement::While(r#while) => walk_for_tails(&r#while.block.lock(), out),
-            Statement::Repeat(repeat) => walk_for_tails(&repeat.block.lock(), out),
-            Statement::NumericFor(numeric_for) => walk_for_tails(&numeric_for.block.lock(), out),
-            Statement::GenericFor(generic_for) => walk_for_tails(&generic_for.block.lock(), out),
-            _ => {}
+        for_each_nested(statement, &mut |b| walk_for_tails(b, out));
+    }
+}
+
+fn stmts_contain_goto(stmts: &[Statement], name: &str) -> bool {
+    stmts.iter().any(|s| stmt_contains_goto(s, name))
+}
+
+fn nested_has_goto(block: &crate::SharedBlock, name: &str) -> bool {
+    match block.try_lock() {
+        Some(b) => stmts_contain_goto(&b.0, name),
+        // Already locked: assume a back-edge so we refuse the tail.
+        None => true,
+    }
+}
+
+fn stmt_contains_goto(stmt: &Statement, name: &str) -> bool {
+    if goto_name(stmt) == Some(name) {
+        return true;
+    }
+    match stmt {
+        Statement::If(r#if) => {
+            nested_has_goto(&r#if.then_block, name) || nested_has_goto(&r#if.else_block, name)
         }
+        Statement::While(w) => nested_has_goto(&w.block, name),
+        Statement::Repeat(r) => nested_has_goto(&r.block, name),
+        Statement::NumericFor(n) => nested_has_goto(&n.block, name),
+        Statement::GenericFor(g) => nested_has_goto(&g.block, name),
+        _ => false,
     }
 }
 
 const MAX_TAIL_LEN: usize = 64;
+
+/// Nested statement count. Shallow `If` clones of a 50k-line else were
+/// "one statement" under `MAX_TAIL_LEN` and, when spliced, aliased that
+/// else into a cycle (v12 ClientRenderer hang).
+fn stmt_weight(stmt: &Statement, seen: &mut FxHashSet<*const ()>) -> usize {
+    match stmt {
+        Statement::If(r#if) => 1usize
+            .saturating_add(shared_weight(&r#if.then_block, seen))
+            .saturating_add(shared_weight(&r#if.else_block, seen)),
+        Statement::While(w) => 1usize.saturating_add(shared_weight(&w.block, seen)),
+        Statement::Repeat(r) => 1usize.saturating_add(shared_weight(&r.block, seen)),
+        Statement::NumericFor(n) => 1usize.saturating_add(shared_weight(&n.block, seen)),
+        Statement::GenericFor(g) => 1usize.saturating_add(shared_weight(&g.block, seen)),
+        _ => 1,
+    }
+}
+
+fn shared_weight(block: &crate::SharedBlock, seen: &mut FxHashSet<*const ()>) -> usize {
+    let ptr = Arc::as_ptr(block) as *const ();
+    if !seen.insert(ptr) {
+        return 0;
+    }
+    let Some(g) = block.try_lock() else {
+        return MAX_TAIL_LEN + 1;
+    };
+    let mut n = 0usize;
+    for s in &g.0 {
+        n = n.saturating_add(stmt_weight(s, seen));
+        if n > MAX_TAIL_LEN {
+            return MAX_TAIL_LEN + 1;
+        }
+    }
+    n
+}
 
 fn extract_short_tail(stmts: &[Statement], from: usize) -> Option<Vec<Statement>> {
     if from >= stmts.len() {
@@ -709,8 +1024,15 @@ fn extract_short_tail(stmts: &[Statement], from: usize) -> Option<Vec<Statement>
     }
     let mut tail = Vec::with_capacity(2);
     let mut i = from;
+    let mut weight = 0usize;
+    let mut seen = FxHashSet::default();
     while i < stmts.len() && tail.len() < MAX_TAIL_LEN {
         let stmt = &stmts[i];
+        let w = stmt_weight(stmt, &mut seen);
+        if w > MAX_TAIL_LEN || weight.saturating_add(w) > MAX_TAIL_LEN {
+            return None;
+        }
+        weight += w;
         match stmt {
             Statement::Return(_)
             | Statement::Break(_)
@@ -734,10 +1056,18 @@ fn extract_short_tail(stmts: &[Statement], from: usize) -> Option<Vec<Statement>
 }
 
 fn replace_gotos(block: &mut Block, tails: &FxHashMap<String, Vec<Statement>>, changed: &mut bool) {
+    if crate::past_post_deadline() {
+        return;
+    }
     let mut i = 0;
     while i < block.0.len() {
         let replacement = match &block.0[i] {
-            Statement::Goto(goto) => tails.get(&goto.0 .0).cloned(),
+            // Deep clone: shallow `Statement::clone()` of an `If` shares
+            // then/else Arcs with the labeled tail. Splicing that into
+            // another if's else built the v12 else→else cycle.
+            Statement::Goto(goto) => tails.get(&goto.0 .0).map(|v| {
+                v.iter().map(deep_clone_statement).collect::<Vec<_>>()
+            }),
             _ => None,
         };
         if let Some(repl) = replacement {
@@ -747,17 +1077,9 @@ fn replace_gotos(block: &mut Block, tails: &FxHashMap<String, Vec<Statement>>, c
             *changed = true;
             continue;
         }
-        match &mut block.0[i] {
-            Statement::If(r#if) => {
-                replace_gotos(&mut r#if.then_block.lock(), tails, changed);
-                replace_gotos(&mut r#if.else_block.lock(), tails, changed);
-            }
-            Statement::While(r#while) => replace_gotos(&mut r#while.block.lock(), tails, changed),
-            Statement::Repeat(repeat) => replace_gotos(&mut repeat.block.lock(), tails, changed),
-            Statement::NumericFor(nf) => replace_gotos(&mut nf.block.lock(), tails, changed),
-            Statement::GenericFor(gf) => replace_gotos(&mut gf.block.lock(), tails, changed),
-            _ => {}
-        }
+        for_each_nested_mut(&mut block.0[i], &mut |b| {
+            replace_gotos(b, tails, changed);
+        });
         i += 1;
     }
 }
@@ -776,17 +1098,7 @@ fn prune_unused_labels(block: &mut Block, tails: &FxHashMap<String, Vec<Statemen
         _ => true,
     });
     for statement in block.0.iter_mut() {
-        match statement {
-            Statement::If(r#if) => {
-                prune_unused_labels(&mut r#if.then_block.lock(), tails);
-                prune_unused_labels(&mut r#if.else_block.lock(), tails);
-            }
-            Statement::While(r#while) => prune_unused_labels(&mut r#while.block.lock(), tails),
-            Statement::Repeat(repeat) => prune_unused_labels(&mut repeat.block.lock(), tails),
-            Statement::NumericFor(nf) => prune_unused_labels(&mut nf.block.lock(), tails),
-            Statement::GenericFor(gf) => prune_unused_labels(&mut gf.block.lock(), tails),
-            _ => {}
-        }
+        for_each_nested_mut(statement, &mut |b| prune_unused_labels(b, tails));
     }
 }
 
@@ -796,15 +1108,7 @@ fn count_remaining_gotos(block: &Block, counts: &mut FxHashMap<String, usize>) {
             Statement::Goto(goto) => {
                 *counts.entry(goto.0 .0.clone()).or_insert(0) += 1;
             }
-            Statement::If(r#if) => {
-                count_remaining_gotos(&r#if.then_block.lock(), counts);
-                count_remaining_gotos(&r#if.else_block.lock(), counts);
-            }
-            Statement::While(r#while) => count_remaining_gotos(&r#while.block.lock(), counts),
-            Statement::Repeat(repeat) => count_remaining_gotos(&repeat.block.lock(), counts),
-            Statement::NumericFor(nf) => count_remaining_gotos(&nf.block.lock(), counts),
-            Statement::GenericFor(gf) => count_remaining_gotos(&gf.block.lock(), counts),
-            _ => {}
+            other => for_each_nested(other, &mut |b| count_remaining_gotos(b, counts)),
         }
     }
 }
@@ -813,6 +1117,8 @@ fn count_remaining_gotos(block: &Block, counts: &mut FxHashMap<String, usize>) {
 mod tests {
     use super::*;
     use crate::{Goto, Label, Literal};
+    use rustc_hash::FxHashSet;
+    use triomphe::Arc;
 
     fn lit_true() -> RValue {
         Literal::Boolean(true).into()
@@ -1046,6 +1352,118 @@ mod tests {
         assert!(!s.contains("::l81::"), "label remains: {s}");
         // Must have else so E is not unconditional after B
         assert!(s.contains("else"), "expected else for skipped E: {s}");
+    }
+
+    #[test]
+    fn back_edge_if_becomes_while() {
+        // ::L:: if c then goto L end; return  →  while c do end; return
+        let mut body = Block(vec![
+            Statement::Label(Label("l1".into())),
+            Statement::If(If::new(
+                lit_true(),
+                Block(vec![Statement::Goto(Goto::new(Label("l1".into())))]),
+                Block::default(),
+            )),
+            Statement::Return(crate::Return::new(vec![])),
+        ]);
+        inline_short_gotos(&mut body);
+        let s = body.to_string();
+        assert!(!s.contains("goto"), "gotos remain: {s}");
+        assert!(s.contains("while"), "expected while from back-edge: {s}");
+    }
+
+    #[test]
+    fn inlined_goto_tails_do_not_share_else_arcs() {
+        // if C then goto L end
+        // if D then goto L end
+        // ::L::
+        // if E then return else x = 1 end
+        //
+        // Both gotos inline the same if-tail. Shallow clone would make
+        // the three `else` Arcs identical; mutating one mutates all.
+        use crate::{Assign, RcLocal};
+        let work = Statement::Assign(Assign::new(
+            vec![crate::LValue::Local(RcLocal::default())],
+            vec![Literal::Number(1.0).into()],
+        ));
+        let tail_if = If::new(
+            lit_true(),
+            Block(vec![Statement::Return(crate::Return::new(vec![]))]),
+            Block(vec![work]),
+        );
+        let mut body = Block(vec![
+            Statement::If(If::new(
+                lit_true(),
+                Block(vec![Statement::Goto(Goto::new(Label("l1".into())))]),
+                Block::default(),
+            )),
+            Statement::If(If::new(
+                Literal::Boolean(false).into(),
+                Block(vec![Statement::Goto(Goto::new(Label("l1".into())))]),
+                Block::default(),
+            )),
+            Statement::Label(Label("l1".into())),
+            Statement::If(tail_if),
+        ]);
+        inline_short_gotos(&mut body);
+        let mut else_ptrs = Vec::new();
+        let mut seen = FxHashSet::default();
+        fn collect(
+            block: &Block,
+            out: &mut Vec<*const ()>,
+            seen: &mut FxHashSet<*const ()>,
+        ) {
+            for s in &block.0 {
+                if let Statement::If(i) = s {
+                    let p = Arc::as_ptr(&i.else_block) as *const ();
+                    out.push(p);
+                    let then_p = Arc::as_ptr(&i.then_block) as *const ();
+                    if seen.insert(then_p) {
+                        if let Some(b) = i.then_block.try_lock() {
+                            collect(&b, out, seen);
+                        }
+                    }
+                    if seen.insert(p) {
+                        if let Some(b) = i.else_block.try_lock() {
+                            collect(&b, out, seen);
+                        }
+                    }
+                }
+            }
+        }
+        collect(&body, &mut else_ptrs, &mut seen);
+        let unique = else_ptrs.iter().copied().collect::<FxHashSet<_>>();
+        assert_eq!(
+            unique.len(),
+            else_ptrs.len(),
+            "inlined if-tails still share else Arcs: {} ptrs {} unique",
+            else_ptrs.len(),
+            unique.len()
+        );
+    }
+
+    #[test]
+    fn inlining_back_edge_tail_does_not_deadlock() {
+        // goto L before ::L:: if c then goto L end; return
+        // Without skipping self-tails, replace_gotos splices the If into
+        // its own then_block (shallow clone) and parking_lot hangs.
+        let mut body = Block(vec![
+            Statement::If(If::new(
+                lit_true(),
+                Block(vec![Statement::Goto(Goto::new(Label("l1".into())))]),
+                Block::default(),
+            )),
+            Statement::Label(Label("l1".into())),
+            Statement::If(If::new(
+                lit_true(),
+                Block(vec![Statement::Goto(Goto::new(Label("l1".into())))]),
+                Block::default(),
+            )),
+            Statement::Return(crate::Return::new(vec![])),
+        ]);
+        inline_short_gotos(&mut body);
+        let s = body.to_string();
+        assert!(!s.contains("goto"), "gotos remain: {s}");
     }
 
 }

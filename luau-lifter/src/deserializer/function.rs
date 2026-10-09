@@ -4,8 +4,18 @@ use crate::{instruction::*, op_code::OpCode};
 
 use super::{
     constant::Constant,
-    leb128::{read_leb128_u32, read_leb128_u64},
+    leb128::{read_count, read_leb128_u32, read_leb128_u64},
 };
+
+/// Hard caps so a desynced varint cannot `with_capacity(1e9)` and freeze.
+const MAX_CODE: u32 = 2_000_000;
+const MAX_CONSTANTS: u32 = 200_000;
+const MAX_CHILDREN: u32 = 50_000;
+const MAX_TABLE_KEYS: u32 = 100_000;
+const MAX_LOCALS: u32 = 100_000;
+const MAX_UPVALS: u32 = 10_000;
+const MAX_FEEDBACK: u32 = 500_000;
+const MAX_MEMBERS: u32 = 50_000;
 
 // Constants from upstream Luau (LBC_* enum values).
 const LBC_CONSTANT_NIL: u8 = 0;
@@ -19,6 +29,7 @@ const LBC_CONSTANT_VECTOR: u8 = 7;
 const LBC_CONSTANT_TABLE_WITH_CONSTANTS: u8 = 8;
 const LBC_CONSTANT_INTEGER: u8 = 9;
 const LBC_CONSTANT_CLASS_SHAPE: u8 = 10;
+const LBC_CONSTANT_VECTORD: u8 = 11;
 
 #[derive(Debug, Clone)]
 pub struct DebugLocal {
@@ -84,14 +95,10 @@ impl std::fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 
-/// Map Topaz OpCode → word length via luaur-common's getOpLength
-/// (same table as C++ Luau / luaur VM).
-fn luaur_op_length(op: OpCode) -> i32 {
-    use luaur::common::enums::luau_opcode::LuauOpcode;
-    use luaur::common::functions::get_op_length::get_op_length;
-    // Topaz and luaur both use the upstream LOP_* numeric order.
-    let luau_op = LuauOpcode::from(op as u8);
-    get_op_length(luau_op)
+/// Word length from Studio 0.735 `Luau::getOpLength` (see `OpCode::word_length`).
+#[inline]
+fn op_word_length(op: OpCode) -> u32 {
+    op.word_length()
 }
 
 impl Function {
@@ -106,6 +113,9 @@ impl Function {
         let mut out = Vec::with_capacity(raw.len());
         let mut pc = 0;
         while pc < raw.len() {
+            if pc & 4095 == 0 && cfg::past_decompile_deadline() {
+                return Err("decode timed out (instructions)".into());
+            }
             let ins = Instruction::parse(raw[pc], encode_key)
                 .map_err(|e| format!("invalid op code: {:?}", e))?;
             let op = match ins {
@@ -113,8 +123,7 @@ impl Function {
                 | Instruction::AD { op_code, .. }
                 | Instruction::E { op_code, .. } => op_code,
             };
-            // Instruction width from luaur (faithful port of Luau getOpLength).
-            let op_len = luaur_op_length(op);
+            let op_len = op_word_length(op);
             if op_len == 2 {
                 let Some(&aux) = raw.get(pc + 1) else {
                     return Err(format!("expected AUX word for op {:?}", op));
@@ -225,12 +234,18 @@ impl Function {
         }
 
         // -- Instruction list --
-        let (codesize, advance) = read_leb128_u32(data, *offset)
-            .map_err(|e| ParseError { message: format!("codesize: {e}"), position: start })?;
+        let (codesize, advance) = read_count(data, *offset, MAX_CODE, "codesize")
+            .map_err(|e| ParseError { message: e, position: start })?;
         *offset += advance;
         let codesize = codesize as usize;
         // Each instruction is a 32-bit word; LEB128 varint pre-counts them.
-        need!(codesize * 4);
+        let code_bytes = codesize
+            .checked_mul(4)
+            .ok_or_else(|| ParseError {
+                message: "codesize overflow".into(),
+                position: start,
+            })?;
+        need!(code_bytes);
         let mut raw_instructions = Vec::with_capacity(codesize);
         for _ in 0..codesize {
             let bytes: [u8; 4] = data[*offset..*offset + 4].try_into().unwrap();
@@ -241,8 +256,8 @@ impl Function {
             .map_err(|e| ParseError { message: e, position: start })?;
 
         // -- Constant list --
-        let (sizek, advance) = read_leb128_u32(data, *offset)
-            .map_err(|e| ParseError { message: format!("const count: {e}"), position: start })?;
+        let (sizek, advance) = read_count(data, *offset, MAX_CONSTANTS, "sizek")
+            .map_err(|e| ParseError { message: e, position: start })?;
         *offset += advance;
         let mut constants: Vec<Constant> = Vec::with_capacity(sizek as usize);
         for _ in 0..sizek {
@@ -274,6 +289,17 @@ impl Function {
                     }
                     constants.push(Constant::Vector(v[0], v[1], v[2], v[3]));
                 }
+                LBC_CONSTANT_VECTORD => {
+                    // Studio 0.735 / Luau v13: 4 little-endian f64s.
+                    need!(32);
+                    let mut v = [0f32; 4];
+                    for slot in v.iter_mut() {
+                        let bytes: [u8; 8] = data[*offset..*offset + 8].try_into().unwrap();
+                        *slot = f64::from_le_bytes(bytes) as f32;
+                        *offset += 8;
+                    }
+                    constants.push(Constant::Vector(v[0], v[1], v[2], v[3]));
+                }
                 LBC_CONSTANT_STRING => {
                     let (idx, adv) = read_leb128_u32(data, *offset).map_err(|e| {
                         ParseError {
@@ -297,9 +323,9 @@ impl Function {
                 }
                 LBC_CONSTANT_TABLE => {
                     // Layout: varint(nkeys) + nkeys × varint(key_const_idx)
-                    let (length, advance) = read_leb128_u32(data, *offset).map_err(|e| {
+                    let (length, advance) = read_count(data, *offset, MAX_TABLE_KEYS, "table length").map_err(|e| {
                         ParseError {
-                            message: format!("table length: {e}"),
+                            message: e,
                             position: start,
                         }
                     })?;
@@ -328,9 +354,9 @@ impl Function {
                     // DUPTABLE-with-constants entry (common in config
                     // ModuleScripts), producing garbage constant tags
                     // like 129/160 further down the stream.
-                    let (length, advance) = read_leb128_u32(data, *offset).map_err(|e| {
+                    let (length, advance) = read_count(data, *offset, MAX_TABLE_KEYS, "table_with_constants").map_err(|e| {
                         ParseError {
-                            message: format!("table_with_constants length: {e}"),
+                            message: e,
                             position: start,
                         }
                     })?;
@@ -408,22 +434,27 @@ impl Function {
                         }
                     })?;
                     *offset += adv;
-                    let (nprops, adv) = read_leb128_u32(data, *offset).map_err(|e| {
+                    let (nprops, adv) = read_count(data, *offset, MAX_MEMBERS, "class_shape nprops").map_err(|e| {
                         ParseError {
-                            message: format!("class_shape nprops: {e}"),
+                            message: e,
                             position: start,
                         }
                     })?;
                     *offset += adv;
-                    let (nmethods, adv) = read_leb128_u32(data, *offset).map_err(|e| {
+                    let (nmethods, adv) = read_count(data, *offset, MAX_MEMBERS, "class_shape nmethods").map_err(|e| {
                         ParseError {
-                            message: format!("class_shape nmethods: {e}"),
+                            message: e,
                             position: start,
                         }
                     })?;
                     *offset += adv;
-                    let nmembers = (nprops as u64)
-                        .saturating_add(nmethods as u64);
+                    let nmembers = (nprops as u64).saturating_add(nmethods as u64);
+                    if nmembers > MAX_MEMBERS as u64 {
+                        return Err(ParseError {
+                            message: format!("class_shape members {nmembers} exceeds cap {MAX_MEMBERS}"),
+                            position: start,
+                        });
+                    }
                     for _ in 0..nmembers {
                         let (_, adv) = read_leb128_u32(data, *offset).map_err(|e| {
                             ParseError {
@@ -448,8 +479,8 @@ impl Function {
         }
 
         // -- Protos (child function indices) --
-        let (psize, advance) = read_leb128_u32(data, *offset)
-            .map_err(|e| ParseError { message: format!("psize: {e}"), position: start })?;
+        let (psize, advance) = read_count(data, *offset, MAX_CHILDREN, "psize")
+            .map_err(|e| ParseError { message: e, position: start })?;
         *offset += advance;
         let mut functions = Vec::with_capacity(psize as usize);
         for _ in 0..psize {
@@ -483,28 +514,32 @@ impl Function {
             need!(1);
             let gap = data[*offset];
             *offset += 1;
-            // `codesize` u8 cumulative-delta bytes.
-            need!(codesize);
-            let mut line_info_delta = Vec::with_capacity(codesize);
-            for _ in 0..codesize {
-                line_info_delta.push(data[*offset]);
-                *offset += 1;
+            // `gap >= bit-width` panics on `>>`. Real Luau uses 4–5.
+            if gap >= 31 {
+                return Err(ParseError {
+                    message: format!("line_gap_log2 {gap} is not a valid shift"),
+                    position: start,
+                });
             }
-            // `((codesize-1) >> gap) + 1` i32 deltas (signed).
+            // Consume lineinfo without storing it. The decompiler never
+            // reads these vectors; skip the extra `codesize`-byte alloc
+            // on a 21 MB AUX-expanded dump.
+            need!(codesize);
+            *offset += codesize;
             let abs_count = if codesize == 0 {
                 0
             } else {
                 ((codesize - 1) >> gap) + 1
             };
-            need!(abs_count * 4);
-            let mut abs_line_info_delta = Vec::with_capacity(abs_count);
-            for _ in 0..abs_count {
-                let bytes: [u8; 4] = data[*offset..*offset + 4].try_into().unwrap();
-                let v = i32::from_le_bytes(bytes);
-                *offset += 4;
-                abs_line_info_delta.push(v);
-            }
-            (Some(gap), Some(line_info_delta), Some(abs_line_info_delta))
+            let abs_bytes = abs_count
+                .checked_mul(4)
+                .ok_or_else(|| ParseError {
+                    message: "abs lineinfo overflow".into(),
+                    position: start,
+                })?;
+            need!(abs_bytes);
+            *offset += abs_bytes;
+            (None, None, None)
         } else {
             (None, None, None)
         };
@@ -514,9 +549,9 @@ impl Function {
         let debuginfo = data[*offset];
         *offset += 1;
         let debug_info = if debuginfo != 0 {
-            let (sizelocvars, advance) = read_leb128_u32(data, *offset).map_err(|e| {
+            let (sizelocvars, advance) = read_count(data, *offset, MAX_LOCALS, "sizelocvars").map_err(|e| {
                 ParseError {
-                    message: format!("sizelocvars: {e}"),
+                    message: e,
                     position: start,
                 }
             })?;
@@ -558,9 +593,9 @@ impl Function {
                     register,
                 });
             }
-            let (sizeupvalues, advance) = read_leb128_u32(data, *offset).map_err(|e| {
+            let (sizeupvalues, advance) = read_count(data, *offset, MAX_UPVALS, "sizeupvalues").map_err(|e| {
                 ParseError {
-                    message: format!("sizeupvalues: {e}"),
+                    message: e,
                     position: start,
                 }
             })?;
@@ -593,9 +628,9 @@ impl Function {
         // main-function index) stays aligned. The decompiler does not
         // currently use feedback data.
         if version >= 11 {
-            let (fb_count, advance) = read_leb128_u32(data, *offset).map_err(|e| {
+            let (fb_count, advance) = read_count(data, *offset, MAX_FEEDBACK, "feedbackvecsize").map_err(|e| {
                 ParseError {
-                    message: format!("feedbackvecsize: {e}"),
+                    message: e,
                     position: start,
                 }
             })?;

@@ -10,6 +10,25 @@
 //! LEB128 encoding: each byte contributes 7 low bits to the value; the
 //! high bit indicates whether more bytes follow.
 
+/// Read an unsigned LEB128 count and reject values above `cap`.
+///
+/// A corrupt or wrong-key stream can decode `string_count` / `codesize`
+/// as hundreds of millions. `Vec::with_capacity` then tries to allocate
+/// gigabytes and looks like a hang while "reading bytecode" — that's the
+/// 21 MB decoded-IR stall, not SSA.
+pub fn read_count(
+    data: &[u8],
+    offset: usize,
+    cap: u32,
+    what: &str,
+) -> Result<(u32, usize), String> {
+    let (n, adv) = read_leb128_u32(data, offset)?;
+    if n > cap {
+        return Err(format!("{what} {n} exceeds cap {cap}"));
+    }
+    Ok((n, adv))
+}
+
 /// Read an unsigned LEB128 varint from `data` at `*offset`.
 /// Returns `(value, bytes_consumed)` on success.
 pub fn read_leb128_u32(data: &[u8], offset: usize) -> Result<(u32, usize), String> {

@@ -1,14 +1,18 @@
-#![feature(box_patterns)]
-
+use by_address::ByAddress;
 use derive_more::From;
 use enum_as_inner::EnumAsInner;
 use enum_dispatch::enum_dispatch;
 use formatter::Formatter;
 use itertools::Either;
+use parking_lot::Mutex;
+use triomphe::Arc;
 
 use std::{
+    cell::{Cell, RefCell},
+    collections::{HashMap, HashSet},
     fmt,
     ops::{Deref, DerefMut},
+    time::Instant,
 };
 
 mod assign;
@@ -29,6 +33,8 @@ pub mod inline_gotos;
 mod literal;
 mod local;
 
+pub mod flatten_dispatch;
+pub mod fold_copies;
 pub mod local_declarations;
 pub mod name_locals;
 mod repeat;
@@ -341,6 +347,125 @@ impl fmt::Display for Statement {
 #[derive(Debug, PartialEq, Clone, Default, From)]
 pub struct Block(pub Vec<Statement>);
 
+/// Shared `if`/`while`/`function` bodies.
+///
+/// `parking_lot::ReentrantMutex` is **not** usable here: its guard is
+/// `Deref` only (no `DerefMut`), because two nested locks on the same
+/// thread would alias `&mut`. Keep a normal `Mutex` so passes can mutate
+/// the body; re-entry is avoided with `try_lock` / the post-wave timeout.
+pub type SharedBlock = Arc<Mutex<Block>>;
+pub type SharedFunction = Arc<Mutex<Function>>;
+
+#[inline]
+pub fn share_block(block: Block) -> SharedBlock {
+    Arc::new(Mutex::new(block))
+}
+
+#[inline]
+pub fn share_function(function: Function) -> SharedFunction {
+    Arc::new(Mutex::new(function))
+}
+
+thread_local! {
+    static POST_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+    static WALK_SEEN: RefCell<HashSet<*const ()>> = RefCell::new(HashSet::new());
+    static DONE_FUNCS: RefCell<HashSet<*const ()>> = RefCell::new(HashSet::new());
+    static GOTO_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static CLONE_BLOCKS: RefCell<HashMap<*const (), SharedBlock>> = RefCell::new(HashMap::new());
+    static CLONE_FUNCS: RefCell<HashMap<*const (), SharedFunction>> = RefCell::new(HashMap::new());
+}
+
+/// Copied onto the post-process thread so `inline_short_gotos` /
+/// `apply_guard_clauses` can bail on the same wall-clock budget as SSA.
+pub fn set_post_deadline(deadline: Option<Instant>) {
+    POST_DEADLINE.with(|c| c.set(deadline));
+}
+
+#[inline]
+pub fn past_post_deadline() -> bool {
+    POST_DEADLINE.with(|c| c.get().is_some_and(|t| Instant::now() >= t))
+}
+
+pub(crate) fn reset_walk_seen() {
+    WALK_SEEN.with(|s| s.borrow_mut().clear());
+}
+
+pub(crate) fn walk_seen_insert(ptr: *const ()) -> bool {
+    WALK_SEEN.with(|s| s.borrow_mut().insert(ptr))
+}
+
+pub(crate) fn reset_done_funcs() {
+    DONE_FUNCS.with(|s| s.borrow_mut().clear());
+}
+
+pub(crate) fn mark_func_done(ptr: *const ()) -> bool {
+    DONE_FUNCS.with(|s| s.borrow_mut().insert(ptr))
+}
+
+pub(crate) fn goto_depth_enter() -> u32 {
+    GOTO_DEPTH.with(|d| {
+        let v = d.get();
+        d.set(v + 1);
+        v
+    })
+}
+
+pub(crate) fn goto_depth_leave(prev: u32) {
+    GOTO_DEPTH.with(|d| d.set(prev));
+}
+
+pub(crate) fn visit_shared(block: &SharedBlock, f: &mut impl FnMut(&Block)) {
+    let ptr = Arc::as_ptr(block) as *const ();
+    if !walk_seen_insert(ptr) {
+        return;
+    }
+    if past_post_deadline() {
+        return;
+    }
+    if let Some(b) = block.try_lock() {
+        f(&b);
+    }
+}
+
+pub(crate) fn visit_shared_mut(block: &SharedBlock, f: &mut impl FnMut(&mut Block)) {
+    let ptr = Arc::as_ptr(block) as *const ();
+    if !walk_seen_insert(ptr) {
+        return;
+    }
+    if past_post_deadline() {
+        return;
+    }
+    if let Some(mut b) = block.try_lock() {
+        f(&mut b);
+    }
+}
+
+/// Medal-improved: compare shared `if`/`while` bodies by pointer first so
+/// `a and a` folding and cond-expr matching see equal control-flow, not
+/// `PartialEq => false` on every If/While/Repeat.
+pub(crate) fn shared_blocks_equal(left: &SharedBlock, right: &SharedBlock) -> bool {
+    if Arc::ptr_eq(left, right) {
+        return true;
+    }
+    // try_lock: parking_lot is not reentrant. Comparing if-bodies while
+    // a parent then/else guard is live used to futex-wait forever.
+    let Some(a) = left.try_lock() else {
+        return false;
+    };
+    let Some(b) = right.try_lock() else {
+        return false;
+    };
+    if a.len() != b.len() {
+        return false;
+    }
+    // Deep-comparing 10k-stmt if-bodies during `a and a` folding is
+    // worse than missing the fold.
+    if a.len() > 48 {
+        return false;
+    }
+    *a == *b
+}
+
 
 impl Deref for Block {
     type Target = Vec<Statement>;
@@ -362,9 +487,246 @@ impl fmt::Display for Block {
     }
 }
 
+impl Block {
+    /// Clone `if`/`while`/`for` bodies **and nested closures** into new mutexes.
+    ///
+    /// `Statement::clone()` is shallow (`Arc` clone). A timeout snapshot that
+    /// still shared `SharedFunction` Arcs with the running post thread lost
+    /// ~75 % of bodies to `try_lock` failures while formatting.
+    pub fn deep_clone(&self) -> Block {
+        reset_walk_seen();
+        CLONE_BLOCKS.with(|m| m.borrow_mut().clear());
+        CLONE_FUNCS.with(|m| m.borrow_mut().clear());
+        let cloned = deep_clone_block(self);
+        CLONE_BLOCKS.with(|m| m.borrow_mut().clear());
+        CLONE_FUNCS.with(|m| m.borrow_mut().clear());
+        cloned
+    }
+}
+
+fn deep_clone_block(block: &Block) -> Block {
+    Block(block.0.iter().map(deep_clone_statement).collect())
+}
+
+fn deep_clone_shared(block: &SharedBlock) -> SharedBlock {
+    let ptr = Arc::as_ptr(block) as *const ();
+    if let Some(existing) = CLONE_BLOCKS.with(|m| m.borrow().get(&ptr).cloned()) {
+        return existing;
+    }
+    let new_arc = share_block(Block::default());
+    CLONE_BLOCKS.with(|m| m.borrow_mut().insert(ptr, new_arc.clone()));
+    if let Some(g) = block.try_lock() {
+        if let Some(mut dst) = new_arc.try_lock() {
+            *dst = deep_clone_block(&g);
+        }
+    }
+    new_arc
+}
+
+fn detach_closure(rv: &mut RValue) {
+    let RValue::Closure(c) = rv else {
+        return;
+    };
+    let ptr = Arc::as_ptr(&c.function.0) as *const ();
+    if let Some(existing) = CLONE_FUNCS.with(|m| m.borrow().get(&ptr).cloned()) {
+        c.function = ByAddress(existing);
+        return;
+    }
+    let Some(f) = c.function.try_lock() else {
+        return;
+    };
+    let nf = Function {
+        name: f.name.clone(),
+        line: f.line,
+        parameters: f.parameters.clone(),
+        is_variadic: f.is_variadic,
+        body: deep_clone_block(&f.body),
+    };
+    drop(f);
+    let shared = share_function(nf);
+    CLONE_FUNCS.with(|m| m.borrow_mut().insert(ptr, shared.clone()));
+    c.function = ByAddress(shared);
+}
+
+pub(crate) fn deep_clone_statement(stmt: &Statement) -> Statement {
+    let mut cloned = match stmt {
+        Statement::If(r#if) => Statement::If(If {
+            condition: r#if.condition.clone(),
+            then_block: deep_clone_shared(&r#if.then_block),
+            else_block: deep_clone_shared(&r#if.else_block),
+        }),
+        Statement::While(w) => Statement::While(While {
+            condition: w.condition.clone(),
+            block: deep_clone_shared(&w.block),
+        }),
+        Statement::Repeat(r) => Statement::Repeat(Repeat {
+            condition: r.condition.clone(),
+            block: deep_clone_shared(&r.block),
+        }),
+        Statement::NumericFor(n) => Statement::NumericFor(NumericFor {
+            initial: n.initial.clone(),
+            limit: n.limit.clone(),
+            step: n.step.clone(),
+            counter: n.counter.clone(),
+            block: deep_clone_shared(&n.block),
+        }),
+        Statement::GenericFor(g) => Statement::GenericFor(GenericFor {
+            res_locals: g.res_locals.clone(),
+            right: g.right.clone(),
+            block: deep_clone_shared(&g.block),
+        }),
+        other => other.clone(),
+    };
+    cloned.traverse_rvalues(&mut detach_closure);
+    cloned
+}
+
+/// Rewrite remaining `goto` / `::label::` into comments so the file is
+/// valid Luau (Luau has no goto). Returns the number of function bodies
+/// visited (main + nested closures).
+pub fn sanitize_for_luau(block: &mut Block) -> usize {
+    reset_walk_seen();
+    let mut functions = 1;
+    sanitize_block(block, &mut functions);
+    functions
+}
+
+fn sanitize_block(block: &mut Block, functions: &mut usize) {
+    sanitize_block_in(block, functions, false);
+}
+
+fn sanitize_block_in(block: &mut Block, functions: &mut usize, in_loop: bool) {
+    if past_post_deadline() {
+        return;
+    }
+    // Internal SSA close markers — not valid Luau.
+    block.0.retain(|s| !matches!(s, Statement::Close(_)));
+    for stmt in &mut block.0 {
+        let rewrite = match stmt {
+            Statement::Goto(g) => Some(format!("goto {}", g.0 .0)),
+            Statement::Label(l) => Some(format!("::{}::", l.0)),
+            // Loop-edge `break`/`continue` dumped outside any loop after
+            // gotos were commented (v6: 34 `break statement must be inside
+            // a loop` parse errors).
+            Statement::Break(_) if !in_loop => Some("break".into()),
+            Statement::Continue(_) if !in_loop => Some("continue".into()),
+            _ => None,
+        };
+        if let Some(text) = rewrite {
+            *stmt = Comment::new(text).into();
+            continue;
+        }
+        stmt.traverse_rvalues(&mut |rv| {
+            if let RValue::Closure(c) = rv {
+                let ptr = Arc::as_ptr(&c.function.0) as *const ();
+                if !walk_seen_insert(ptr) {
+                    return;
+                }
+                if let Some(mut f) = c.function.try_lock() {
+                    *functions += 1;
+                    sanitize_block_in(&mut f.body, functions, false);
+                }
+            }
+        });
+        match stmt {
+            Statement::If(r#if) => {
+                visit_shared_mut(&r#if.then_block, &mut |b| {
+                    sanitize_block_in(b, functions, in_loop)
+                });
+                visit_shared_mut(&r#if.else_block, &mut |b| {
+                    sanitize_block_in(b, functions, in_loop)
+                });
+            }
+            Statement::While(w) => {
+                visit_shared_mut(&w.block, &mut |b| sanitize_block_in(b, functions, true));
+            }
+            Statement::Repeat(r) => {
+                visit_shared_mut(&r.block, &mut |b| sanitize_block_in(b, functions, true));
+            }
+            Statement::NumericFor(n) => {
+                visit_shared_mut(&n.block, &mut |b| sanitize_block_in(b, functions, true));
+            }
+            Statement::GenericFor(g) => {
+                visit_shared_mut(&g.block, &mut |b| sanitize_block_in(b, functions, true));
+            }
+            _ => {}
+        }
+    }
+}
+
 // New modules for Oracle-quality features
 pub mod compound_assign;
+pub mod cond_expr;
 pub mod context_naming;
+pub mod copy_fold;
 pub mod post_process;
 pub mod table_cleanup;
 pub mod unused_vars;
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_rewrites_goto_and_label_to_comments() {
+        let mut body = Block(vec![
+            Statement::Label(Label("l93".into())),
+            Statement::Goto(Goto::new(Label("l95".into()))),
+            Statement::Label(Label("l95".into())),
+        ]);
+        let n = sanitize_for_luau(&mut body);
+        assert_eq!(n, 1);
+        let s = body.to_string();
+        for line in s.lines() {
+            let t = line.trim_start();
+            assert!(!t.starts_with("goto "), "statement goto leaked: {line}");
+            assert!(!t.starts_with("::"), "label leaked: {line}");
+        }
+        assert!(s.contains("goto l95") || s.contains("l95"));
+    }
+
+    #[test]
+    fn sanitize_drops_internal_close() {
+        let loc = RcLocal::new(Local::new(Some("x".into())));
+        let mut body = Block(vec![
+            Statement::Close(Close {
+                locals: vec![loc],
+            }),
+            Comment::new("keep".into()).into(),
+        ]);
+        sanitize_for_luau(&mut body);
+        let s = body.to_string();
+        assert!(!s.contains("__close_uv"), "{s}");
+        assert!(s.contains("keep"), "{s}");
+    }
+
+    #[test]
+    fn sanitize_comments_break_outside_loop() {
+        let mut body = Block(vec![
+            Comment::new("goto l4473".into()).into(),
+            Statement::Break(Break {}),
+        ]);
+        sanitize_for_luau(&mut body);
+        let s = body.to_string();
+        for line in s.lines() {
+            let t = line.trim_start();
+            assert!(!t.starts_with("break"), "orphan break leaked: {line}");
+        }
+        assert!(s.contains("break"), "{s}");
+    }
+
+    #[test]
+    fn sanitize_keeps_break_inside_while() {
+        let inner = Block(vec![Statement::Break(Break {})]);
+        let mut body = Block(vec![Statement::While(While::new(
+            Literal::Boolean(true).into(),
+            inner,
+        ))]);
+        sanitize_for_luau(&mut body);
+        let s = body.to_string();
+        assert!(
+            s.lines().any(|l| l.trim_start() == "break"),
+            "loop break was commented: {s}"
+        );
+    }
+}

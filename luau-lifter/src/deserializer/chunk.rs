@@ -1,7 +1,11 @@
 use std::convert::TryInto;
 
 use super::function::{Function, ParseError};
-use super::leb128::read_leb128_u32;
+use super::leb128::{read_count, read_leb128_u32};
+
+const MAX_STRINGS: u32 = 200_000;
+const MAX_FUNCTIONS: u32 = 50_000;
+const MAX_USERDATA: u32 = 512;
 
 #[derive(Debug)]
 pub struct Chunk {
@@ -57,24 +61,26 @@ impl Chunk {
         } else {
             0
         };
-        // LBC_TYPE_VERSION_MAX in upstream luau is 3.
-        if types_version > 3 {
-            return Err(ParseError {
-                message: format!("unsupported types_version {}", types_version),
-                position: offset,
-            });
-        }
+        // Studio always writes types_version 3. Unknown future values
+        // still have a typesize payload we skip, so don't abort the
+        // whole blob — a wrong guess here used to reject real scripts.
 
         // -- String table --
-        let (string_count, advance) = read_leb128_u32(data, offset).map_err(|e| {
+        let (string_count, advance) = read_count(data, offset, MAX_STRINGS, "string_count").map_err(|e| {
             ParseError {
-                message: format!("string count: {e}"),
+                message: e,
                 position: start,
             }
         })?;
         offset += advance;
         let mut string_table = Vec::with_capacity(string_count as usize);
-        for _ in 0..string_count {
+        for i in 0..string_count {
+            if i & 4095 == 0 && cfg::past_decompile_deadline() {
+                return Err(ParseError {
+                    message: "decode timed out (string table)".into(),
+                    position: start,
+                });
+            }
             let (length, advance) = read_leb128_u32(data, offset).map_err(|e| {
                 ParseError {
                     message: format!("string length: {e}"),
@@ -89,12 +95,20 @@ impl Chunk {
 
         // -- Userdata type mapping (only if types_version >= 3) --
         if types_version >= 3 {
+            let mut userdata_n = 0u32;
             loop {
                 need!(1);
                 let idx = data[offset];
                 offset += 1;
                 if idx == 0 {
                     break;
+                }
+                userdata_n += 1;
+                if userdata_n > MAX_USERDATA {
+                    return Err(ParseError {
+                        message: format!("userdata map exceeds cap {MAX_USERDATA}"),
+                        position: start,
+                    });
                 }
                 // Skip the varint nameRef.
                 let (_, advance) = read_leb128_u32(data, offset).map_err(|e| {
@@ -108,15 +122,21 @@ impl Chunk {
         }
 
         // -- Function table --
-        let (function_count, advance) = read_leb128_u32(data, offset).map_err(|e| {
+        let (function_count, advance) = read_count(data, offset, MAX_FUNCTIONS, "function_count").map_err(|e| {
             ParseError {
-                message: format!("function count: {e}"),
+                message: e,
                 position: start,
             }
         })?;
         offset += advance;
         let mut functions = Vec::with_capacity(function_count as usize);
-        for _ in 0..function_count {
+        for i in 0..function_count {
+            if i & 15 == 0 && cfg::past_decompile_deadline() {
+                return Err(ParseError {
+                    message: "decode timed out (function table)".into(),
+                    position: start,
+                });
+            }
             // Version 12+ prefixes each proto with a size varint so loaders
             // can skip unknown trailing fields. Consume it and pass the
             // remaining budget into Function::parse.

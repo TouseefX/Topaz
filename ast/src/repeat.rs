@@ -1,20 +1,19 @@
-use parking_lot::Mutex;
-use triomphe::Arc;
-
-use crate::{formatter::Formatter, has_side_effects, Block, LocalRw, RValue, RcLocal, Traverse};
+use crate::{
+    formatter::Formatter, has_side_effects, share_block, shared_blocks_equal, Block, LocalRw,
+    RValue, RcLocal, SharedBlock, Traverse,
+};
 use std::fmt;
 
 
 #[derive(Debug, Clone)]
 pub struct Repeat {
     pub condition: RValue,
-    pub block: Arc<Mutex<Block>>,
+    pub block: SharedBlock,
 }
 
 impl PartialEq for Repeat {
-    fn eq(&self, _other: &Self) -> bool {
-        
-        false
+    fn eq(&self, other: &Self) -> bool {
+        self.condition == other.condition && shared_blocks_equal(&self.block, &other.block)
     }
 }
 
@@ -24,7 +23,7 @@ impl Repeat {
     pub fn new(condition: RValue, block: Block) -> Self {
         Self {
             condition,
-            block: Arc::new(block.into()),
+            block: share_block(block),
         }
     }
 }

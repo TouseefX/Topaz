@@ -30,8 +30,8 @@ impl Instruction {
         let op_code_raw = op_code_raw.wrapping_mul(encode_key);
         
         let op_code = match OpCode::try_from(op_code_raw) {
+            Ok(OpCode::LOP__COUNT) | Err(_) => return Err(nom::error::ErrorKind::Tag),
             Ok(op) => op,
-            Err(_) => return Err(nom::error::ErrorKind::Tag),
         };
 
         match op_code {
@@ -75,20 +75,9 @@ impl Instruction {
                     aux: 0,
                 })
             }
-            OpCode::LOP_BITAND
-            | OpCode::LOP_BITOR
-            | OpCode::LOP_BITXOR
-            | OpCode::LOP_BITNOT
-            | OpCode::LOP_BITLSHIFT
-            | OpCode::LOP_BITRSHIFT
-            | OpCode::LOP_BITARSHIFT
-            | OpCode::LOP_BITANDK
-            | OpCode::LOP_BITORK
-            | OpCode::LOP_BITXORK
-            | OpCode::LOP_SUBRK
-            | OpCode::LOP_DIVRK => {
-                 let (a, b, c) = Self::parse_abc(insn);
-                 Ok(Self::BC {
+            OpCode::LOP_SUBRK | OpCode::LOP_DIVRK => {
+                let (a, b, c) = Self::parse_abc(insn);
+                Ok(Self::BC {
                     op_code,
                     a,
                     b,

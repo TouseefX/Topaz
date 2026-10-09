@@ -1,10 +1,9 @@
 use crate::{
-    has_side_effects, Assign, Block, LValue, LocalRw, RValue, RcLocal, SideEffects, Traverse,
+    has_side_effects, share_block, shared_blocks_equal, Assign, Block, LValue, LocalRw, RValue,
+    RcLocal, SharedBlock, SideEffects, Traverse,
 };
 use itertools::Itertools;
-use parking_lot::Mutex;
 use std::fmt;
-use triomphe::Arc;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct NumForInit {
@@ -88,7 +87,7 @@ impl fmt::Display for NumForInit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "-- NumForInit\nlocal {}, {}, {} = {}, {}, {}\n-- end NumForInit",
+            "-- unstructured numeric-for init\n{}, {}, {} = {}, {}, {}",
             self.counter.0, self.limit.0, self.step.0, self.counter.1, self.limit.1, self.step.1
         )
     }
@@ -164,7 +163,7 @@ impl fmt::Display for NumForNext {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "-- NumForNext\n{} = {} + {};\nif {} <= {}\n-- end NumForNext",
+            "-- unstructured numeric-for next\n{} = {} + {}\nif {} <= {} then\nend",
             self.counter.0, self.counter.1, self.step, self.counter.0, self.limit
         )
     }
@@ -178,13 +177,16 @@ pub struct NumericFor {
     pub step: RValue,
     
     pub counter: RcLocal,
-    pub block: Arc<Mutex<Block>>,
+    pub block: SharedBlock,
 }
 
 impl PartialEq for NumericFor {
-    fn eq(&self, _other: &Self) -> bool {
-        
-        false
+    fn eq(&self, other: &Self) -> bool {
+        self.initial == other.initial
+            && self.limit == other.limit
+            && self.step == other.step
+            && self.counter == other.counter
+            && shared_blocks_equal(&self.block, &other.block)
     }
 }
 
@@ -203,7 +205,7 @@ impl NumericFor {
             limit,
             step,
             counter,
-            block: Arc::new(block.into()),
+            block: share_block(block),
         }
     }
 }
@@ -256,10 +258,13 @@ impl fmt::Display for NumericFor {
             self.limit,
             self.step,
             self.block
-                .lock()
-                .iter()
-                .map(|n| n.to_string().replace('\n', "\n\t"))
-                .join("\n\t")
+                .try_lock()
+                .map(|b| {
+                    b.iter()
+                        .map(|n| n.to_string().replace('\n', "\n\t"))
+                        .join("\n\t")
+                })
+                .unwrap_or_default()
         )
     }
 }
@@ -320,30 +325,33 @@ impl LocalRw for GenericForInit {
 
 impl fmt::Display for GenericForInit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "-- GenericForInit\n{}\n[internal control] = {}\n-- end GenericForInit",
-            self.0, self.0.left[2]
-        )
+        write!(f, "-- unstructured generic-for init\n{}", self.0)
     }
 }
 
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct GenericForNext {
-    
     pub res_locals: Vec<LValue>,
     pub generator: RValue,
     pub state: RValue,
+    /// FORGLOOP register A+2: previous-iteration control (or FORGPREP init).
+    pub control: RcLocal,
 }
 
 impl GenericForNext {
-    pub fn new(res_locals: Vec<RcLocal>, generator: RValue, state: RcLocal) -> Self {
+    pub fn new(
+        res_locals: Vec<RcLocal>,
+        generator: RValue,
+        state: RcLocal,
+        control: RcLocal,
+    ) -> Self {
         assert!(!res_locals.is_empty());
         Self {
             res_locals: res_locals.into_iter().map(LValue::Local).collect(),
             generator,
             state: RValue::Local(state),
+            control,
         }
     }
 }
@@ -371,6 +379,7 @@ impl LocalRw for GenericForNext {
             .values_read()
             .into_iter()
             .chain(self.state.values_read().into_iter())
+            .chain(std::iter::once(&self.control))
             .collect()
     }
 
@@ -379,6 +388,7 @@ impl LocalRw for GenericForNext {
             .values_read_mut()
             .into_iter()
             .chain(self.state.values_read_mut().into_iter())
+            .chain(std::iter::once(&mut self.control))
             .collect()
     }
 
@@ -386,6 +396,7 @@ impl LocalRw for GenericForNext {
         self.res_locals
             .iter()
             .flat_map(|l| l.values_written())
+            .chain(std::iter::once(&self.control))
             .collect()
     }
 
@@ -393,6 +404,7 @@ impl LocalRw for GenericForNext {
         self.res_locals
             .iter_mut()
             .flat_map(|l| l.values_written_mut())
+            .chain(std::iter::once(&mut self.control))
             .collect()
     }
 }
@@ -401,11 +413,13 @@ impl fmt::Display for GenericForNext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "-- GenericForNext\n{} = {}({}, [internal control])\nif {} ~= nil\n[internal control] = {}\n-- end GenericForNext",
+            "-- unstructured generic-for next\n{} = {}({}, {})\nif {} ~= nil then\n\t{} = {}\nend",
             self.res_locals.iter().join(", "),
             self.generator,
             self.state,
+            self.control,
             self.res_locals[0],
+            self.control,
             self.res_locals[0],
         )
     }
@@ -415,13 +429,14 @@ impl fmt::Display for GenericForNext {
 pub struct GenericFor {
     pub res_locals: Vec<RcLocal>,
     pub right: Vec<RValue>,
-    pub block: Arc<Mutex<Block>>,
+    pub block: SharedBlock,
 }
 
 impl PartialEq for GenericFor {
-    fn eq(&self, _other: &Self) -> bool {
-        
-        false
+    fn eq(&self, other: &Self) -> bool {
+        self.res_locals == other.res_locals
+            && self.right == other.right
+            && shared_blocks_equal(&self.block, &other.block)
     }
 }
 
@@ -430,7 +445,7 @@ impl GenericFor {
         Self {
             res_locals,
             right,
-            block: Arc::new(block.into()),
+            block: share_block(block),
         }
     }
 }
@@ -476,10 +491,68 @@ impl fmt::Display for GenericFor {
             self.res_locals.iter().join(", "),
             self.right.iter().join(", "),
             self.block
-                .lock()
-                .iter()
-                .map(|n| n.to_string().replace('\n', "\n\t"))
-                .join("\n\t")
+                .try_lock()
+                .map(|b| {
+                    b.iter()
+                        .map(|n| n.to_string().replace('\n', "\n\t"))
+                        .join("\n\t")
+                })
+                .unwrap_or_default()
         )
+    }
+}
+
+#[cfg(test)]
+mod unstructured_for_emit_tests {
+    use super::*;
+    use crate::{Local, Statement};
+
+    fn named(name: &str) -> RcLocal {
+        RcLocal::new(Local::new(Some(name.to_string())))
+    }
+
+    #[test]
+    fn generic_for_next_is_valid_luau() {
+        let g = named("g");
+        let s = named("s");
+        let c = named("c");
+        let v1 = named("v1");
+        let v2 = named("v2");
+        let nxt = GenericForNext::new(vec![v1, v2], g.into(), s, c);
+        let text = nxt.to_string();
+        assert!(!text.contains("[internal control]"), "{text}");
+        assert!(text.contains("if v1 ~= nil then"), "{text}");
+        assert!(text.contains("c = v1"), "{text}");
+        assert!(text.trim_end().ends_with("end"), "{text}");
+        for line in text.lines() {
+            let t = line.trim_start();
+            if t.starts_with("if ") {
+                assert!(t.contains(" then"), "if without then: {line}");
+            }
+        }
+        let s = Statement::from(nxt).to_string();
+        assert!(!s.contains("[internal control]"));
+    }
+
+    #[test]
+    fn generic_for_init_does_not_invent_control() {
+        let g = named("g");
+        let s = named("s");
+        let c = named("c");
+        let init = GenericForInit::new(g, s, c);
+        let text = init.to_string();
+        assert!(!text.contains("[internal control]"), "{text}");
+        assert!(!text.contains("if "), "{text}");
+    }
+
+    #[test]
+    fn num_for_next_has_then_end() {
+        let counter = named("i");
+        let limit = named("n");
+        let step = named("step");
+        let nxt = NumForNext::new(counter, limit.into(), step.into());
+        let text = nxt.to_string();
+        assert!(text.contains("if i <= n then"), "{text}");
+        assert!(text.trim_end().ends_with("end"), "{text}");
     }
 }

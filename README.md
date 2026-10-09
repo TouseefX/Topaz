@@ -17,6 +17,8 @@ Options:
   -V, --version  Print version
 ```
 
+Wall-clock budget is **180 seconds** by default. Override with `--time-budget SECS` or `TOPAZ_TIME_BUDGET_SECS`. If the budget expires the CLI still writes whatever it has, stamps the file with `TOPAZ_INCOMPLETE`, converts leftover `goto`/`::label::` to comments (Luau has no goto), and **exits non-zero**. `TOPAZ_DEBUG_CYCLES=1` prints per-pass timings; `=2` is the verbose per-round goto log.
+
 ## Script
             
 When using `topaz serve`, you can use the decompiler directly inside of your executor.
