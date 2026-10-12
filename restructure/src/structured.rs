@@ -29,7 +29,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::parallel_assign_from_args;
 
 const NONE: usize = usize::MAX;
-const MAX_DEPTH: usize = 1000;
+/// Nesting depth of branches the structurer will recurse through. Each level
+/// is a few stack frames on the 64 MB lift thread.
+const MAX_DEPTH: usize = 3000;
 
 /// `TOPAZ_STRUCTURED_DEBUG=1` prints why the structurer gave up on a
 /// function (and what it produced when it succeeded) to stderr.
