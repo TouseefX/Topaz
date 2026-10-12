@@ -95,6 +95,16 @@ jobs:
                 done
           fi
 
+      - name: Publish output samples (debug)
+        if: always()
+        run: |
+          label="${{ matrix.label }}"
+          esc() { sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/$/%0A/' | tr -d '\n'; }
+          for f in corpus-out/$label/01_loops_break_continue.topaz.log corpus-out/$label/01_loops_break_continue.decompiled.lua corpus-out/$label/03_state_machine.decompiled.lua; do
+            [ -f "$f" ] || { echo "::notice title=sample::missing $f"; continue; }
+            printf '::notice title=sample %s (%s, %s bytes)::%s\n' "$(basename "$f")" "$label" "$(wc -c < "$f")" "$(head -n 70 "$f" | esc)"
+          done
+
       - name: Unit tests (ast, cfg, restructure) - informational
         continue-on-error: true
         working-directory: ${{ matrix.src }}
