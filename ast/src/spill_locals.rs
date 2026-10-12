@@ -1,27 +1,37 @@
-//! Keeps every function under Luau's 200-active-local limit.
+//! Keeps every function under Luau's 200-register limit.
 //!
-//! Luau rejects a function whose scope holds more than 200 active locals
-//! (`cFrame652` in compile output). The first [`KEEP_TOP_LEVEL_LOCALS`]
-//! locals a function declares at its own top level stay real locals. Every
-//! later top-level local moves into one table, `_spilled`, created at the
-//! start of the function, so each use becomes `_spilled.<name>`.
+//! Luau rejects a function whose body needs more than 200 registers at once
+//! (`Out of local registers when trying to allocate <name>: exceeded limit
+//! 200`). Locals are registers, so the limit is on how many locals are active
+//! at the same point. The count includes locals in nested blocks, and the
+//! hidden registers of loops.
 //!
-//! A top-level local lives for the whole call, so the table gives it the same
-//! lifetime, and closures that capture it still share one variable. Locals
-//! declared inside loops or nested blocks are never spilled, which keeps their
-//! per-iteration semantics.
+//! For each function body this module measures that peak. If the peak is above
+//! [`TARGET_ACTIVE_LOCALS`], it moves locals into one table, `_spilled`,
+//! created at the start of the function, so each use becomes `_spilled.<name>`.
+//! The table is only used when needed, and in two steps:
+//!
+//! 1. Move the tail of the function's top-level locals. Top-level locals live
+//!    for the whole call, so this never changes behaviour.
+//! 2. If that is not enough, also move nested locals. A local declared inside
+//!    a loop and captured by a closure is never moved, because a single table
+//!    field would then be shared between iterations.
 
 use std::collections::{HashMap, HashSet};
 
 use itertools::Either;
 
 use crate::{
-    Assign, Block, Index, LValue, Literal, Local, RValue, RcLocal, Statement, Table, Traverse,
+    Assign, Block, Index, LValue, Literal, Local, LocalRw, RValue, RcLocal, Statement, Table,
+    Traverse,
 };
 
-/// Number of top-level locals per function that stay real locals. The rest
-/// spill. The margin covers locals declared inside nested blocks.
-pub const KEEP_TOP_LEVEL_LOCALS: usize = 120;
+/// Peak number of simultaneously active locals a function may use. Luau's
+/// limit is 200. The margin covers temporaries used by expressions.
+pub const TARGET_ACTIVE_LOCALS: usize = 150;
+
+/// Hidden registers a Luau `for` loop keeps for its iteration state.
+const LOOP_HIDDEN_REGISTERS: usize = 3;
 
 const SPILL_TABLE: &str = "_spilled";
 
@@ -31,9 +41,9 @@ const KEYWORDS: &[&str] = &[
     "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
 ];
 
-/// Spills excess top-level locals in `block` and in every function nested
-/// inside it. Each function body is handled on its own, so the 200-local
-/// limit is checked per function.
+/// Spills locals in `block` and in every function nested inside it, when a
+/// function needs more active locals than Luau allows. Each function body is
+/// measured on its own.
 pub fn spill_locals(block: &mut Block) {
     spill_function(block);
     visit_closures(block, &mut |body| spill_locals(body));
@@ -85,9 +95,18 @@ fn visit_closures<G: FnMut(&mut Block)>(block: &mut Block, f: &mut G) {
     }
 }
 
-/// Handles one function body. Only the body's own top-level declarations are
-/// considered. References inside nested closures are rewritten too, because
-/// those closures capture the same locals.
+/// A local declared by a `local` statement inside one function body.
+struct Decl {
+    local: RcLocal,
+    /// Declared at the body's top level (not inside any nested block).
+    top_level: bool,
+    /// Declared inside a loop body, at any depth.
+    in_loop: bool,
+}
+
+/// Handles one function body. Nested closures are not measured here, because
+/// each closure is its own Luau function. Their references to moved locals are
+/// still rewritten.
 fn spill_function(block: &mut Block) {
     // A body that already has its spill table (a shared body reached twice)
     // is done. A second table with the same name would shadow the first.
@@ -102,49 +121,299 @@ fn spill_function(block: &mut Block) {
         return;
     }
 
-    // Top-level `local` declarations in source order.
-    let mut declared: Vec<RcLocal> = Vec::new();
+    let none: HashSet<RcLocal> = HashSet::new();
+    let mut decls: Vec<Decl> = Vec::new();
     let mut seen: HashSet<RcLocal> = HashSet::new();
-    for statement in &block.0 {
-        if let Statement::Assign(assign) = statement {
-            if !assign.prefix {
-                continue;
-            }
-            for lvalue in &assign.left {
-                if let LValue::Local(local) = lvalue {
-                    if seen.insert(local.clone()) {
-                        declared.push(local.clone());
-                    }
-                }
-            }
-        }
-    }
-    if declared.len() <= KEEP_TOP_LEVEL_LOCALS {
+    let peak = scan_block(block, 0, false, 0, &none, &mut decls, &mut seen);
+    if peak <= TARGET_ACTIVE_LOCALS {
         return;
     }
 
-    let spilled: Vec<RcLocal> = declared.split_off(KEEP_TOP_LEVEL_LOCALS);
+    // Locals a closure references, so a closure may observe their value.
+    let mut captured: HashSet<RcLocal> = HashSet::new();
+    collect_captured(block, false, &mut captured);
+
+    // A declaration inside a loop that a closure captures keeps its own
+    // variable per iteration, so it cannot move into the shared table.
+    let eligible = |d: &Decl| !d.in_loop || !captured.contains(&d.local);
+
+    let mut top: Vec<RcLocal> = Vec::new();
+    let mut nested: Vec<RcLocal> = Vec::new();
+    for d in &decls {
+        if !eligible(d) {
+            continue;
+        }
+        if d.top_level {
+            top.push(d.local.clone());
+        } else {
+            nested.push(d.local.clone());
+        }
+    }
+    // Creation order, so field names are the same on every run.
+    top.sort();
+    nested.sort();
+
+    // Step 1: move only the top-level tail.
+    let (mut spilled, fits) = choose_tail(block, &HashSet::new(), &top);
+    if !fits {
+        // Step 2: move every eligible nested local, then the top-level tail.
+        let base: HashSet<RcLocal> = nested.iter().cloned().collect();
+        let (tail, _) = choose_tail(block, &base, &top);
+        spilled = tail;
+        spilled.extend(nested);
+    }
+    spilled.sort();
+    if spilled.is_empty() {
+        return;
+    }
     if std::env::var_os("TOPAZ_DEBUG_SPILL").is_some() {
         eprintln!(
-            "[spill] body declares {} top-level locals; keeping {}, spilling {}",
-            KEEP_TOP_LEVEL_LOCALS + spilled.len(),
-            KEEP_TOP_LEVEL_LOCALS,
-            spilled.len()
+            "[spill] body needs {} active locals (target {}); moving {} of {} declared locals",
+            peak,
+            TARGET_ACTIVE_LOCALS,
+            spilled.len(),
+            decls.len()
         );
     }
-    let table = RcLocal::new(Local::new(Some(SPILL_TABLE.to_string())));
 
-    // Field name per spilled local: its source name, sanitized and made unique.
+    let table = RcLocal::new(Local::new(Some(SPILL_TABLE.to_string())));
+    let keys = field_keys(&spilled);
+
+    rewrite_block(block, &table, &keys);
+    fix_declarations(block);
+
+    let mut decl = Assign::new(
+        vec![LValue::Local(table.clone())],
+        vec![RValue::Table(Table(Vec::new()))],
+    );
+    decl.prefix = true;
+    block.0.insert(0, Statement::Assign(decl));
+}
+
+/// Finds the most top-level locals that can stay real while the peak stays at
+/// or below the target, given that every local in `base` is moved. `top` is in
+/// creation order. The tail of `top` is moved, and the first `k` stay real.
+/// Returns the tail to move, and whether it meets the target.
+fn choose_tail(block: &Block, base: &HashSet<RcLocal>, top: &[RcLocal]) -> (Vec<RcLocal>, bool) {
+    let peak_moving_tail_from = |k: usize| -> usize {
+        let mut excluded = base.clone();
+        excluded.extend(top[k..].iter().cloned());
+        let mut decls: Vec<Decl> = Vec::new();
+        let mut seen: HashSet<RcLocal> = HashSet::new();
+        scan_block(block, 0, false, 0, &excluded, &mut decls, &mut seen)
+    };
+
+    // peak_moving_tail_from(k) is non-decreasing in k, because a larger k
+    // moves fewer locals. Find the largest k that fits.
+    let mut best: Option<usize> = None;
+    let (mut lo, mut hi) = (0usize, top.len());
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        if peak_moving_tail_from(mid) <= TARGET_ACTIVE_LOCALS {
+            best = Some(mid);
+            lo = mid + 1;
+        } else {
+            if mid == 0 {
+                break;
+            }
+            hi = mid - 1;
+        }
+    }
+    match best {
+        Some(k) => (top[k..].to_vec(), true),
+        // Even moving the whole tail does not fit. Move all of it anyway; the
+        // remaining locals are the ones a closure captures inside a loop.
+        None => (top.to_vec(), false),
+    }
+}
+
+/// Measures the peak number of simultaneously active locals in one function
+/// body, not counting closures. `excluded` locals are treated as moved to the
+/// table, so they do not count. Every declaration is appended to `decls`.
+fn scan_block(
+    block: &Block,
+    depth: usize,
+    in_loop: bool,
+    base: usize,
+    excluded: &HashSet<RcLocal>,
+    decls: &mut Vec<Decl>,
+    seen: &mut HashSet<RcLocal>,
+) -> usize {
+    let mut active = base;
+    let mut peak = base;
+    for statement in &block.0 {
+        match statement {
+            Statement::Assign(assign) if assign.prefix => {
+                for lvalue in &assign.left {
+                    if let LValue::Local(local) = lvalue {
+                        if seen.insert(local.clone()) {
+                            decls.push(Decl {
+                                local: local.clone(),
+                                top_level: depth == 0,
+                                in_loop,
+                            });
+                            if !excluded.contains(local) {
+                                active += 1;
+                            }
+                        }
+                    }
+                }
+                peak = peak.max(active);
+            }
+            Statement::If(r#if) => {
+                if let Some(b) = r#if.then_block.try_lock() {
+                    peak = peak.max(scan_block(
+                        &b,
+                        depth + 1,
+                        in_loop,
+                        active,
+                        excluded,
+                        decls,
+                        seen,
+                    ));
+                }
+                if let Some(b) = r#if.else_block.try_lock() {
+                    peak = peak.max(scan_block(
+                        &b,
+                        depth + 1,
+                        in_loop,
+                        active,
+                        excluded,
+                        decls,
+                        seen,
+                    ));
+                }
+            }
+            Statement::While(r#while) => {
+                if let Some(b) = r#while.block.try_lock() {
+                    peak = peak.max(scan_block(
+                        &b,
+                        depth + 1,
+                        true,
+                        active,
+                        excluded,
+                        decls,
+                        seen,
+                    ));
+                }
+            }
+            Statement::Repeat(repeat) => {
+                if let Some(b) = repeat.block.try_lock() {
+                    peak = peak.max(scan_block(
+                        &b,
+                        depth + 1,
+                        true,
+                        active,
+                        excluded,
+                        decls,
+                        seen,
+                    ));
+                }
+            }
+            Statement::NumericFor(numeric_for) => {
+                // The control variable is always a real local, and the loop
+                // keeps hidden registers while the body runs.
+                let inner = active + LOOP_HIDDEN_REGISTERS + 1;
+                peak = peak.max(inner);
+                if let Some(b) = numeric_for.block.try_lock() {
+                    peak = peak.max(scan_block(
+                        &b,
+                        depth + 1,
+                        true,
+                        inner,
+                        excluded,
+                        decls,
+                        seen,
+                    ));
+                }
+            }
+            Statement::GenericFor(generic_for) => {
+                let inner = active + LOOP_HIDDEN_REGISTERS + generic_for.res_locals.len();
+                peak = peak.max(inner);
+                if let Some(b) = generic_for.block.try_lock() {
+                    peak = peak.max(scan_block(
+                        &b,
+                        depth + 1,
+                        true,
+                        inner,
+                        excluded,
+                        decls,
+                        seen,
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    peak
+}
+
+/// Adds every local that a closure references, at any depth, to `out`.
+fn collect_captured(block: &mut Block, in_closure: bool, out: &mut HashSet<RcLocal>) {
+    for statement in &mut block.0 {
+        if in_closure {
+            for local in statement.values_read_mut() {
+                out.insert(local.clone());
+            }
+            for local in statement.values_written_mut() {
+                out.insert(local.clone());
+            }
+        }
+        statement.post_traverse_values(&mut |value| -> Option<()> {
+            if let Either::Right(RValue::Closure(closure)) = value {
+                if let Some(mut function) = closure.function.try_lock() {
+                    collect_captured(&mut function.body, true, out);
+                }
+            }
+            None
+        });
+        match statement {
+            Statement::If(r#if) => {
+                if let Some(mut b) = r#if.then_block.try_lock() {
+                    collect_captured(&mut b, in_closure, out);
+                }
+                if let Some(mut b) = r#if.else_block.try_lock() {
+                    collect_captured(&mut b, in_closure, out);
+                }
+            }
+            Statement::While(r#while) => {
+                if let Some(mut b) = r#while.block.try_lock() {
+                    collect_captured(&mut b, in_closure, out);
+                }
+            }
+            Statement::Repeat(repeat) => {
+                if let Some(mut b) = repeat.block.try_lock() {
+                    collect_captured(&mut b, in_closure, out);
+                }
+            }
+            Statement::NumericFor(numeric_for) => {
+                if let Some(mut b) = numeric_for.block.try_lock() {
+                    collect_captured(&mut b, in_closure, out);
+                }
+            }
+            Statement::GenericFor(generic_for) => {
+                if let Some(mut b) = generic_for.block.try_lock() {
+                    collect_captured(&mut b, in_closure, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Field name per moved local: its source name, sanitized and made unique.
+/// `locals` must be sorted so the names are deterministic.
+fn field_keys(locals: &[RcLocal]) -> HashMap<RcLocal, String> {
     let mut keys: HashMap<RcLocal, String> = HashMap::new();
     let mut used: HashSet<String> = HashSet::new();
-    for (i, local) in spilled.iter().enumerate() {
+    for (i, local) in locals.iter().enumerate() {
         let base = local
             .0
             .0
             .lock()
             .0
             .clone()
-            .unwrap_or_else(|| format!("v{}", KEEP_TOP_LEVEL_LOCALS + i));
+            .unwrap_or_else(|| format!("v{}", i));
         let mut key: String = base
             .chars()
             .map(|c| {
@@ -170,16 +439,7 @@ fn spill_function(block: &mut Block) {
         used.insert(unique.clone());
         keys.insert(local.clone(), unique);
     }
-
-    rewrite_block(block, &table, &keys);
-    fix_declarations(block);
-
-    let mut decl = Assign::new(
-        vec![LValue::Local(table.clone())],
-        vec![RValue::Table(Table(Vec::new()))],
-    );
-    decl.prefix = true;
-    block.0.insert(0, Statement::Assign(decl));
+    keys
 }
 
 fn is_spill_table(local: &RcLocal) -> bool {
@@ -193,7 +453,7 @@ fn field(table: &RcLocal, key: &str) -> Index {
     )
 }
 
-/// Replaces every use of a spilled local with `_spilled.<key>`, in this block,
+/// Replaces every use of a moved local with `_spilled.<key>`, in this block,
 /// its nested blocks, and nested closures.
 fn rewrite_block(block: &mut Block, table: &RcLocal, keys: &HashMap<RcLocal, String>) {
     for statement in &mut block.0 {
@@ -258,10 +518,12 @@ fn rewrite_block(block: &mut Block, table: &RcLocal, keys: &HashMap<RcLocal, Str
     }
 }
 
-/// After rewriting, a top-level `local` declaration can mix kept locals with
+/// After rewriting, a `local` declaration can mix kept locals with
 /// `_spilled.<key>` targets, and `_spilled.<key>` is not valid after `local`.
 /// Such a declaration becomes: `local <kept locals>` on their own, then a plain
 /// assignment to all targets. An empty right side becomes `nil` values.
+/// Applies to this block and its nested blocks, not to closures, which have
+/// their own declarations.
 fn fix_declarations(block: &mut Block) {
     let old = std::mem::take(&mut block.0);
     let mut out = Vec::with_capacity(old.len() + 8);
@@ -295,4 +557,38 @@ fn fix_declarations(block: &mut Block) {
         }
     }
     block.0 = out;
+
+    for statement in &mut block.0 {
+        match statement {
+            Statement::If(r#if) => {
+                if let Some(mut b) = r#if.then_block.try_lock() {
+                    fix_declarations(&mut b);
+                }
+                if let Some(mut b) = r#if.else_block.try_lock() {
+                    fix_declarations(&mut b);
+                }
+            }
+            Statement::While(r#while) => {
+                if let Some(mut b) = r#while.block.try_lock() {
+                    fix_declarations(&mut b);
+                }
+            }
+            Statement::Repeat(repeat) => {
+                if let Some(mut b) = repeat.block.try_lock() {
+                    fix_declarations(&mut b);
+                }
+            }
+            Statement::NumericFor(numeric_for) => {
+                if let Some(mut b) = numeric_for.block.try_lock() {
+                    fix_declarations(&mut b);
+                }
+            }
+            Statement::GenericFor(generic_for) => {
+                if let Some(mut b) = generic_for.block.try_lock() {
+                    fix_declarations(&mut b);
+                }
+            }
+            _ => {}
+        }
+    }
 }

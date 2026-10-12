@@ -81,6 +81,7 @@ jobs:
         env:
           TOPAZ_STRUCTURED_DEBUG: '1'
           TOPAZ_DEBUG_CYCLES: '1'
+          TOPAZ_DEBUG_SPILL: '1'
         run: |
           mkdir -p out
           start=$(date +%s)
@@ -162,6 +163,13 @@ jobs:
           cerr="$(head -n 20 out/compile.err 2>/dev/null | cut -c1-300 || true)"
           if [ -n "$cerr" ]; then
             printf '::notice title=luau-compile errors (%s)::%s\n' "$label" "$(printf '%s\n' "$cerr" | esc)"
+          fi
+          spill=$(grep -h '^\[spill\]' out/topaz.log 2>/dev/null | head -n 40 | cut -c1-240 || true)
+          printf '::notice title=spilled locals (%s)::%s\n' "$label" "$(printf '%s\n' "$spill" | esc)"
+          errline=$(sed -n 's/.*ClientRenderer\.luau(\([0-9]*\),.*/\1/p' out/compile.err 2>/dev/null | head -n 1 || true)
+          if [ -n "$errline" ] && [ -f "$out" ]; then
+            ectx=$(awk -v L="$errline" '/function/ {fn=NR; f=$0; n=0} NR==L {print "error line " L " in fn@" fn ": " substr(f,1,160) " (local lines before it in fn: " n ")"; exit} /^[ \t]*local / {n++}' "$out" || true)
+            printf '::notice title=compile error context (%s)::%s\n' "$label" "$(printf '%s\n' "$ectx" | esc)"
           fi
           echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
 
