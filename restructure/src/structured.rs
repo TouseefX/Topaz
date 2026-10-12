@@ -629,6 +629,13 @@ impl Structurer {
         let mut rpred: Vec<Vec<usize>> = vec![Vec::new(); m + 1];
         for (i, &v) in members.iter().enumerate() {
             let mut vs: Vec<usize> = Vec::new();
+            // A successor that is an excluded early `return` (in the region,
+            // not in the view) makes `v` a dead end for merges: the arm that
+            // returns never reaches the merge, and the other arm must still
+            // find it. Treating `v` as an exit here made every diamond with an
+            // early return in one arm lose its post-dominator, so the merge
+            // fell back to the nearest common node and the arms escaped.
+            let mut returns_only = false;
             for s in &self.succs[v] {
                 if Some(s.target) == header {
                     continue;
@@ -637,9 +644,11 @@ impl Structurer {
                     if !vs.contains(&j) {
                         vs.push(j);
                     }
+                } else if self.succs[s.target].is_empty() && self.in_region(s.target, region) {
+                    returns_only = true;
                 }
             }
-            if vs.is_empty() {
+            if vs.is_empty() && !returns_only {
                 rsucc[exit].push(i);
                 rpred[i].push(exit);
             }
