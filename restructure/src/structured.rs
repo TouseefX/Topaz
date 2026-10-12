@@ -182,7 +182,13 @@ impl Structurer {
     fn build(function: &Function) -> Option<Self> {
         let graph = function.graph();
         let entry = (*function.entry())?.index();
-        let n = graph.node_bound();
+        // Upper bound on node indices. Computed directly: `node_bound` is a
+        // `NodeIndexable` trait method, not an inherent `StableGraph` method.
+        let n = graph
+            .node_indices()
+            .map(|i| i.index() + 1)
+            .max()
+            .unwrap_or(0);
         let mut present = vec![false; n];
         let mut stmts: Vec<Vec<Statement>> = vec![Vec::new(); n];
         let mut conds: Vec<Option<RValue>> = vec![None; n];
@@ -672,6 +678,10 @@ impl Structurer {
         depth: usize,
     ) -> Option<(Vec<Statement>, Option<usize>)> {
         let header = self.loops[l].header;
+        // The `while` / `for` forms consume the header without going through
+        // `seq_inner`, so mark it here; `emit()` checks that every reachable
+        // node was emitted.
+        self.emitted[header] = true;
         let exits = self.loops[l].exits.clone();
         let fexits = self.loops[l].fexits.clone();
         let hsuccs = self.succs[header].clone();
