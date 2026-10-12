@@ -80,6 +80,17 @@ struct Ctx {
     flag: Option<RcLocal>,
     /// Escape scopes around this point (indices into `Structurer::scopes`).
     esc: Vec<usize>,
+    /// Every stop in effect, outermost first; the last one is `stop`.
+    stops: Vec<usize>,
+}
+
+/// `stops` extended by `stop` (when it is set).
+fn push_stop(stops: &[usize], stop: Option<usize>) -> Vec<usize> {
+    let mut v = stops.to_vec();
+    if let Some(s) = stop {
+        v.push(s);
+    }
+    v
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1002,6 +1013,7 @@ impl Structurer {
                         stop: merge.or(ctx.stop),
                         flag: ctx.flag.clone(),
                         esc: arm_esc,
+                        stops: push_stop(&ctx.stops, merge),
                     };
                     let then_b = self.arm(&then_s, &arm_ctx, depth)?;
                     let else_b = self.arm(&else_s, &arm_ctx, depth)?;
@@ -1084,8 +1096,22 @@ impl Structurer {
                     ctx.region, ctx.stop
                 )
             });
-            // `ctx` does not list this scope, so the target is emitted here.
-            let tail = self.seq(m, ctx, depth + 1, false)?;
+            // The target's continuation stops at the innermost enclosing stop
+            // it can reach, or runs to the end if it reaches none. The stop
+            // of `ctx` is not reachable from `m` (that is why it escaped), so
+            // stopping there would cut the chain short and cascade escapes.
+            let at = ctx
+                .stops
+                .iter()
+                .rposition(|&st| self.reaches(m, st, ctx.region));
+            let tail_ctx = Ctx {
+                region: ctx.region,
+                stop: at.map(|i| ctx.stops[i]),
+                flag: ctx.flag.clone(),
+                esc: ctx.esc.clone(),
+                stops: at.map_or(Vec::new(), |i| ctx.stops[..=i].to_vec()),
+            };
+            let tail = self.seq(m, &tail_ctx, depth + 1, false)?;
             if !tail.is_empty() {
                 arms.push((k + 1, tail));
             }
@@ -1164,6 +1190,7 @@ impl Structurer {
             stop: None,
             flag: flag.clone(),
             esc: Vec::new(),
+            stops: Vec::new(),
         };
 
         if for_like {
@@ -1225,6 +1252,7 @@ impl Structurer {
                 stop: merge,
                 flag: outer.flag.clone(),
                 esc: outer.esc.clone(),
+                stops: push_stop(&outer.stops, merge),
             };
             let fl = flag.clone()?;
             let mut natural: Vec<Statement> = Vec::new();
@@ -1291,6 +1319,7 @@ impl Structurer {
                     stop: merge,
                     flag: outer.flag.clone(),
                     esc: outer.esc.clone(),
+                    stops: push_stop(&outer.stops, merge),
                 };
                 let fl = flag?;
                 let n = fexits.len();
@@ -1646,6 +1675,7 @@ impl Structurer {
             stop: None,
             flag: None,
             esc: Vec::new(),
+            stops: Vec::new(),
         };
         let body = self.seq(self.entry, &ctx, 0, false)?;
         // Every reachable node must have been emitted somewhere.
