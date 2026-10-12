@@ -760,8 +760,17 @@ impl Structurer {
 
         if for_like {
             // Only the plain shape `for` recovers; anything else is unknown IR.
-            if !(single_exit && hsuccs.len() == 2 && body_idx.len() == 1 && exit_idx.len() == 1)
-            {
+            // Extra exits (a `break` to another block) are allowed when the
+            // header's own exit is one of them: the body sets the flag and
+            // breaks (see `classify`), and the exits are dispatched after the
+            // loop, the same way the generic form does it.
+            let shape_ok = hsuccs.len() == 2 && body_idx.len() == 1 && exit_idx.len() == 1;
+            let header_exit = if shape_ok { Some(hsuccs[exit_idx[0]].target) } else { None };
+            let exits_ok = match fexits.len() {
+                0 | 1 => single_exit,
+                _ => header_exit.is_some_and(|t| fexits.contains(&t)),
+            };
+            if !(shape_ok && exits_ok) {
                 note(|| format!("for header {header}: unexpected shape (exits={}, succs={})", exits.len(), hsuccs.len()));
                 return None;
             }
@@ -795,10 +804,42 @@ impl Structurer {
             };
             let mut out = pre;
             out.push(stmt);
-            if let Some(a) = parallel_assign_from_args(&es.args) {
-                out.push(a.into());
+            if fexits.len() <= 1 {
+                if let Some(a) = parallel_assign_from_args(&es.args) {
+                    out.push(a.into());
+                }
+                return Some((out, Some(es.target)));
             }
-            return Some((out, Some(es.target)));
+            // Several exits: the loop's natural end is the default arm (with
+            // its copies); each other exit is selected by the flag set at its
+            // break site.
+            let merge = self.merge_of(outer.region, header);
+            let dctx = Ctx {
+                region: outer.region,
+                stop: merge,
+                flag: outer.flag.clone(),
+            };
+            let fl = flag.clone()?;
+            let mut natural: Vec<Statement> = Vec::new();
+            if let Some(a) = parallel_assign_from_args(&es.args) {
+                natural.push(a.into());
+            }
+            natural.extend(self.dispatch_arm(es.target, &dctx, depth)?);
+            let mut acc = natural;
+            for (k, &e) in fexits.iter().enumerate().rev() {
+                if e == es.target {
+                    continue;
+                }
+                let arm = self.dispatch_arm(e, &dctx, depth)?;
+                let cond = Binary::new(
+                    RValue::Local(fl.clone()),
+                    number(k + 1),
+                    BinaryOperation::Equal,
+                );
+                acc = vec![If::new(cond.into(), Block(arm), Block(acc)).into()];
+            }
+            out.extend(acc);
+            return Some((out, merge));
         }
 
         let while_like = hstmts.is_empty()
@@ -907,9 +948,15 @@ fn is_clean(block: &Block) -> bool {
 /// clean structured result"; the caller should fall back to the legacy
 /// structurer, which always produces some output.
 pub(crate) fn try_lift(function: &Function) -> Option<Block> {
-    let mut s = Structurer::build(function)?;
+    let Some(mut s) = Structurer::build(function) else {
+        note(|| "build gave up (see the reason above)".to_string());
+        return None;
+    };
     note(|| format!("built: {} loops, {} reachable nodes", s.loops.len(), s.reach.len()));
-    let mut body = s.emit()?;
+    let Some(mut body) = s.emit() else {
+        note(|| "emit gave up (no more specific reason logged)".to_string());
+        return None;
+    };
     if let Some(Statement::Return(r)) = body.last() {
         if r.values.is_empty() {
             body.pop();
