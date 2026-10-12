@@ -147,6 +147,16 @@ jobs:
           printf '::notice title=structured reasons (%s)::%s\n' "$label" "$(printf '%s\n' "$s1" | esc)"
           tail_log="$(tail -n 40 out/topaz.log 2>/dev/null | cut -c1-300)"
           printf '::notice title=topaz log tail (%s)::%s\n' "$label" "$(printf '%s\n' "$tail_log" | esc)"
+          # Where the output is incomplete: the reason line and the first
+          # markers, with line numbers and the enclosing function header.
+          if [ -f "$out" ]; then
+            reason="$(grep -h -E '^-- ERROR' "$out" | head -n 5 | cut -c1-300)"
+            printf '::notice title=incomplete reason (%s)::%s\n' "$label" "$(printf '%s\n' "$reason" | esc)"
+            marks="$(grep -n -E 'goto |::[A-Za-z_][A-Za-z0-9_]*::|-- block|internal control|GenericFor|NumFor|failed to|formatter stopped' "$out" | head -n 40 | cut -c1-220)"
+            printf '::notice title=goto and block markers (%s)::%s\n' "$label" "$(printf '%s\n' "$marks" | esc)"
+            fnctx="$(awk '/function/ {f=$0; fn=NR} /-- block|goto / {c++; if (c<=20) print NR": in fn@"fn": "substr(f,1,150)}' "$out")"
+            printf '::notice title=enclosing functions (%s)::%s\n' "$label" "$(printf '%s\n' "$fnctx" | esc)"
+          fi
           cerr="$(head -n 20 out/compile.err 2>/dev/null | cut -c1-300)"
           if [ -n "$cerr" ]; then
             printf '::notice title=luau-compile errors (%s)::%s\n' "$label" "$(printf '%s\n' "$cerr" | esc)"
