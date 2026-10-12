@@ -106,6 +106,9 @@ struct Structurer {
     ipdom_cache: Vec<Option<FxHashMap<usize, usize>>>,
     budget: usize,
     spent: usize,
+    /// How often each node was emitted; the most visited nodes are printed
+    /// when the budget trips (debug only).
+    visits: Vec<u32>,
 }
 
 /// Immediate dominators (or post-dominators) with Cooper–Harvey–Kennedy.
@@ -399,6 +402,7 @@ impl Structurer {
             ipdom_cache: vec![None; nl + 1],
             budget: total_stmts.saturating_mul(8).saturating_add(4096),
             spent: 0,
+            visits: vec![0; n],
         };
 
         // For-loops: take NumForInit / GenericForInit out of the single
@@ -656,8 +660,28 @@ impl Structurer {
             marked.push(cur);
             self.emitted[cur] = true;
             self.spent += self.stmts[cur].len() + 1;
+            self.visits[cur] = self.visits[cur].saturating_add(1);
             if self.spent > self.budget {
-                note(|| format!("statement budget exceeded ({} > {})", self.spent, self.budget));
+                note(|| {
+                    let mut top: Vec<(u32, usize)> = self
+                        .visits
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &c)| (c, i))
+                        .collect();
+                    top.sort_unstable_by(|a, b| b.cmp(a));
+                    let top: Vec<String> = top
+                        .iter()
+                        .take(6)
+                        .map(|&(c, i)| format!("node {i} x{c} ({} stmts)", self.stmts[i].len()))
+                        .collect();
+                    format!(
+                        "statement budget exceeded ({} > {}); most emitted: {}",
+                        self.spent,
+                        self.budget,
+                        top.join(", ")
+                    )
+                });
                 return None;
             }
             out.extend(self.stmts[cur].iter().cloned());
@@ -766,9 +790,11 @@ impl Structurer {
             // loop, the same way the generic form does it.
             let shape_ok = hsuccs.len() == 2 && body_idx.len() == 1 && exit_idx.len() == 1;
             let header_exit = if shape_ok { Some(hsuccs[exit_idx[0]].target) } else { None };
+            // With several real exits the header's exit is dispatched like any
+            // other (a return block outside the loop is copied by `classify`).
             let exits_ok = match fexits.len() {
                 0 | 1 => single_exit,
-                _ => header_exit.is_some_and(|t| fexits.contains(&t)),
+                _ => header_exit.is_some(),
             };
             if !(shape_ok && exits_ok) {
                 note(|| format!("for header {header}: unexpected shape (exits={}, succs={})", exits.len(), hsuccs.len()));
