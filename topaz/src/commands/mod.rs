@@ -24,9 +24,6 @@ pub enum Commands {
         encode_key: u8,
 
 
-        #[arg(short, long, default_value_t = false)]
-        lua51: bool,
-
         /// Force the luaur-compatible plain-opcode path (encode key 1).
         /// Default already prefers that for LBC versions 3..=11, then falls
         /// back to the native deserializer with encode-key detection for
@@ -49,10 +46,6 @@ pub enum Commands {
         
         #[arg(short, long, default_value_t = true)]
         luau: bool,
-
-        
-        #[arg(short, long, default_value_t = false)]
-        lua51: bool,
     },
 }
 

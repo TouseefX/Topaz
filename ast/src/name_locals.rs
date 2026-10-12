@@ -212,7 +212,7 @@ impl Namer {
     fn name_local_smart(&mut self, hint: &str, rvalue: Option<&RValue>, local: &RcLocal) {
         let mut lock = local.0 .0.lock();
         if !self.rename {
-            // lua51 path: keep whatever name is already there, but still
+            // Not renaming: keep whatever name is already there, but still
             // record it so later unique_name calls cannot collide.
             if let Some(ref existing) = lock.0 {
                 self.name_uses.entry(existing.clone()).or_insert(1);
@@ -526,7 +526,7 @@ pub fn name_locals(block: &mut Block, rename: bool) {
     let type_hints = if rename {
         // Usage-based type inference is only useful for the Luau path,
         // where `rename` enables the broader semantic-naming pipeline;
-        // the lua51 path deliberately keeps names minimal/synthetic.
+        // without `rename` the names stay minimal/synthetic.
         type_inference_naming::collect_type_hints(block)
     } else {
         FxHashMap::default()

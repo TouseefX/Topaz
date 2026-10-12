@@ -23,7 +23,6 @@ on:
       - '.github/workflows/clientrenderer.yaml'
       - 'topaz/**'
       - 'luau-lifter/**'
-      - 'lua51-deserializer/**'
       - 'restructure/**'
       - 'cfg/**'
       - 'ast/**'

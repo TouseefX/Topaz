@@ -4,7 +4,7 @@ Working notes for this repo so later edits match **this** tree, not Medal
 upstream or a guessed API. Read this before touching SSA, AST sharing, or
 the formatter.
 
-Topaz is a **Luau (and Lua 5.1) bytecode decompiler** forked from Medal.
+Topaz is a **Luau bytecode decompiler** forked from Medal.
 Studio / Roblox 2026 dumps are the truth; `luau-lang/luau` bytecode is
 **not** the same as Roblox client bytecode.
 
@@ -61,8 +61,6 @@ the literal (`1usize`, `0u32`) or bind `let n: usize = 1`.
 topaz            CLI (`decompile`, `serve`). version 1.3.1-beta
 topaz-gui        egui desktop / Android UI + CFG viewer
 luau-lifter      Roblox/Luau decode → CFG lift → SSA → AST → string
-lua51-lifter     Lua 5.1 path (separate deserializer)
-lua51-deserializer
 cfg              CFG graph, SSA construct/destruct, jump structuring
 ast              IR + formatter + post passes
 restructure      CFG → structured `if`/`while`/`for` (`restructure::lift`)
@@ -73,7 +71,7 @@ Dependency direction (do not invert):
 
 ```
 topaz / topaz-gui
-    → luau-lifter / lua51-lifter
+    → luau-lifter
         → restructure → cfg → ast
 ```
 
@@ -277,8 +275,8 @@ function only. Medal `simple_fast` is quadratic — Topaz has O(n) DomIndex.
 
 ### `topaz/src`
 
-CLI clap: `decompile` (file in/out, `--encode-key`, `--lua51`, `--luaur`,
-`--time-budget`) and `serve` (axum). Incomplete output is a failed
+CLI clap: `decompile` (file in/out, `--encode-key`, `--luaur`,
+`--time-budget`) and `serve` (axum). Lua 5.1 support was removed on purpose; do not re-add it. Incomplete output is a failed
 `decompile` (`ErrorKind::Other`) **after** the file is written.
 
 ## Comparators / fixtures in the repo root
@@ -288,7 +286,7 @@ CLI clap: `decompile` (file in/out, `--encode-key`, `--lua51`, `--luaur`,
 | `ClientRenderer.luau` | Cleaned comparator (does compile). **Not** a substitute for a decompile dump |
 | `ClientRenderer_LocalScript_*_Bytecode.txt.txt` | The large Roblox dump (~22 MB text) |
 | `CameraShaker_ModuleScript_*` | LunaUX-era bytecode; readable ref is LunaUX V1.4.6 |
-| `sample.luau.bin` / `sample.luac` | Small runtime-ok sample |
+| `sample.luau.bin` | Small runtime-ok sample |
 | `v7-ClientRenderer.luau` | Historical dump |
 | `scripts/request_path_gates.py` | Grep `request2 ==` paths in a dump |
 

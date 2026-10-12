@@ -91,7 +91,6 @@ fn snapshot_status(handle: &ServerHandle) -> SharedServerStatus {
     SharedServerStatus {
         state,
         luau_requests: handle.stats.luau_requests.load(Ordering::Relaxed),
-        lua51_requests: handle.stats.lua51_requests.load(Ordering::Relaxed),
         bytes_in: handle.stats.bytes_in.load(Ordering::Relaxed),
         bytes_out: handle.stats.bytes_out.load(Ordering::Relaxed),
         errors: handle.stats.errors.load(Ordering::Relaxed),
@@ -114,7 +113,6 @@ pub extern "system" fn Java_com_exec_topaz_KeepAliveService_nativeStartServer(
     _class: JClass,
     port: jint,
     luau: jboolean,
-    lua51: jboolean,
     encode_key: jint,
     files_dir: JString,
 ) {
@@ -125,7 +123,6 @@ pub extern "system" fn Java_com_exec_topaz_KeepAliveService_nativeStartServer(
     let cfg = ServerConfig {
         port: port as u16,
         luau: luau != 0,
-        lua51: lua51 != 0,
         encode_key: encode_key as u8,
     };
 

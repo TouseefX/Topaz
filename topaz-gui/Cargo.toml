@@ -10,7 +10,6 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 cfg = { path = "../cfg" }
-lua51-lifter = { path = "../lua51-lifter" }
 luau-lifter = { path = "../luau-lifter" }
 axum = "0.8"
 base64 = "0.22"

@@ -34,7 +34,6 @@ public class KeepAliveService extends Service {
     public static final String EXTRA_CMD = "cmd";
     public static final String EXTRA_PORT = "port";
     public static final String EXTRA_LUAU = "luau";
-    public static final String EXTRA_LUA51 = "lua51";
     public static final String EXTRA_ENCODE_KEY = "encode_key";
     public static final String EXTRA_FILES_DIR = "files_dir";
 
@@ -45,7 +44,7 @@ public class KeepAliveService extends Service {
     }
 
     private static native void nativeStartServer(
-            int port, boolean luau, boolean lua51, int encodeKey, String filesDir);
+            int port, boolean luau, int encodeKey, String filesDir);
 
     private static native void nativeStopServer();
 
@@ -72,13 +71,12 @@ public class KeepAliveService extends Service {
         if ("start_server".equals(cmd)) {
             int port = intent.getIntExtra(EXTRA_PORT, 3000);
             boolean luau = intent.getBooleanExtra(EXTRA_LUAU, true);
-            boolean lua51 = intent.getBooleanExtra(EXTRA_LUA51, false);
             int encodeKey = intent.getIntExtra(EXTRA_ENCODE_KEY, 0);
             String filesDir = intent.getStringExtra(EXTRA_FILES_DIR);
 
             acquireWakeLock();
             text = "Serving on port " + port + "…";
-            nativeStartServer(port, luau, lua51, encodeKey, filesDir);
+            nativeStartServer(port, luau, encodeKey, filesDir);
         } else if ("stop_server".equals(cmd)) {
             nativeStopServer();
             releaseWakeLock();

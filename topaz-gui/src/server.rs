@@ -17,7 +17,6 @@ use tokio::sync::oneshot;
 #[derive(Default, Debug)]
 pub struct ServerStats {
     pub luau_requests: AtomicU64,
-    pub lua51_requests: AtomicU64,
     pub bytes_in: AtomicU64,
     pub bytes_out: AtomicU64,
     pub errors: AtomicU64,
@@ -25,12 +24,8 @@ pub struct ServerStats {
 }
 
 impl ServerStats {
-    fn record_request(&self, bytes_in: u64, bytes_out: u64, is_lua51: bool) {
-        if is_lua51 {
-            self.lua51_requests.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.luau_requests.fetch_add(1, Ordering::Relaxed);
-        }
+    fn record_request(&self, bytes_in: u64, bytes_out: u64) {
+        self.luau_requests.fetch_add(1, Ordering::Relaxed);
         self.bytes_in.fetch_add(bytes_in, Ordering::Relaxed);
         self.bytes_out.fetch_add(bytes_out, Ordering::Relaxed);
         if let Ok(mut last) = self.last_request.lock() {
@@ -61,7 +56,6 @@ impl ServerState {
 pub struct ServerConfig {
     pub port: u16,
     pub luau: bool,
-    pub lua51: bool,
     pub encode_key: u8,
 }
 
@@ -84,7 +78,6 @@ impl ServerHandle {
 
     pub fn reset_stats(&self) {
         self.stats.luau_requests.store(0, Ordering::Relaxed);
-        self.stats.lua51_requests.store(0, Ordering::Relaxed);
         self.stats.bytes_in.store(0, Ordering::Relaxed);
         self.stats.bytes_out.store(0, Ordering::Relaxed);
         self.stats.errors.store(0, Ordering::Relaxed);
@@ -212,22 +205,7 @@ async fn decompile_luau(
     .unwrap_or_else(|_| {
         "-- Decompiled with Topaz\n-- Error: decompilation worker panicked\n".to_string()
     });
-    cfg.stats.record_request(bytes_in, out.len() as u64, false);
-    out
-}
-
-async fn decompile_lua51(
-    axum::extract::State(cfg): axum::extract::State<AppCfg>,
-    body: Bytes,
-) -> String {
-    let bytes_in = body.len() as u64;
-    let bytes = maybe_decode_base64(body.to_vec());
-    let out = tokio::task::spawn_blocking(move || lua51_lifter::decompile_bytecode(&bytes))
-        .await
-        .unwrap_or_else(|_| {
-            "-- Decompiled with Topaz\n-- Error: decompilation worker panicked\n".to_string()
-        });
-    cfg.stats.record_request(bytes_in, out.len() as u64, true);
+    cfg.stats.record_request(bytes_in, out.len() as u64);
     out
 }
 
@@ -250,9 +228,6 @@ async fn run_server(
     let mut app = Router::new().route("/", get(root));
     if cfg.luau {
         app = app.route("/luau/decompile", post(decompile_luau));
-    }
-    if cfg.lua51 {
-        app = app.route("/lua51/decompile", post(decompile_lua51));
     }
     let app = app
         .with_state(app_cfg)
