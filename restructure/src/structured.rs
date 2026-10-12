@@ -20,7 +20,7 @@
 //! The output is validated: no `goto`/labels, no leftover for-loop IR.
 
 use ast::{
-    Assign, Binary, BinaryOperation, Block, Break, Continue, GenericFor, If, LValue, Literal,
+    Assign, Binary, BinaryOperation, Block, Break, Call, Continue, GenericFor, If, LValue, Literal,
     NumericFor, RValue, RcLocal, Reduce, Repeat, Statement, Unary, UnaryOperation, While,
 };
 use cfg::{block::BranchType, function::Function};
@@ -1255,52 +1255,78 @@ impl Structurer {
     /// State-machine emission for flows the structurer cannot nest: one
     /// `if state == node` arm per CFG node, every edge sets `state`, and the
     /// loop runs until a node with no successor sets it to 0. Locals are
-    /// declared before the loop because they cross arms. Returns the
-    /// statements and the locals to keep out of the declarer.
+    /// declared before the loop because they cross arms. Loop headers are
+    /// lowered to explicit tests (`lower_header`). Returns the statements and
+    /// the locals to keep out of the declarer.
     fn dispatch(&self) -> Option<(Vec<Statement>, Vec<RcLocal>)> {
         let state = RcLocal::default();
         let mut hoisted: Vec<RcLocal> = Vec::new();
-        let mut nodes: Vec<usize> = self.reach.clone();
-        nodes.sort_unstable();
-        let mut arms: Vec<(usize, Vec<Statement>)> = Vec::new();
-        for &v in &nodes {
-            let mut body: Vec<Statement> = self.stmts[v].clone();
-            for st in body.iter_mut() {
-                if let Statement::Assign(a) = st {
+
+        // A loop's initial assignments go at the end of its preheader.
+        let mut pre_inits: FxHashMap<usize, Vec<Statement>> = FxHashMap::default();
+        for lp in self.loops.iter() {
+            let Some(init) = lp.for_init.clone() else {
+                continue;
+            };
+            let header = lp.header;
+            let mut outside: Vec<usize> = self.preds[header]
+                .iter()
+                .copied()
+                .filter(|p| !lp.body.contains(p) && self.is_reach[*p])
+                .collect();
+            outside.sort_unstable();
+            outside.dedup();
+            let [p] = outside.as_slice() else {
+                return None;
+            };
+            let inits: Vec<Statement> = match (self.stmts[header].as_slice(), &init) {
+                ([Statement::NumForNext(next)], Statement::NumForInit(ni)) => {
+                    // The counter starts one step early: the header adds the
+                    // step before its first test.
+                    let counter = next.counter.0.as_local()?.clone();
+                    push_unique(&mut hoisted, counter.clone());
+                    let start = Binary::new(
+                        ni.counter.1.clone(),
+                        ni.step.1.clone(),
+                        BinaryOperation::Sub,
+                    );
+                    vec![
+                        assign_stmt(counter, RValue::Binary(start)),
+                        Assign::new(vec![ni.limit.0.clone()], vec![ni.limit.1.clone()]).into(),
+                        Assign::new(vec![ni.step.0.clone()], vec![ni.step.1.clone()]).into(),
+                    ]
+                }
+                ([Statement::GenericForNext(_)], Statement::GenericForInit(gi)) => {
+                    let mut a = gi.0.clone();
                     a.prefix = false;
                     for l in &a.left {
                         if let Some(loc) = l.as_local() {
                             push_unique(&mut hoisted, loc.clone());
                         }
                     }
-                }
-            }
-            let returns = matches!(body.last(), Some(Statement::Return(_)));
-            match self.succs[v].len() {
-                0 => {
-                    if !returns {
-                        body.push(assign_stmt(state.clone(), number(0)));
-                    }
-                }
-                1 => {
-                    let succ = self.succs[v][0].clone();
-                    self.transition(&succ, &state, &mut body, &mut hoisted);
-                }
-                2 => {
-                    let (ti, ei) = self.cond_arms(v)?;
-                    let cond = self.conds[v].clone()?;
-                    let ts = self.succs[v][ti].clone();
-                    let es = self.succs[v][ei].clone();
-                    let mut then_b = Vec::new();
-                    let mut else_b = Vec::new();
-                    self.transition(&ts, &state, &mut then_b, &mut hoisted);
-                    self.transition(&es, &state, &mut else_b, &mut hoisted);
-                    body.push(If::new(cond, Block(then_b), Block(else_b)).into());
+                    vec![a.into()]
                 }
                 _ => return None,
-            }
+            };
+            pre_inits.entry(*p).or_default().extend(inits);
+        }
+
+        let mut nodes: Vec<usize> = self.reach.clone();
+        nodes.sort_unstable();
+        let mut arms: Vec<(usize, Vec<Statement>)> = Vec::new();
+        for &v in &nodes {
+            let body = match self.loop_of_header[v] {
+                Some(l) if self.stmts[v].iter().any(is_for_ir) => {
+                    self.lower_header(v, l, &state, &mut hoisted)?
+                }
+                _ => {
+                    let extra = pre_inits.remove(&v).unwrap_or_default();
+                    self.plain_arm(v, &state, &mut hoisted, extra)?
+                }
+            };
             arms.push((v, body));
         }
+
         // Nested `else if` chain; the formatter prints it flat as `elseif`.
         let mut chain: Vec<Statement> = Vec::new();
         for (v, body) in arms.into_iter().rev() {
@@ -1336,6 +1362,141 @@ impl Structurer {
         let mut all = hoisted;
         all.push(state);
         Some((out, all))
+    }
+
+    /// Arm of an ordinary node: its statements, any loop-initial assignments
+    /// `extra`, then the transition(s) to its successors.
+    fn plain_arm(
+        &self,
+        v: usize,
+        state: &RcLocal,
+        hoisted: &mut Vec<RcLocal>,
+        extra: Vec<Statement>,
+    ) -> Option<Vec<Statement>> {
+        let mut body: Vec<Statement> = self.stmts[v].clone();
+        for st in body.iter_mut() {
+            if let Statement::Assign(a) = st {
+                a.prefix = false;
+                for l in &a.left {
+                    if let Some(loc) = l.as_local() {
+                        push_unique(hoisted, loc.clone());
+                    }
+                }
+            }
+        }
+        let returns = matches!(body.last(), Some(Statement::Return(_)));
+        body.extend(extra);
+        match self.succs[v].len() {
+            0 => {
+                if !returns {
+                    body.push(assign_stmt(state.clone(), number(0)));
+                }
+            }
+            1 => {
+                let succ = self.succs[v][0].clone();
+                self.transition(&succ, state, &mut body, hoisted);
+            }
+            2 => {
+                let (ti, ei) = self.cond_arms(v)?;
+                let cond = self.conds[v].clone()?;
+                let ts = self.succs[v][ti].clone();
+                let es = self.succs[v][ei].clone();
+                let mut then_b = Vec::new();
+                let mut else_b = Vec::new();
+                self.transition(&ts, state, &mut then_b, hoisted);
+                self.transition(&es, state, &mut else_b, hoisted);
+                body.push(If::new(cond, Block(then_b), Block(else_b)).into());
+            }
+            _ => return None,
+        }
+        Some(body)
+    }
+
+    /// Arm of a loop header that is a `for` test. The body successor is the
+    /// one inside the loop. Numeric: add the step, then test against the
+    /// limit (the sign of a literal step picks the comparison). Generic: call
+    /// the iterator, stop on `nil`, otherwise copy the first result to the
+    /// control variable.
+    fn lower_header(
+        &self,
+        v: usize,
+        l: usize,
+        state: &RcLocal,
+        hoisted: &mut Vec<RcLocal>,
+    ) -> Option<Vec<Statement>> {
+        let hs = &self.succs[v];
+        if hs.len() != 2 {
+            return None;
+        }
+        let in_body = |t: usize| self.loops[l].body.contains(&t);
+        let (bs, es) = match (in_body(hs[0].target), in_body(hs[1].target)) {
+            (true, false) => (hs[0].clone(), hs[1].clone()),
+            (false, true) => (hs[1].clone(), hs[0].clone()),
+            _ => return None,
+        };
+        let mut out: Vec<Statement> = Vec::new();
+        let mut then_b: Vec<Statement> = Vec::new();
+        let mut else_b: Vec<Statement> = Vec::new();
+        match self.stmts[v].as_slice() {
+            [Statement::NumForNext(next)] => {
+                let counter = next.counter.0.as_local()?.clone();
+                push_unique(hoisted, counter.clone());
+                let ascending = match &next.step {
+                    RValue::Literal(Literal::Number(x)) if *x > 0.0 => true,
+                    RValue::Literal(Literal::Number(x)) if *x < 0.0 => false,
+                    RValue::Literal(Literal::Integer(x)) if *x > 0 => true,
+                    RValue::Literal(Literal::Integer(x)) if *x < 0 => false,
+                    _ => return None,
+                };
+                let step = RValue::Binary(Binary::new(
+                    RValue::Local(counter.clone()),
+                    next.step.clone(),
+                    BinaryOperation::Add,
+                ));
+                out.push(assign_stmt(counter.clone(), step));
+                let cmp = if ascending {
+                    BinaryOperation::LessThanOrEqual
+                } else {
+                    BinaryOperation::GreaterThanOrEqual
+                };
+                let test = RValue::Binary(Binary::new(
+                    RValue::Local(counter),
+                    next.limit.clone(),
+                    cmp,
+                ));
+                self.transition(&bs, state, &mut then_b, hoisted);
+                self.transition(&es, state, &mut else_b, hoisted);
+                out.push(If::new(test, Block(then_b), Block(else_b)).into());
+            }
+            [Statement::GenericForNext(next)] => {
+                let mut results: Vec<RValue> = Vec::new();
+                for lv in &next.res_locals {
+                    let loc = lv.as_local()?.clone();
+                    push_unique(hoisted, loc.clone());
+                    results.push(RValue::Local(loc));
+                }
+                push_unique(hoisted, next.control.clone());
+                let call = Call::new(
+                    next.generator.clone(),
+                    vec![next.state.clone(), RValue::Local(next.control.clone())],
+                );
+                out.push(
+                    Assign::new(next.res_locals.clone(), vec![RValue::Call(call)]).into(),
+                );
+                let first = results.first()?.clone();
+                let test = RValue::Binary(Binary::new(
+                    first.clone(),
+                    RValue::Literal(Literal::Nil),
+                    BinaryOperation::NotEqual,
+                ));
+                then_b.push(assign_stmt(next.control.clone(), first));
+                self.transition(&bs, state, &mut then_b, hoisted);
+                self.transition(&es, state, &mut else_b, hoisted);
+                out.push(If::new(test, Block(then_b), Block(else_b)).into());
+            }
+            _ => return None,
+        }
+        Some(out)
     }
 
     fn emit(&mut self) -> Option<Vec<Statement>> {
@@ -1412,11 +1573,14 @@ pub(crate) fn try_lift(function: &Function) -> Option<Block> {
 
 /// Dispatch fallback: used when `try_lift` gives up. Goto-free for any CFG,
 /// but unreadable, so it only runs where the structurer cannot nest.
-/// Not used when the function still carries for-loop IR.
 pub(crate) fn try_dispatch(function: &Function) -> Option<Block> {
     let s = Structurer::build(function)?;
-    if s.reach.iter().any(|&v| s.stmts[v].iter().any(is_for_ir)) {
-        note(|| "dispatch: for-loop IR present; giving up".to_string());
+    // For-loop IR is only lowered on loop headers (see `lower_header`).
+    if s.reach
+        .iter()
+        .any(|&v| s.loop_of_header[v].is_none() && s.stmts[v].iter().any(is_for_ir))
+    {
+        note(|| "dispatch: for-loop IR outside a loop header; giving up".to_string());
         return None;
     }
     let nodes = s.reach.len();
