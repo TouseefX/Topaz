@@ -50,9 +50,8 @@ jobs:
           # Run every test binary, keep the full output, and surface the
           # failure lines as workflow annotations so they are readable
           # without the raw job log.
-          set +o pipefail
-          cargo test -p ast -p cfg -p restructure --lib --no-fail-fast > unit-test.log 2>&1
-          rc=$?
+          rc=0
+          cargo test -p ast -p cfg -p restructure --lib --no-fail-fast > unit-test.log 2>&1 || rc=$?
           grep -E '^error|^ +--> |panicked at|^test .* FAILED|test result' unit-test.log | head -80 | while IFS= read -r line; do
             printf '::error title=unit test::%s\n' "${line//$'\r'/}"
           done
