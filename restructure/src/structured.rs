@@ -1343,16 +1343,38 @@ impl Structurer {
 
         let mut nodes: Vec<usize> = self.reach.clone();
         nodes.sort_unstable();
+        // A node joins its predecessor's arm when that predecessor has one
+        // successor and the node has no other reachable predecessor. Nodes
+        // that are loop headers or carry for-loop IR keep their own arm.
+        let mut merged = vec![false; self.succs.len()];
+        for &v in &nodes {
+            if v == self.entry
+                || self.loop_of_header[v].is_some()
+                || self.stmts[v].iter().any(is_for_ir)
+            {
+                continue;
+            }
+            let preds: Vec<usize> = self.preds[v]
+                .iter()
+                .copied()
+                .filter(|&p| self.is_reach[p])
+                .collect();
+            if let [p] = preds.as_slice() {
+                if self.succs[*p].len() == 1 {
+                    merged[v] = true;
+                }
+            }
+        }
         let mut arms: Vec<(usize, Vec<Statement>)> = Vec::new();
         for &v in &nodes {
+            if merged[v] {
+                continue;
+            }
             let body = match self.loop_of_header[v] {
                 Some(l) if self.stmts[v].iter().any(is_for_ir) => {
                     self.lower_header(v, l, &state, &mut hoisted)?
                 }
-                _ => {
-                    let extra = pre_inits.remove(&v).unwrap_or_default();
-                    self.plain_arm(v, &state, &mut hoisted, extra)?
-                }
+                _ => self.chain_arm(v, &state, &mut hoisted, &merged, &mut pre_inits)?,
             };
             arms.push((v, body));
         }
@@ -1386,43 +1408,63 @@ impl Structurer {
         Some((out, all))
     }
 
-    /// Arm of an ordinary node: its statements, any loop-initial assignments
-    /// `extra`, then the transition(s) to its successors.
-    fn plain_arm(
+    /// Arm of a chain head: its statements, then those of every node it flows
+    /// into through a merged edge (see `dispatch`), then the transition out of
+    /// the last node. `extra` holds the loop-initial assignments of preheaders.
+    fn chain_arm(
         &self,
-        v: usize,
+        head: usize,
         state: &RcLocal,
         hoisted: &mut Vec<RcLocal>,
-        extra: Vec<Statement>,
+        merged: &[bool],
+        extra: &mut FxHashMap<usize, Vec<Statement>>,
     ) -> Option<Vec<Statement>> {
-        let mut body: Vec<Statement> = self.stmts[v].clone();
-        for st in body.iter_mut() {
-            if let Statement::Assign(a) = st {
-                a.prefix = false;
-                for l in &a.left {
-                    if let Some(loc) = l.as_local() {
-                        push_unique(hoisted, loc.clone());
+        let mut body: Vec<Statement> = Vec::new();
+        let mut cur = head;
+        loop {
+            let mut stmts: Vec<Statement> = self.stmts[cur].clone();
+            for st in stmts.iter_mut() {
+                if let Statement::Assign(a) = st {
+                    a.prefix = false;
+                    for l in &a.left {
+                        if let Some(loc) = l.as_local() {
+                            push_unique(hoisted, loc.clone());
+                        }
                     }
                 }
             }
+            body.extend(stmts);
+            body.extend(extra.remove(&cur).unwrap_or_default());
+            if self.succs[cur].len() == 1 && merged[self.succs[cur][0].target] {
+                let s = self.succs[cur][0].clone();
+                for (l, _) in &s.args {
+                    push_unique(hoisted, l.clone());
+                }
+                if let Some(mut a) = parallel_assign_from_args(&s.args) {
+                    a.prefix = false;
+                    body.push(a.into());
+                }
+                cur = s.target;
+                continue;
+            }
+            break;
         }
         let returns = matches!(body.last(), Some(Statement::Return(_)));
-        body.extend(extra);
-        match self.succs[v].len() {
+        match self.succs[cur].len() {
             0 => {
                 if !returns {
                     body.push(assign_stmt(state.clone(), number(0)));
                 }
             }
             1 => {
-                let succ = self.succs[v][0].clone();
+                let succ = self.succs[cur][0].clone();
                 self.transition(&succ, state, &mut body, hoisted);
             }
             2 => {
-                let (ti, ei) = self.cond_arms(v)?;
-                let cond = self.conds[v].clone()?;
-                let ts = self.succs[v][ti].clone();
-                let es = self.succs[v][ei].clone();
+                let (ti, ei) = self.cond_arms(cur)?;
+                let cond = self.conds[cur].clone()?;
+                let ts = self.succs[cur][ti].clone();
+                let es = self.succs[cur][ei].clone();
                 let mut then_b = Vec::new();
                 let mut else_b = Vec::new();
                 self.transition(&ts, state, &mut then_b, hoisted);
