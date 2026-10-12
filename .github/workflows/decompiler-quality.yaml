@@ -44,9 +44,20 @@ jobs:
 
       - name: Unit tests (ast, cfg, restructure)
         if: matrix.label == 'new'
-        run: cargo test -p ast -p cfg -p restructure --lib
         env:
           RUST_BACKTRACE: '1'
+        run: |
+          # Run every test binary, keep the full output, and surface the
+          # failure lines as workflow annotations so they are readable
+          # without the raw job log.
+          set +o pipefail
+          cargo test -p ast -p cfg -p restructure --lib --no-fail-fast > unit-test.log 2>&1
+          rc=$?
+          grep -E '^error|^ +--> |panicked at|^test .* FAILED|test result' unit-test.log | head -80 | while IFS= read -r line; do
+            printf '::error title=unit test::%s\n' "${line//$'\r'/}"
+          done
+          grep -E -A4 '^error' unit-test.log | head -80 >> "$GITHUB_STEP_SUMMARY" || true
+          exit $rc
 
       - name: Build topaz CLI
         working-directory: ${{ matrix.src }}
