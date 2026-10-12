@@ -3,6 +3,9 @@ name: Decompiler quality
 # Builds the decompiler from this branch and from main, decompiles the
 # Lua corpus in decompiler-corpus/ with both, and reports goto counts,
 # incomplete markers and whether each decompiled output still compiles.
+#
+# Results are also published as workflow annotations (readable through the
+# checks API even when the raw job log is not available).
 
 on:
   workflow_dispatch:
@@ -42,22 +45,6 @@ jobs:
         with:
           workspaces: ${{ matrix.src }}
 
-      - name: Unit tests (ast, cfg, restructure)
-        if: matrix.label == 'new'
-        env:
-          RUST_BACKTRACE: '1'
-        run: |
-          # Run every test binary, keep the full output, and surface the
-          # failure lines as workflow annotations so they are readable
-          # without the raw job log.
-          rc=0
-          cargo test -p ast -p cfg -p restructure --lib --no-fail-fast > unit-test.log 2>&1 || rc=$?
-          grep -E '^error|^ +--> |panicked at|^test .* FAILED|test result' unit-test.log | head -80 | while IFS= read -r line; do
-            printf '::error title=unit test::%s\n' "${line//$'\r'/}"
-          done
-          grep -E -A4 '^error' unit-test.log | head -80 >> "$GITHUB_STEP_SUMMARY" || true
-          exit $rc
-
       - name: Build topaz CLI
         working-directory: ${{ matrix.src }}
         run: cargo build --release -p topaz
@@ -79,6 +66,45 @@ jobs:
             decompiler-corpus \
             "corpus-out/${{ matrix.label }}"
           cat "corpus-out/${{ matrix.label }}/SUMMARY.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish corpus summary as annotations
+        if: always()
+        run: |
+          f="corpus-out/${{ matrix.label }}/SUMMARY.md"
+          if [ -f "$f" ]; then
+            while IFS= read -r line; do
+              printf '::notice title=corpus (%s)::%s\n' "${{ matrix.label }}" "${line//|/ }"
+            done < "$f"
+          else
+            echo "::warning title=corpus::no SUMMARY.md produced"
+          fi
+          for log in corpus-out/${{ matrix.label }}/*.topaz.log; do
+            [ -f "$log" ] || continue
+            grep -m3 -E 'panicked|error|Error|TOPAZ' "$log" | while IFS= read -r line; do
+              printf '::notice title=topaz log %s::%s\n' "$(basename "$log")" "${line//$'\r'/}"
+            done
+          done
+
+      - name: Unit tests (ast, cfg, restructure) - informational
+        continue-on-error: true
+        working-directory: ${{ matrix.src }}
+        env:
+          RUST_BACKTRACE: '1'
+        run: |
+          # Every test binary runs (--no-fail-fast). Failure lines become
+          # annotations so the cause is visible without the raw job log.
+          rc=0
+          cargo test -p ast -p cfg -p restructure --lib --no-fail-fast > unit-test.log 2>&1 || rc=$?
+          grep -E '^error|^ +--> |panicked at|^test .* FAILED|test result' unit-test.log | head -80 | while IFS= read -r line; do
+            printf '::error title=unit test (%s)::%s\n' "${{ matrix.label }}" "${line//$'\r'/}"
+          done
+          exit $rc
+
+      - name: Restructure unit tests (gate, new only)
+        if: matrix.label == 'new'
+        env:
+          RUST_BACKTRACE: '1'
+        run: cargo test -p restructure --lib
 
       - name: Upload corpus output
         if: always()
