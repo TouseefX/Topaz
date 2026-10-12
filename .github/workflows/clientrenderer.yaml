@@ -106,11 +106,12 @@ jobs:
           if [ -f "$out" ]; then
             lines=$(wc -l < "$out")
             bytes=$(wc -c < "$out")
-            gotos=$(grep -c -E '^[[:space:]]*goto[[:space:]]|::[A-Za-z_][A-Za-z0-9_]*::' "$out" || true)
+            gotos=$(grep -c -E '^[[:space:]]*(goto[[:space:]]|::[A-Za-z_][A-Za-z0-9_]*::)' "$out" || true)
+            commented=$(grep -c -E '^[[:space:]]*--[[:space:]]*(goto[[:space:]]|::[A-Za-z_][A-Za-z0-9_]*::)' "$out" || true)
             blocks=$(grep -c -- '-- block' "$out" || true)
             incomplete=$(grep -c 'TOPAZ_INCOMPLETE' "$out" || true)
           else
-            lines=0; bytes=0; gotos=0; blocks=0; incomplete=0
+            lines=0; bytes=0; gotos=0; commented=0; blocks=0; incomplete=0
           fi
           compile="not-run"
           if [ -f "$out" ]; then
@@ -135,7 +136,8 @@ jobs:
             echo "| elapsed | ${elapsed}s (budget ${BUDGET_SECS}s, kill ${KILL_SECS}s) |"
             echo "| output lines | $lines |"
             echo "| output bytes | $bytes |"
-            echo "| goto / ::label:: | $gotos |"
+            echo "| live goto / ::label:: | $gotos |"
+            echo "| commented-out goto / label | $commented |"
             echo "| -- block | $blocks |"
             echo "| TOPAZ_INCOMPLETE | $incomplete |"
             echo "| luau-compile | $compile |"
@@ -143,21 +145,22 @@ jobs:
           } > out/verdict.md
           cat out/verdict.md >> "$GITHUB_STEP_SUMMARY"
           printf '::notice title=ClientRenderer verdict (%s)::%s\n' "$label" "$(cat out/verdict.md | esc)"
-          s1="$(grep -h '^structured:' out/topaz.log 2>/dev/null | sed -E 's/[0-9]+/N/g' | sort | uniq -c | sort -rn | head -30)"
-          printf '::notice title=structured reasons (%s)::%s\n' "$label" "$(printf '%s\n' "$s1" | esc)"
-          tail_log="$(tail -n 40 out/topaz.log 2>/dev/null | cut -c1-300)"
+          s0="$(grep -h '^structured' out/topaz.log 2>/dev/null | sed -E 's/^structured\[[^]]*\]: //; s/[0-9]+/N/g' | sort | uniq -c | sort -rn | head -n 10 || true)"
+          s1="$(grep -h '^structured\[' out/topaz.log 2>/dev/null | grep -v ': ok (' | grep -v ': built:' | head -n 40 | cut -c1-200 || true)"
+          printf '::notice title=structured fallbacks (%s)::%s\n' "$label" "$(printf '%s\n%s\n' "$s0" "$s1" | esc)"
+          tail_log="$(tail -n 40 out/topaz.log 2>/dev/null | cut -c1-300 || true)"
           printf '::notice title=topaz log tail (%s)::%s\n' "$label" "$(printf '%s\n' "$tail_log" | esc)"
           # Where the output is incomplete: the reason line and the first
           # markers, with line numbers and the enclosing function header.
           if [ -f "$out" ]; then
-            reason="$(grep -h -E '^-- ERROR' "$out" | head -n 5 | cut -c1-300)"
+            reason="$(grep -h -E '^-- ERROR' "$out" | head -n 5 | cut -c1-300 || true)"
             printf '::notice title=incomplete reason (%s)::%s\n' "$label" "$(printf '%s\n' "$reason" | esc)"
-            marks="$(grep -n -E 'goto |::[A-Za-z_][A-Za-z0-9_]*::|-- block|internal control|GenericFor|NumFor|failed to|formatter stopped' "$out" | head -n 40 | cut -c1-220)"
+            marks="$(grep -n -E 'goto |::[A-Za-z_][A-Za-z0-9_]*::|-- block|internal control|GenericFor|NumFor|failed to|formatter stopped' "$out" | head -n 40 | cut -c1-220 || true)"
             printf '::notice title=goto and block markers (%s)::%s\n' "$label" "$(printf '%s\n' "$marks" | esc)"
-            fnctx="$(awk '/function/ {f=$0; fn=NR} /-- block|goto / {c++; if (c<=20) print NR": in fn@"fn": "substr(f,1,150)}' "$out")"
+            fnctx="$(awk '/function/ {f=$0; fn=NR} /-- block|goto / {c++; if (c<=20) print NR": in fn@"fn": "substr(f,1,150)}' "$out" || true)"
             printf '::notice title=enclosing functions (%s)::%s\n' "$label" "$(printf '%s\n' "$fnctx" | esc)"
           fi
-          cerr="$(head -n 20 out/compile.err 2>/dev/null | cut -c1-300)"
+          cerr="$(head -n 20 out/compile.err 2>/dev/null | cut -c1-300 || true)"
           if [ -n "$cerr" ]; then
             printf '::notice title=luau-compile errors (%s)::%s\n' "$label" "$(printf '%s\n' "$cerr" | esc)"
           fi

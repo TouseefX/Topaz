@@ -12,6 +12,7 @@ mod conditional;
 mod jump;
 mod r#loop;
 mod structured;
+pub use structured::set_debug_tag;
 
 /// Post-dominators of `graph` (virtual super-sink, no mutation).
 pub fn post_dominators<N, E>(graph: &StableDiGraph<N, E>) -> IDom<NodeIndex> {

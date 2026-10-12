@@ -35,8 +35,19 @@ const MAX_DEPTH: usize = 1000;
 /// function (and what it produced when it succeeded) to stderr.
 fn note(why: impl FnOnce() -> String) {
     if std::env::var_os("TOPAZ_STRUCTURED_DEBUG").is_some() {
-        eprintln!("structured: {}", why());
+        let tag = DEBUG_TAG.with(|t| t.borrow().clone());
+        eprintln!("structured[{tag}]: {}", why());
     }
+}
+
+thread_local! {
+    static DEBUG_TAG: std::cell::RefCell<String> = std::cell::RefCell::new(String::new());
+}
+
+/// Names the function the next structurer debug lines belong to (the
+/// caller sets it, e.g. to the source line). Debug output only.
+pub fn set_debug_tag(tag: String) {
+    DEBUG_TAG.with(|t| *t.borrow_mut() = tag);
 }
 
 #[derive(Clone)]

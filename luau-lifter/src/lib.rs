@@ -1157,6 +1157,7 @@ fn decompile_function(
     let params = std::mem::take(&mut function.parameters);
     let is_variadic = function.is_variadic;
     let func_line = function.line;
+    restructure::set_debug_tag(format!("line {:?}", func_line));
     let lifted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         restructure::lift(function)
     }));
