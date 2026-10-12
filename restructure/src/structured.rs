@@ -115,6 +115,8 @@ struct Structurer {
     /// How often each node was emitted; the most visited nodes are printed
     /// when the budget trips (debug only).
     visits: Vec<u32>,
+    /// Diagnostic: how many times each escape target was emitted.
+    escapes: FxHashMap<usize, u32>,
 }
 
 /// Immediate dominators (or post-dominators) with Cooper–Harvey–Kennedy.
@@ -421,6 +423,7 @@ impl Structurer {
             budget: total_stmts.saturating_mul(8).saturating_add(4096),
             spent: 0,
             visits: vec![0; n],
+            escapes: FxHashMap::default(),
         };
 
         // For-loops: take NumForInit / GenericForInit out of the single
@@ -788,11 +791,20 @@ impl Structurer {
                         .take(6)
                         .map(|&(c, i)| format!("node {i} x{c} ({} stmts)", self.stmts[i].len()))
                         .collect();
+                    let mut esc: Vec<(u32, usize)> =
+                        self.escapes.iter().map(|(&m, &c)| (c, m)).collect();
+                    esc.sort_unstable_by(|a, b| b.cmp(a));
+                    let esc: Vec<String> = esc
+                        .iter()
+                        .take(6)
+                        .map(|&(c, m)| format!("tail {m} x{c}"))
+                        .collect();
                     format!(
-                        "statement budget exceeded ({} > {}); most emitted: {}",
+                        "statement budget exceeded ({} > {}); most emitted: {}; escapes: {}",
                         self.spent,
                         self.budget,
-                        top.join(", ")
+                        top.join(", "),
+                        esc.join(", ")
                     )
                 });
                 return None;
@@ -925,6 +937,17 @@ impl Structurer {
         let branch = If::new(cond, Block(then_b), Block(else_b));
         out.push(Repeat::new(RValue::Literal(Literal::Boolean(true)), Block(vec![branch.into()])).into());
         // `ctx` has no entry for `m`, so this emits the target itself.
+        let count = {
+            let c = self.escapes.entry(m).or_insert(0);
+            *c += 1;
+            *c
+        };
+        note(|| {
+            format!(
+                "escape tail {m} emitted (#{count}, region={:?}, stop={:?})",
+                ctx.region, ctx.stop
+            )
+        });
         let tail = self.seq(m, ctx, depth + 1, false)?;
         if !tail.is_empty() {
             out.push(If::new(RValue::Local(flag), Block(tail), Block(Vec::new())).into());
