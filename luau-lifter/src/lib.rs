@@ -590,6 +590,10 @@ fn run_post_wave(
         )));
         return;
     }
+    // Luau rejects a function with more than 200 active locals. Spill the
+    // excess top-level locals of each function into a table. Runs after the
+    // cycle check, because the walk uses try_lock on shared blocks.
+    ast::spill_locals::spill_locals(&mut body);
     let _ = tx.send(PostEvent::Done(render_complete(&mut body)));
 }
 

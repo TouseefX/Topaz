@@ -39,6 +39,7 @@ pub mod local_declarations;
 pub mod name_locals;
 mod repeat;
 pub mod replace_locals;
+pub mod spill_locals;
 mod r#return;
 mod set_list;
 mod side_effects;
