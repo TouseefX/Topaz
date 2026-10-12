@@ -527,6 +527,12 @@ impl Structurer {
     /// Nearest node reachable from both `a` and `b` inside `region` (not the
     /// region header, not `cur`). Used when there is no post-dominator.
     fn join_of(&self, a: usize, b: usize, region: Option<usize>, cur: usize) -> Option<usize> {
+        self.join_all(&[a, b], region, cur)
+    }
+
+    /// Nearest node reachable from every target (the first target's walk
+    /// order decides ties).
+    fn join_all(&self, targets: &[usize], region: Option<usize>, cur: usize) -> Option<usize> {
         const LIMIT: usize = 4096;
         let header = region.and_then(|r| self.loops.get(r)).map(|l| l.header);
         let walk = |start: usize| -> Vec<usize> {
@@ -551,11 +557,15 @@ impl Structurer {
             }
             order
         };
-        let from_a = walk(a);
-        let set: FxHashSet<usize> = from_a.into_iter().collect();
-        walk(b)
-            .into_iter()
-            .find(|v| *v != cur && set.contains(v))
+        let (&first, rest) = targets.split_first()?;
+        let mut common: FxHashSet<usize> = walk(first).into_iter().collect();
+        let mut order: Vec<usize> = walk(first);
+        for &t in rest {
+            let w: FxHashSet<usize> = walk(t).into_iter().collect();
+            common.retain(|v| w.contains(v));
+        }
+        order.retain(|v| *v != cur && common.contains(v));
+        order.into_iter().next()
     }
 
     fn merge_of(&mut self, region: Option<usize>, u: usize) -> Option<usize> {
@@ -839,7 +849,7 @@ impl Structurer {
                 _ => header_exit.is_some(),
             };
             if !(shape_ok && exits_ok) {
-                note(|| format!("for header {header}: unexpected shape (exits={}, succs={})", exits.len(), hsuccs.len()));
+                note(|| format!("for header {header}: unexpected shape (exits={}, fexits={}, succs={}, body={}, outside={})", exits.len(), fexits.len(), hsuccs.len(), body_idx.len(), exit_idx.len()));
                 return None;
             }
             let Some(init) = self.loops[l].for_init.clone() else {
@@ -881,7 +891,9 @@ impl Structurer {
             // Several exits: the loop's natural end is the default arm (with
             // its copies); each other exit is selected by the flag set at its
             // break site.
-            let merge = self.merge_of(outer.region, header);
+            let merge = self
+                .merge_of(outer.region, header)
+                .or_else(|| self.join_all(&fexits, outer.region, usize::MAX));
             let dctx = Ctx {
                 region: outer.region,
                 stop: merge,
@@ -944,7 +956,9 @@ impl Structurer {
             0 => Some((out, None)),
             1 => Some((out, Some(fexits[0]))),
             _ => {
-                let merge = self.merge_of(outer.region, header);
+                let merge = self
+                    .merge_of(outer.region, header)
+                    .or_else(|| self.join_all(&fexits, outer.region, usize::MAX));
                 let dctx = Ctx {
                     region: outer.region,
                     stop: merge,
