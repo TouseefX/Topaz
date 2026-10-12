@@ -35,7 +35,7 @@ const MAX_DEPTH: usize = 1000;
 
 /// `TOPAZ_STRUCTURED_DEBUG=1` prints why the structurer gave up on a
 /// function (and what it produced when it succeeded) to stderr.
-fn note(why: impl FnOnce() -> String) {
+pub(crate) fn note(why: impl FnOnce() -> String) {
     if std::env::var_os("TOPAZ_STRUCTURED_DEBUG").is_some() {
         let tag = DEBUG_TAG.with(|t| t.borrow().clone());
         eprintln!("structured[{tag}]: {}", why());
