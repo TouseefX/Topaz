@@ -524,6 +524,40 @@ impl Structurer {
         out
     }
 
+    /// Nearest node reachable from both `a` and `b` inside `region` (not the
+    /// region header, not `cur`). Used when there is no post-dominator.
+    fn join_of(&self, a: usize, b: usize, region: Option<usize>, cur: usize) -> Option<usize> {
+        const LIMIT: usize = 4096;
+        let header = region.and_then(|r| self.loops.get(r)).map(|l| l.header);
+        let walk = |start: usize| -> Vec<usize> {
+            let mut order: Vec<usize> = Vec::new();
+            let mut seen: FxHashSet<usize> = FxHashSet::default();
+            let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+            seen.insert(start);
+            queue.push_back(start);
+            while let Some(v) = queue.pop_front() {
+                if order.len() >= LIMIT {
+                    break;
+                }
+                if Some(v) == header || !self.in_region(v, region) {
+                    continue;
+                }
+                order.push(v);
+                for s in &self.succs[v] {
+                    if seen.insert(s.target) {
+                        queue.push_back(s.target);
+                    }
+                }
+            }
+            order
+        };
+        let from_a = walk(a);
+        let set: FxHashSet<usize> = from_a.into_iter().collect();
+        walk(b)
+            .into_iter()
+            .find(|v| *v != cur && set.contains(v))
+    }
+
     fn merge_of(&mut self, region: Option<usize>, u: usize) -> Option<usize> {
         let key = region.unwrap_or(self.loops.len());
         if self.ipdom_cache[key].is_none() {
@@ -704,14 +738,22 @@ impl Structurer {
                         note(|| format!("node {cur}: 2-way node without a trailing If"));
                         return None;
                     };
-                    let merge = self.merge_of(ctx.region, cur);
-                    let arm_ctx = Ctx {
-                        region: ctx.region,
-                        stop: merge,
-                        flag: ctx.flag.clone(),
-                    };
                     let then_s = self.succs[cur][ti].clone();
                     let else_s = self.succs[cur][ei].clone();
+                    // Post-dominator first. If the arms only meet through
+                    // breaks or returns (no post-dominator), stop both arms at
+                    // the nearest node they share: copying the rest of the
+                    // function into each arm is what blew up `a and b`
+                    // chains. An arm without a merge of its own keeps the
+                    // enclosing stop, so it never runs past it.
+                    let merge = self
+                        .merge_of(ctx.region, cur)
+                        .or_else(|| self.join_of(then_s.target, else_s.target, ctx.region, cur));
+                    let arm_ctx = Ctx {
+                        region: ctx.region,
+                        stop: merge.or(ctx.stop),
+                        flag: ctx.flag.clone(),
+                    };
                     let then_b = self.arm(&then_s, &arm_ctx, depth)?;
                     let else_b = self.arm(&else_s, &arm_ctx, depth)?;
                     if !then_b.is_empty() || !else_b.is_empty() {
