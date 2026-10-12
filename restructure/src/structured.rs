@@ -1372,11 +1372,11 @@ impl Structurer {
         );
         decl.prefix = true;
         out.push(decl.into());
-        if !hoisted.is_empty() {
-            let mut d = Assign::new(
-                hoisted.iter().cloned().map(LValue::Local).collect(),
-                Vec::new(),
-            );
+        // Chunked: one statement per 50 names. The spill pass turns a
+        // declaration into one multi-target assignment, and Luau allocates a
+        // register per target, so a single huge declaration overflows.
+        for chunk in hoisted.chunks(50) {
+            let mut d = Assign::new(chunk.iter().cloned().map(LValue::Local).collect(), Vec::new());
             d.prefix = true;
             out.push(d.into());
         }
