@@ -42,12 +42,6 @@ pub(crate) fn note(why: impl FnOnce() -> String) {
     }
 }
 
-/// Whether the current debug tag contains `pat` (debug output only).
-pub(crate) fn debug_tag_has(pat: &str) -> bool {
-    std::env::var_os("TOPAZ_STRUCTURED_DEBUG").is_some()
-        && DEBUG_TAG.with(|t| t.borrow().contains(pat))
-}
-
 thread_local! {
     static DEBUG_TAG: std::cell::RefCell<String> = std::cell::RefCell::new(String::new());
 }
@@ -133,8 +127,6 @@ struct Structurer {
     escapes: FxHashMap<usize, u32>,
     /// Escape scopes opened so far (see `EscScope`).
     scopes: Vec<EscScope>,
-    /// Diagnostic: escape sites dumped so far.
-    dumps: u32,
 }
 
 /// Immediate dominators (or post-dominators) with Cooper–Harvey–Kennedy.
@@ -514,7 +506,6 @@ impl Structurer {
             visits: vec![0; n],
             escapes: FxHashMap::default(),
             scopes: Vec::new(),
-            dumps: 0,
         };
 
         // For-loops: take NumForInit / GenericForInit out of the single
@@ -944,19 +935,6 @@ impl Structurer {
                     let ipd = self.merge_of(ctx.region, cur);
                     let merge = ipd
                         .or_else(|| self.join_of(then_s.target, else_s.target, ctx.region, cur));
-                    if debug_tag_has("4836") && self.dumps < 400 {
-                        self.dumps += 1;
-                        note(|| {
-                            format!(
-                                "D cur={cur} t={} e={} ipd={ipd:?} merge={merge:?} stop={:?} region={:?} esc_depth={}",
-                                then_s.target,
-                                else_s.target,
-                                ctx.stop,
-                                ctx.region,
-                                ctx.esc.len()
-                            )
-                        });
-                    }
                     // A merge that lies past the enclosing stop cannot be
                     // reached by the arms without copying its continuation
                     // into each of them, and nested copies compound. Such a
@@ -1716,38 +1694,6 @@ pub(crate) fn try_lift(function: &Function) -> Option<Block> {
         return None;
     };
     note(|| format!("built: {} loops, {} reachable nodes", s.loops.len(), s.reach.len()));
-    if debug_tag_has("4836") {
-        // CFG dump for the 4836 investigation: successors (T/E/U) and the
-        // predecessor count of each reachable node in two id ranges.
-        let mut rows: Vec<usize> = s
-            .reach
-            .iter()
-            .copied()
-            .filter(|&v| (700..=1100).contains(&v) || (7820..=7900).contains(&v))
-            .collect();
-        rows.sort_unstable();
-        for v in rows {
-            let ss: Vec<String> = s.succs[v]
-                .iter()
-                .map(|x| {
-                    let b = match x.branch {
-                        BranchType::Then => "T",
-                        BranchType::Else => "E",
-                        BranchType::Unconditional => "U",
-                    };
-                    format!("{b}{}", x.target)
-                })
-                .collect();
-            let line = format!(
-                "N{v} st={} p={} s=[{}] cond={}",
-                s.stmts[v].len(),
-                s.preds[v].len(),
-                ss.join(","),
-                s.conds[v].is_some()
-            );
-            note(|| line);
-        }
-    }
     let Some(mut body) = s.emit() else {
         note(|| "emit gave up (no more specific reason logged)".to_string());
         return None;
