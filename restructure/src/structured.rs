@@ -700,6 +700,19 @@ impl Structurer {
                 note(|| format!("cycle through node {cur} that is not a natural loop"));
                 return None;
             }
+            // Diagnostic only: a node emitted again is code copied into
+            // another path (tail duplication). Counted by context.
+            if self.emitted[cur] {
+                note(|| {
+                    format!(
+                        "duplicate emit of node {cur}: region={:?} stop={:?} preds={} succs={}",
+                        ctx.region,
+                        ctx.stop,
+                        self.preds[cur].len(),
+                        self.succs[cur].len()
+                    )
+                });
+            }
             self.active[cur] = true;
             marked.push(cur);
             self.emitted[cur] = true;
@@ -759,6 +772,22 @@ impl Structurer {
                     let merge = self
                         .merge_of(ctx.region, cur)
                         .or_else(|| self.join_of(then_s.target, else_s.target, ctx.region, cur));
+                    // Diagnostic only: a branch with no merge copies its
+                    // continuation into both arms. Counted by arm kind.
+                    if merge.is_none() {
+                        note(|| {
+                            format!(
+                                "2-way no-merge: then_in_region={} else_in_region={} then_exit={} else_exit={} then_is_stop={} else_is_stop={} stop_set={}",
+                                self.in_region(then_s.target, ctx.region),
+                                self.in_region(else_s.target, ctx.region),
+                                self.succs[then_s.target].is_empty(),
+                                self.succs[else_s.target].is_empty(),
+                                ctx.stop == Some(then_s.target),
+                                ctx.stop == Some(else_s.target),
+                                ctx.stop.is_some()
+                            )
+                        });
+                    }
                     let arm_ctx = Ctx {
                         region: ctx.region,
                         stop: merge.or(ctx.stop),
