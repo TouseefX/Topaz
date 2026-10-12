@@ -59,6 +59,8 @@ jobs:
           echo "LUAU_COMPILE=$LUAU_COMPILE" >> "$GITHUB_ENV"
 
       - name: Decompile corpus
+        env:
+          TOPAZ_STRUCTURED_DEBUG: '1'
         run: |
           bash scripts/decompile_corpus.sh \
             "${{ matrix.src }}/target/release/topaz" \
@@ -70,20 +72,28 @@ jobs:
       - name: Publish corpus summary as annotations
         if: always()
         run: |
-          f="corpus-out/${{ matrix.label }}/SUMMARY.md"
+          label="${{ matrix.label }}"
+          f="corpus-out/$label/SUMMARY.md"
           if [ -f "$f" ]; then
             while IFS= read -r line; do
-              printf '::notice title=corpus (%s)::%s\n' "${{ matrix.label }}" "${line//|/ }"
+              printf '::notice title=corpus (%s)::%s\n' "$label" "${line//|/ }"
             done < "$f"
           else
             echo "::warning title=corpus::no SUMMARY.md produced"
           fi
-          for log in corpus-out/${{ matrix.label }}/*.topaz.log; do
-            [ -f "$log" ] || continue
-            grep -m3 -E 'panicked|error|Error|TOPAZ' "$log" | while IFS= read -r line; do
-              printf '::notice title=topaz log %s::%s\n' "$(basename "$log")" "${line//$'\r'/}"
-            done
-          done
+          logs=(corpus-out/$label/*.topaz.log)
+          if [ -f "${logs[0]}" ]; then
+            # Why the goto-free structurer gave up (or succeeded), aggregated.
+            cat "${logs[@]}" | grep -h '^structured:' | sort | uniq -c | sort -rn | head -25 \
+              | while IFS= read -r line; do
+                  printf '::notice title=structured (%s)::%s\n' "$label" "${line//$'\r'/}"
+                done
+            # Panics and errors from the decompiler itself, aggregated.
+            cat "${logs[@]}" | grep -h -E 'panicked|error' | sort | uniq -c | sort -rn | head -10 \
+              | while IFS= read -r line; do
+                  printf '::notice title=topaz errors (%s)::%s\n' "$label" "${line//$'\r'/}"
+                done
+          fi
 
       - name: Unit tests (ast, cfg, restructure) - informational
         continue-on-error: true

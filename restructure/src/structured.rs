@@ -31,6 +31,14 @@ use crate::parallel_assign_from_args;
 const NONE: usize = usize::MAX;
 const MAX_DEPTH: usize = 1000;
 
+/// `TOPAZ_STRUCTURED_DEBUG=1` prints why the structurer gave up on a
+/// function (and what it produced when it succeeded) to stderr.
+fn note(why: impl FnOnce() -> String) {
+    if std::env::var_os("TOPAZ_STRUCTURED_DEBUG").is_some() {
+        eprintln!("structured: {}", why());
+    }
+}
+
 #[derive(Clone)]
 struct Succ {
     target: usize,
@@ -230,12 +238,17 @@ impl Structurer {
                     let then_n = s.iter().filter(|x| x.branch == BranchType::Then).count();
                     let else_n = s.iter().filter(|x| x.branch == BranchType::Else).count();
                     if then_n != 1 || else_n != 1 {
+                        note(|| format!("node {i}: 2-way branch then={then_n} else={else_n}"));
                         return None;
                     }
                 }
-                _ => return None,
+                n => {
+                    note(|| format!("node {i}: {n} successors"));
+                    return None;
+                }
             }
             if s.len() == 1 && conds[i].is_some() {
+                note(|| format!("node {i}: 1-way node carries a condition"));
                 return None;
             }
         }
@@ -284,6 +297,7 @@ impl Structurer {
                 }
                 for &p in &preds[x] {
                     if is_reach[p] && !body.contains(&p) {
+                        note(|| format!("loop header {h}: multi-entry body at {x}"));
                         return None;
                     }
                 }
@@ -581,6 +595,7 @@ impl Structurer {
         skip_first_checks: bool,
     ) -> Option<Vec<Statement>> {
         if depth > MAX_DEPTH || cfg::past_decompile_deadline() {
+            note(|| format!("depth {depth} or deadline reached"));
             return None;
         }
         let mut marked: Vec<usize> = Vec::new();
@@ -623,6 +638,7 @@ impl Structurer {
             // Reaching a node that is still on the emission path means the
             // graph has a cycle that is not a natural loop (irreducible).
             if self.active[cur] {
+                note(|| format!("cycle through node {cur} that is not a natural loop"));
                 return None;
             }
             self.active[cur] = true;
@@ -630,6 +646,7 @@ impl Structurer {
             self.emitted[cur] = true;
             self.spent += self.stmts[cur].len() + 1;
             if self.spent > self.budget {
+                note(|| format!("statement budget exceeded ({} > {})", self.spent, self.budget));
                 return None;
             }
             out.extend(self.stmts[cur].iter().cloned());
@@ -644,8 +661,14 @@ impl Structurer {
                     cur = s.target;
                 }
                 2 => {
-                    let (ti, ei) = self.cond_arms(cur)?;
-                    let cond = self.conds[cur].clone()?;
+                    let Some((ti, ei)) = self.cond_arms(cur) else {
+                        note(|| format!("node {cur}: 2-way node without Then/Else edges"));
+                        return None;
+                    };
+                    let Some(cond) = self.conds[cur].clone() else {
+                        note(|| format!("node {cur}: 2-way node without a trailing If"));
+                        return None;
+                    };
                     let merge = self.merge_of(ctx.region, cur);
                     let arm_ctx = Ctx {
                         region: ctx.region,
@@ -721,9 +744,13 @@ impl Structurer {
             // Only the plain shape `for` recovers; anything else is unknown IR.
             if !(single_exit && hsuccs.len() == 2 && body_idx.len() == 1 && exit_idx.len() == 1)
             {
+                note(|| format!("for header {header}: unexpected shape (exits={}, succs={})", exits.len(), hsuccs.len()));
                 return None;
             }
-            let init = self.loops[l].for_init.clone()?;
+            let Some(init) = self.loops[l].for_init.clone() else {
+                note(|| format!("for header {header}: no NumForInit/GenericForInit in the preheader"));
+                return None;
+            };
             let bs = hsuccs[body_idx[0]].clone();
             let es = hsuccs[exit_idx[0]].clone();
             let body = self.arm(&bs, &inner, depth)?;
@@ -824,6 +851,7 @@ impl Structurer {
         // Every reachable node must have been emitted somewhere.
         for &v in &self.reach {
             if !self.emitted[v] {
+                note(|| format!("reachable node {v} was never emitted"));
                 return None;
             }
         }
@@ -862,6 +890,7 @@ fn is_clean(block: &Block) -> bool {
 /// structurer, which always produces some output.
 pub(crate) fn try_lift(function: &Function) -> Option<Block> {
     let mut s = Structurer::build(function)?;
+    note(|| format!("built: {} loops, {} reachable nodes", s.loops.len(), s.reach.len()));
     let mut body = s.emit()?;
     if let Some(Statement::Return(r)) = body.last() {
         if r.values.is_empty() {
@@ -870,8 +899,10 @@ pub(crate) fn try_lift(function: &Function) -> Option<Block> {
     }
     let block = Block(body);
     if !is_clean(&block) {
+        note(|| "output still contains goto/label/for IR".to_string());
         return None;
     }
+    note(|| format!("ok ({} top-level statements)", block.0.len()));
     Some(block)
 }
 
