@@ -148,6 +148,8 @@ jobs:
           s0="$(grep -h '^structured' out/topaz.log 2>/dev/null | sed -E 's/^structured\[[^]]*\]: //; s/[0-9]+/N/g' | sort | uniq -c | sort -rn | head -n 10 || true)"
           s1="$(grep -h '^structured\[' out/topaz.log 2>/dev/null | grep -v ': ok (' | grep -v ': built:' | head -n 40 | cut -c1-200 || true)"
           printf '::notice title=structured fallbacks (%s)::%s\n' "$label" "$(printf '%s\n%s\n' "$s0" "$s1" | esc)"
+          esc_sites="$(grep -h 'Some(4836)\]: ESC site' out/topaz.log 2>/dev/null | head -n 60 | cut -c1-400 || true)"
+          printf '::notice title=escape sites 4836 (%s)::%s\n' "$label" "$(printf '%s\n' "$esc_sites" | esc)"
           tail_log="$(tail -n 40 out/topaz.log 2>/dev/null | cut -c1-300 || true)"
           printf '::notice title=topaz log tail (%s)::%s\n' "$label" "$(printf '%s\n' "$tail_log" | esc)"
           # Where the output is incomplete: the reason line and the first
