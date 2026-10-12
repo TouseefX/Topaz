@@ -1436,7 +1436,10 @@ impl Structurer {
         let (bs, es) = match (in_body(hs[0].target), in_body(hs[1].target)) {
             (true, false) => (hs[0].clone(), hs[1].clone()),
             (false, true) => (hs[1].clone(), hs[0].clone()),
-            _ => return None,
+            _ => {
+                note(|| format!("dispatch: loop header {v} has no single body successor"));
+                return None;
+            }
         };
         let mut out: Vec<Statement> = Vec::new();
         let mut then_b: Vec<Statement> = Vec::new();
@@ -1445,12 +1448,12 @@ impl Structurer {
             [Statement::NumForNext(next)] => {
                 let counter = next.counter.0.as_local()?.clone();
                 push_unique(hoisted, counter.clone());
-                let ascending = match &next.step {
-                    RValue::Literal(Literal::Number(x)) if *x > 0.0 => true,
-                    RValue::Literal(Literal::Number(x)) if *x < 0.0 => false,
-                    RValue::Literal(Literal::Integer(x)) if *x > 0 => true,
-                    RValue::Literal(Literal::Integer(x)) if *x < 0 => false,
-                    _ => return None,
+                // A literal step fixes the comparison; any other step is
+                // tested for its sign at run time.
+                let literal_sign = match &next.step {
+                    RValue::Literal(Literal::Number(x)) if *x != 0.0 => Some(*x > 0.0),
+                    RValue::Literal(Literal::Integer(x)) if *x != 0 => Some(*x > 0),
+                    _ => None,
                 };
                 let step = RValue::Binary(Binary::new(
                     RValue::Local(counter.clone()),
@@ -1458,16 +1461,40 @@ impl Structurer {
                     BinaryOperation::Add,
                 ));
                 out.push(assign_stmt(counter.clone(), step));
-                let cmp = if ascending {
-                    BinaryOperation::LessThanOrEqual
-                } else {
-                    BinaryOperation::GreaterThanOrEqual
+                let up = || {
+                    RValue::Binary(Binary::new(
+                        RValue::Local(counter.clone()),
+                        next.limit.clone(),
+                        BinaryOperation::LessThanOrEqual,
+                    ))
                 };
-                let test = RValue::Binary(Binary::new(
-                    RValue::Local(counter),
-                    next.limit.clone(),
-                    cmp,
-                ));
+                let down = || {
+                    RValue::Binary(Binary::new(
+                        RValue::Local(counter.clone()),
+                        next.limit.clone(),
+                        BinaryOperation::GreaterThanOrEqual,
+                    ))
+                };
+                let test = match literal_sign {
+                    Some(true) => up(),
+                    Some(false) => down(),
+                    None => {
+                        let zero = RValue::Literal(Literal::Number(0.0));
+                        let step_pos = RValue::Binary(Binary::new(
+                            next.step.clone(),
+                            zero.clone(),
+                            BinaryOperation::GreaterThan,
+                        ));
+                        let step_neg = RValue::Binary(Binary::new(
+                            next.step.clone(),
+                            zero,
+                            BinaryOperation::LessThan,
+                        ));
+                        let a = RValue::Binary(Binary::new(step_pos, up(), BinaryOperation::And));
+                        let b = RValue::Binary(Binary::new(step_neg, down(), BinaryOperation::And));
+                        RValue::Binary(Binary::new(a, b, BinaryOperation::Or))
+                    }
+                };
                 self.transition(&bs, state, &mut then_b, hoisted);
                 self.transition(&es, state, &mut else_b, hoisted);
                 out.push(If::new(test, Block(then_b), Block(else_b)).into());
