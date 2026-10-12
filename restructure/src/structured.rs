@@ -1277,6 +1277,7 @@ impl Structurer {
             outside.sort_unstable();
             outside.dedup();
             let [p] = outside.as_slice() else {
+                note(|| format!("dispatch: loop header {header} has {} outside preds", outside.len()));
                 return None;
             };
             let inits: Vec<Statement> = match (self.stmts[header].as_slice(), &init) {
@@ -1306,7 +1307,10 @@ impl Structurer {
                     }
                     vec![a.into()]
                 }
-                _ => return None,
+                _ => {
+                    note(|| format!("dispatch: loop header {header} has an unknown for shape"));
+                    return None;
+                }
             };
             pre_inits.entry(*p).or_default().extend(inits);
         }
@@ -1584,7 +1588,23 @@ pub(crate) fn try_dispatch(function: &Function) -> Option<Block> {
         return None;
     }
     let nodes = s.reach.len();
-    let (body, hoisted) = s.dispatch()?;
+    let bad: Vec<usize> = s
+        .reach
+        .iter()
+        .copied()
+        .filter(|&v| {
+            let n = s.succs[v].len();
+            s.loop_of_header[v].is_none()
+                && (n > 2 || (n == 2 && (s.cond_arms(v).is_none() || s.conds[v].is_none())))
+        })
+        .collect();
+    if !bad.is_empty() {
+        note(|| format!("dispatch: {} node(s) with unsupported successors, e.g. {:?}", bad.len(), &bad[..bad.len().min(8)]));
+    }
+    let Some((body, hoisted)) = s.dispatch() else {
+        note(|| "dispatch: failed (see the reason above)".to_string());
+        return None;
+    };
     let block = Block(body);
     if !is_clean(&block) {
         note(|| "dispatch output still contains goto/label/for IR".to_string());
