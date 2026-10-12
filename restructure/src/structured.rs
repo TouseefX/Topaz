@@ -60,6 +60,16 @@ struct Succ {
 }
 
 /// Where a statement sequence is being emitted.
+/// An escape scope: a one-shot `repeat ... until true` whose branches set
+/// `var` to the 1-based index of the escape target they reach. Each target
+/// is emitted once after the scope, selected by `var`.
+struct EscScope {
+    stop: Option<usize>,
+    var: RcLocal,
+    targets: Vec<usize>,
+    used: bool,
+}
+
 #[derive(Clone)]
 struct Ctx {
     /// Innermost loop whose body we are inside (`None` = function top level).
@@ -68,10 +78,8 @@ struct Ctx {
     stop: Option<usize>,
     /// Dispatch flag of `region` when it has several flagged exits.
     flag: Option<RcLocal>,
-    /// Escape targets of branches whose merge lies past the enclosing stop.
-    /// Reaching `node` sets its flag; the block that follows the branch then
-    /// emits `node` once (see `emit_escape_branch`).
-    esc: Vec<(usize, RcLocal)>,
+    /// Escape scopes around this point (indices into `Structurer::scopes`).
+    esc: Vec<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -117,6 +125,8 @@ struct Structurer {
     visits: Vec<u32>,
     /// Diagnostic: how many times each escape target was emitted.
     escapes: FxHashMap<usize, u32>,
+    /// Escape scopes opened so far (see `EscScope`).
+    scopes: Vec<EscScope>,
     /// Diagnostic: escape sites dumped so far.
     dumps: u32,
 }
@@ -497,6 +507,7 @@ impl Structurer {
             spent: 0,
             visits: vec![0; n],
             escapes: FxHashMap::default(),
+            scopes: Vec::new(),
             dumps: 0,
         };
 
@@ -720,9 +731,13 @@ impl Structurer {
         if ctx.stop == Some(t) {
             return Some(Flow::Stop);
         }
-        if let Some((_, flag)) = ctx.esc.iter().find(|(n, _)| *n == t) {
-            out.push(assign_stmt(flag.clone(), RValue::Literal(Literal::Boolean(true))));
-            return Some(Flow::Stop);
+        for &si in ctx.esc.iter().rev() {
+            if let Some(k) = self.scopes[si].targets.iter().position(|&n| n == t) {
+                self.scopes[si].used = true;
+                let var = self.scopes[si].var.clone();
+                out.push(assign_stmt(var, number(k + 1)));
+                return Some(Flow::Stop);
+            }
         }
         let Some(r) = ctx.region else {
             return Some(Flow::Inline);
@@ -920,7 +935,7 @@ impl Structurer {
                     // merge becomes an escape instead: arms that reach it set
                     // a flag, and the code after the branch emits it once.
                     let (merge, escape) = match (merge, ctx.stop) {
-                        (Some(m), _) if ctx.esc.iter().any(|(n, _)| *n == m) => (None, None),
+                        (Some(m), _) if self.esc_registered(ctx, m) => (None, None),
                         (Some(m), Some(s))
                             if m != s && !self.reaches(m, s, ctx.region) =>
                         {
@@ -929,22 +944,7 @@ impl Structurer {
                         (m, _) => (m, None),
                     };
                     if let Some(m) = escape {
-                        // Diagnostic dump, capped so a large function cannot flood the log.
-                        if self.dumps < 400 {
-                            self.dumps += 1;
-                            note(|| {
-                                format!(
-                                    "ESC site cur={cur} then={} else={} merge={m} stop={:?} region={:?} m_preds={:?} m_succs={:?} stop_succs={:?}",
-                                    then_s.target,
-                                    else_s.target,
-                                    ctx.stop,
-                                    ctx.region,
-                                    self.preds[m],
-                                    self.succs[m].iter().map(|x| x.target).collect::<Vec<_>>(),
-                                    ctx.stop.map(|st| self.succs[st].iter().map(|x| x.target).collect::<Vec<_>>())
-                                )
-                            });
-                        }
+                        note(|| format!("2-way merge {m} is past enclosing stop; escape"));
                     }
                     // Diagnostic only: a branch with no merge copies its
                     // continuation into both arms. Counted by arm kind.
@@ -962,10 +962,34 @@ impl Structurer {
                             )
                         });
                     }
-                    let escape_flag = escape.map(|_| RcLocal::default());
+                    // An escape joins the innermost scope with the same stop,
+                    // or opens a new one around this branch.
                     let mut arm_esc = ctx.esc.clone();
-                    if let (Some(m), Some(f)) = (escape, &escape_flag) {
-                        arm_esc.push((m, f.clone()));
+                    let mut opened: Option<usize> = None;
+                    if let Some(m) = escape {
+                        let joined = ctx
+                            .esc
+                            .last()
+                            .copied()
+                            .filter(|&si| self.scopes[si].stop == ctx.stop);
+                        match joined {
+                            Some(si) => {
+                                if !self.scopes[si].targets.contains(&m) {
+                                    self.scopes[si].targets.push(m);
+                                }
+                            }
+                            None => {
+                                let si = self.scopes.len();
+                                self.scopes.push(EscScope {
+                                    stop: ctx.stop,
+                                    var: RcLocal::default(),
+                                    targets: vec![m],
+                                    used: false,
+                                });
+                                arm_esc.push(si);
+                                opened = Some(si);
+                            }
+                        }
                     }
                     let arm_ctx = Ctx {
                         region: ctx.region,
@@ -975,8 +999,8 @@ impl Structurer {
                     };
                     let then_b = self.arm(&then_s, &arm_ctx, depth)?;
                     let else_b = self.arm(&else_s, &arm_ctx, depth)?;
-                    if let (Some(m), Some(flag)) = (escape, escape_flag) {
-                        out = self.emit_escape_branch(out, cond, then_b, else_b, m, flag, ctx, depth)?;
+                    if let Some(si) = opened {
+                        out = self.emit_escape_scope(out, si, cond, then_b, else_b, ctx, depth)?;
                         return Some(out);
                     }
                     if !then_b.is_empty() || !else_b.is_empty() {
@@ -992,55 +1016,72 @@ impl Structurer {
         }
     }
 
-    /// Emit a branch whose merge `m` lies past the enclosing stop. The arms
-    /// set `flag` when they reach `m` and stop at the enclosing stop
-    /// otherwise. The branch sits in a one-shot `repeat ... until true` so the
-    /// flag is read after it; `m` is emitted once, guarded by the flag. A
-    /// `break` or `continue` in an arm would bind to that repeat, so such an
-    /// arm gives up (`None`).
+    /// Whether `m` is already a target of one of the escape scopes around `ctx`.
+    fn esc_registered(&self, ctx: &Ctx, m: usize) -> bool {
+        ctx.esc
+            .iter()
+            .any(|&si| self.scopes[si].targets.contains(&m))
+    }
+
+    /// Close the escape scope `si` opened by the branch `cond`: the branch
+    /// sits in a one-shot `repeat ... until true`, then each registered target
+    /// is emitted once, selected by the scope's variable. A `break` or
+    /// `continue` in an arm would bind to that repeat, so such an arm gives up.
     #[allow(clippy::too_many_arguments)]
-    fn emit_escape_branch(
+    fn emit_escape_scope(
         &mut self,
         mut out: Vec<Statement>,
+        si: usize,
         cond: RValue,
         then_b: Vec<Statement>,
         else_b: Vec<Statement>,
-        m: usize,
-        flag: RcLocal,
         ctx: &Ctx,
         depth: usize,
     ) -> Option<Vec<Statement>> {
         if has_loose_jump(&then_b) || has_loose_jump(&else_b) {
-            note(|| format!("escape to {m}: an arm holds a loop jump; giving up"));
+            note(|| format!("escape scope {si}: an arm holds a loop jump; giving up"));
             return None;
         }
-        if then_b.is_empty() && else_b.is_empty() {
+        let var = self.scopes[si].var.clone();
+        if !self.scopes[si].used {
+            // No path reached a target: the branch is plain code.
+            if !then_b.is_empty() || !else_b.is_empty() {
+                out.push(If::new(cond, Block(then_b), Block(else_b)).into());
+            }
             return Some(out);
         }
-        let mut decl = Assign::new(
-            vec![LValue::Local(flag.clone())],
-            vec![RValue::Literal(Literal::Boolean(false))],
-        );
+        let targets = self.scopes[si].targets.clone();
+        let mut decl = Assign::new(vec![LValue::Local(var.clone())], vec![number(0)]);
         decl.prefix = true;
         out.push(decl.into());
         let branch = If::new(cond, Block(then_b), Block(else_b));
-        out.push(Repeat::new(RValue::Literal(Literal::Boolean(true)), Block(vec![branch.into()])).into());
-        // `ctx` has no entry for `m`, so this emits the target itself.
-        let count = {
-            let c = self.escapes.entry(m).or_insert(0);
-            *c += 1;
-            *c
-        };
-        note(|| {
-            format!(
-                "escape tail {m} emitted (#{count}, region={:?}, stop={:?})",
-                ctx.region, ctx.stop
+        out.push(
+            Repeat::new(
+                RValue::Literal(Literal::Boolean(true)),
+                Block(vec![branch.into()]),
             )
-        });
-        let tail = self.seq(m, ctx, depth + 1, false)?;
-        if !tail.is_empty() {
-            out.push(If::new(RValue::Local(flag), Block(tail), Block(Vec::new())).into());
+            .into(),
+        );
+        let mut arms: Vec<(usize, Vec<Statement>)> = Vec::new();
+        for (k, &m) in targets.iter().enumerate() {
+            let count = {
+                let c = self.escapes.entry(m).or_insert(0);
+                *c += 1;
+                *c
+            };
+            note(|| {
+                format!(
+                    "escape tail {m} emitted (#{count}, region={:?}, stop={:?})",
+                    ctx.region, ctx.stop
+                )
+            });
+            // `ctx` does not list this scope, so the target is emitted here.
+            let tail = self.seq(m, ctx, depth + 1, false)?;
+            if !tail.is_empty() {
+                arms.push((k + 1, tail));
+            }
         }
+        out.extend(dispatch_tree(&var, arms));
         Some(out)
     }
 
