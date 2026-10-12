@@ -208,10 +208,55 @@ fn has_loose_jump(stmts: &[Statement]) -> bool {
     stmts.iter().any(|s| match s {
         Statement::Break(_) | Statement::Continue(_) => true,
         Statement::If(i) => {
-            has_loose_jump(&i.then_block.lock().0) || has_loose_jump(&i.else_block.lock().0)
+            // A block that is already locked (aliased) counts as a jump: give up.
+            let then_jump = match i.then_block.try_lock() {
+                Some(b) => has_loose_jump(&b.0),
+                None => true,
+            };
+            if then_jump {
+                return true;
+            }
+            match i.else_block.try_lock() {
+                Some(b) => has_loose_jump(&b.0),
+                None => true,
+            }
         }
         _ => false,
     })
+}
+
+thread_local! {
+    /// Locals the dispatch fallback declares itself. The caller keeps the
+    /// declarer from placing them again.
+    static HOISTED: std::cell::RefCell<Vec<RcLocal>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Forget the locals hoisted by an earlier `lift` on this thread.
+pub fn clear_hoisted_locals() {
+    HOISTED.with(|h| h.borrow_mut().clear());
+}
+
+/// Take the locals hoisted by the last `lift` on this thread (only the
+/// dispatch fallback hoists; otherwise this is empty).
+pub fn take_hoisted_locals() -> Vec<RcLocal> {
+    HOISTED.with(|h| std::mem::take(&mut *h.borrow_mut()))
+}
+
+fn push_unique(v: &mut Vec<RcLocal>, l: RcLocal) {
+    if !v.contains(&l) {
+        v.push(l);
+    }
+}
+
+fn is_for_ir(s: &Statement) -> bool {
+    matches!(
+        s,
+        Statement::NumForInit(_)
+            | Statement::NumForNext(_)
+            | Statement::GenericForInit(_)
+            | Statement::GenericForNext(_)
+    )
 }
 
 fn assign_stmt(lhs: RcLocal, rhs: RValue) -> Statement {
@@ -1189,6 +1234,110 @@ impl Structurer {
         }
     }
 
+    /// Edge into a dispatch arm: SSA copies, then the next state.
+    fn transition(
+        &self,
+        s: &Succ,
+        state: &RcLocal,
+        out: &mut Vec<Statement>,
+        hoisted: &mut Vec<RcLocal>,
+    ) {
+        for (l, _) in &s.args {
+            push_unique(hoisted, l.clone());
+        }
+        if let Some(mut a) = parallel_assign_from_args(&s.args) {
+            a.prefix = false;
+            out.push(a.into());
+        }
+        out.push(assign_stmt(state.clone(), number(s.target)));
+    }
+
+    /// State-machine emission for flows the structurer cannot nest: one
+    /// `if state == node` arm per CFG node, every edge sets `state`, and the
+    /// loop runs until a node with no successor sets it to 0. Locals are
+    /// declared before the loop because they cross arms. Returns the
+    /// statements and the locals to keep out of the declarer.
+    fn dispatch(&self) -> Option<(Vec<Statement>, Vec<RcLocal>)> {
+        let state = RcLocal::default();
+        let mut hoisted: Vec<RcLocal> = Vec::new();
+        let mut nodes: Vec<usize> = self.reach.clone();
+        nodes.sort_unstable();
+        let mut arms: Vec<(usize, Vec<Statement>)> = Vec::new();
+        for &v in &nodes {
+            let mut body: Vec<Statement> = self.stmts[v].clone();
+            for st in body.iter_mut() {
+                if let Statement::Assign(a) = st {
+                    a.prefix = false;
+                    for l in &a.left {
+                        if let Some(loc) = l.as_local() {
+                            push_unique(&mut hoisted, loc.clone());
+                        }
+                    }
+                }
+            }
+            let returns = matches!(body.last(), Some(Statement::Return(_)));
+            match self.succs[v].len() {
+                0 => {
+                    if !returns {
+                        body.push(assign_stmt(state.clone(), number(0)));
+                    }
+                }
+                1 => {
+                    let succ = self.succs[v][0].clone();
+                    self.transition(&succ, &state, &mut body, &mut hoisted);
+                }
+                2 => {
+                    let (ti, ei) = self.cond_arms(v)?;
+                    let cond = self.conds[v].clone()?;
+                    let ts = self.succs[v][ti].clone();
+                    let es = self.succs[v][ei].clone();
+                    let mut then_b = Vec::new();
+                    let mut else_b = Vec::new();
+                    self.transition(&ts, &state, &mut then_b, &mut hoisted);
+                    self.transition(&es, &state, &mut else_b, &mut hoisted);
+                    body.push(If::new(cond, Block(then_b), Block(else_b)).into());
+                }
+                _ => return None,
+            }
+            arms.push((v, body));
+        }
+        // Nested `else if` chain; the formatter prints it flat as `elseif`.
+        let mut chain: Vec<Statement> = Vec::new();
+        for (v, body) in arms.into_iter().rev() {
+            let test = RValue::Binary(Binary::new(
+                RValue::Local(state.clone()),
+                number(v),
+                BinaryOperation::Equal,
+            ));
+            let node = If::new(test, Block(body), Block(chain));
+            chain = vec![node.into()];
+        }
+        let running = RValue::Binary(Binary::new(
+            RValue::Local(state.clone()),
+            number(0),
+            BinaryOperation::NotEqual,
+        ));
+        let mut out: Vec<Statement> = Vec::new();
+        let mut decl = Assign::new(
+            vec![LValue::Local(state.clone())],
+            vec![number(self.entry)],
+        );
+        decl.prefix = true;
+        out.push(decl.into());
+        if !hoisted.is_empty() {
+            let mut d = Assign::new(
+                hoisted.iter().cloned().map(LValue::Local).collect(),
+                Vec::new(),
+            );
+            d.prefix = true;
+            out.push(d.into());
+        }
+        out.push(While::new(running, Block(chain)).into());
+        let mut all = hoisted;
+        all.push(state);
+        Some((out, all))
+    }
+
     fn emit(&mut self) -> Option<Vec<Statement>> {
         let ctx = Ctx {
             region: None,
@@ -1258,6 +1407,27 @@ pub(crate) fn try_lift(function: &Function) -> Option<Block> {
         return None;
     }
     note(|| format!("ok ({} top-level statements)", block.0.len()));
+    Some(block)
+}
+
+/// Dispatch fallback: used when `try_lift` gives up. Goto-free for any CFG,
+/// but unreadable, so it only runs where the structurer cannot nest.
+/// Not used when the function still carries for-loop IR.
+pub(crate) fn try_dispatch(function: &Function) -> Option<Block> {
+    let s = Structurer::build(function)?;
+    if s.reach.iter().any(|&v| s.stmts[v].iter().any(is_for_ir)) {
+        note(|| "dispatch: for-loop IR present; giving up".to_string());
+        return None;
+    }
+    let nodes = s.reach.len();
+    let (body, hoisted) = s.dispatch()?;
+    let block = Block(body);
+    if !is_clean(&block) {
+        note(|| "dispatch output still contains goto/label/for IR".to_string());
+        return None;
+    }
+    HOISTED.with(|h| h.borrow_mut().extend(hoisted));
+    note(|| format!("dispatch fallback used ({nodes} nodes)"));
     Some(block)
 }
 

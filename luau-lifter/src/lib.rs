@@ -1165,6 +1165,8 @@ fn decompile_function(
     let lifted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         restructure::lift(function)
     }));
+    // Locals the dispatch fallback declared itself (empty otherwise).
+    let hoisted = restructure::take_hoisted_locals();
     let mut body = match lifted {
         Ok(b) => b,
         Err(_) => ast::Block(vec![
@@ -1185,7 +1187,12 @@ fn decompile_function(
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         LocalDeclarer::default().declare_locals(
             Arc::clone(&block),
-            &upvalues_in.iter().chain(params.iter()).cloned().collect(),
+            &upvalues_in
+                .iter()
+                .chain(params.iter())
+                .chain(hoisted.iter())
+                .cloned()
+                .collect(),
         );
     }));
 
