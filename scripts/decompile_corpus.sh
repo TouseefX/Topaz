@@ -35,6 +35,9 @@ run_as_prog() {
   cp "$src" "$dir/prog.lua"
   (cd "$dir" && timeout 60 "$REPL" prog.lua > "$dst" 2>&1; echo "exit=$?" >> "$dst")
   rm -rf "$dir"
+  # Error positions legitimately move when the decompiled text is re-laid
+  # out, so compare line numbers as N.
+  sed -i -E 's/prog\.lua:[0-9]+/prog.lua:N/g' "$dst"
 }
 
 for src in "$CORPUS"/*.lua; do
