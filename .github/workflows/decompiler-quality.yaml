@@ -49,14 +49,17 @@ jobs:
         working-directory: ${{ matrix.src }}
         run: cargo build --release -p topaz
 
-      - name: Build luau-compile
+      - name: Build luau-compile and luau (runtime)
         run: |
           git clone --depth 1 https://github.com/luau-lang/luau.git /tmp/luau
           cmake -S /tmp/luau -B /tmp/luau/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build /tmp/luau/build --target Luau.Compile.CLI --parallel 4
+          cmake --build /tmp/luau/build --target Luau.Compile.CLI --target Luau.Repl.CLI --parallel 4
           LUAU_COMPILE="$(find /tmp/luau/build -type f -name 'luau-compile' | head -n 1)"
+          LUAU_REPL="$(find /tmp/luau/build -type f -name 'luau' -perm -u+x | head -n 1)"
           test -x "$LUAU_COMPILE"
+          test -x "$LUAU_REPL"
           echo "LUAU_COMPILE=$LUAU_COMPILE" >> "$GITHUB_ENV"
+          echo "LUAU_REPL=$LUAU_REPL" >> "$GITHUB_ENV"
 
       - name: Decompile corpus
         env:
@@ -66,7 +69,8 @@ jobs:
             "${{ matrix.src }}/target/release/topaz" \
             "$LUAU_COMPILE" \
             decompiler-corpus \
-            "corpus-out/${{ matrix.label }}"
+            "corpus-out/${{ matrix.label }}" \
+            "$LUAU_REPL"
           cat "corpus-out/${{ matrix.label }}/SUMMARY.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish corpus summary as annotations
@@ -103,6 +107,10 @@ jobs:
           for f in corpus-out/$label/01_loops_break_continue.topaz.log corpus-out/$label/01_loops_break_continue.decompiled.lua corpus-out/$label/03_state_machine.decompiled.lua; do
             [ -f "$f" ] || { echo "::notice title=sample::missing $f"; continue; }
             printf '::notice title=sample %s (%s, %s bytes)::%s\n' "$(basename "$f")" "$label" "$(wc -c < "$f")" "$(head -n 70 "$f" | esc)"
+          done
+          for f in corpus-out/$label/*.diff; do
+            [ -f "$f" ] || continue
+            printf '::notice title=output diff %s (%s)::%s\n' "$(basename "$f")" "$label" "$(head -n 40 "$f" | esc)"
           done
 
       - name: Unit tests (ast, cfg, restructure) - informational

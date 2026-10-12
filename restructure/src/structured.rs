@@ -738,7 +738,14 @@ impl Structurer {
                 hstmts[0],
                 Statement::NumForNext(_) | Statement::GenericForNext(_)
             );
-        let single_exit = exits.len() == 1;
+        // `return` exits are copied inline by `classify`, so only real exits
+        // count. The `for` / `while` forms need the header's own exit to be
+        // the one real exit (or no real exit at all).
+        let single_exit = match fexits.as_slice() {
+            [] => true,
+            [only] => exit_idx.len() == 1 && hsuccs[exit_idx[0]].target == *only,
+            _ => false,
+        };
 
         if for_like {
             // Only the plain shape `for` recovers; anything else is unknown IR.

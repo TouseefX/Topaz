@@ -1,3 +1,18 @@
+-- Minimal Vector3 so the file runs standalone (the real game provides one).
+local Vector3 = {}
+Vector3.__index = Vector3
+
+function Vector3.new(x, y, z)
+    return setmetatable({ X = x, Y = y, Z = z }, Vector3)
+end
+
+function Vector3.__mul(a, b)
+    if type(a) == "number" then
+        a, b = b, a
+    end
+    return Vector3.new(a.X * b, a.Y * b, a.Z * b)
+end
+
 local Cutscene = {}
 Cutscene.__index = Cutscene
 
@@ -42,7 +57,7 @@ function Cutscene:update(dt)
                 lerp(actor.start.Z, actor.target.Z, t)
             )
         elseif actor.shake and t < 0.9 then
-            actor.offset = Vector3.new(math.random() - 0.5, 0, math.random() - 0.5) * actor.shake * (1 - t)
+            actor.offset = Vector3.new(math.sin(t * 7.3) - 0.5, 0, math.cos(t * 5.1) - 0.5) * actor.shake * (1 - t)
         else
             actor.offset = nil
         end
@@ -52,5 +67,22 @@ function Cutscene:update(dt)
         end
     end
 end
+
+-- Deterministic driver: prints a few frames and the event log.
+local a1 = { start = Vector3.new(0, 0, 0), target = Vector3.new(10, 5, -3) }
+local a2 = { shake = 2 }
+local a3 = { skip = true }
+local cs = Cutscene.new({ a1, a2, a3 }, 4)
+local log = {}
+cs:addEvent(1.5, function(c)
+    table.insert(log, "event@" .. string.format("%.2f", c.time))
+end)
+for step = 1, 8 do
+    cs:update(0.6)
+    print(step, cs.done, string.format("%.3f", cs.time),
+        a1.position and string.format("%.3f", a1.position.X) or "nil",
+        a2.offset and string.format("%.4f", a2.offset.X) or "nil")
+end
+print(table.concat(log, ","))
 
 return Cutscene
