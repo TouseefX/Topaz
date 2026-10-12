@@ -21,7 +21,7 @@
 
 use ast::{
     Assign, Binary, BinaryOperation, Block, Break, Continue, GenericFor, If, LValue, Literal,
-    NumericFor, RValue, RcLocal, Reduce, Statement, Unary, UnaryOperation, While,
+    NumericFor, RValue, RcLocal, Reduce, Repeat, Statement, Unary, UnaryOperation, While,
 };
 use cfg::{block::BranchType, function::Function};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -68,6 +68,10 @@ struct Ctx {
     stop: Option<usize>,
     /// Dispatch flag of `region` when it has several flagged exits.
     flag: Option<RcLocal>,
+    /// Escape targets of branches whose merge lies past the enclosing stop.
+    /// Reaching `node` sets its flag; the block that follows the branch then
+    /// emits `node` once (see `emit_escape_branch`).
+    esc: Vec<(usize, RcLocal)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -192,6 +196,18 @@ fn dominates(idom: &[usize], a: usize, mut b: usize, root: usize) -> bool {
         }
         b = idom[b];
     }
+}
+
+/// Whether `stmts` hold a `break` or `continue` that would bind to an
+/// enclosing loop (one inside a nested loop does not count).
+fn has_loose_jump(stmts: &[Statement]) -> bool {
+    stmts.iter().any(|s| match s {
+        Statement::Break(_) | Statement::Continue(_) => true,
+        Statement::If(i) => {
+            has_loose_jump(&i.then_block.lock().0) || has_loose_jump(&i.else_block.lock().0)
+        }
+        _ => false,
+    })
 }
 
 fn assign_stmt(lhs: RcLocal, rhs: RValue) -> Statement {
@@ -627,6 +643,10 @@ impl Structurer {
         if ctx.stop == Some(t) {
             return Some(Flow::Stop);
         }
+        if let Some((_, flag)) = ctx.esc.iter().find(|(n, _)| *n == t) {
+            out.push(assign_stmt(flag.clone(), RValue::Literal(Literal::Boolean(true))));
+            return Some(Flow::Stop);
+        }
         let Some(r) = ctx.region else {
             return Some(Flow::Inline);
         };
@@ -808,24 +828,26 @@ impl Structurer {
                     let merge = self
                         .merge_of(ctx.region, cur)
                         .or_else(|| self.join_of(then_s.target, else_s.target, ctx.region, cur));
-                    // A merge that lies past the enclosing stop would make each
-                    // arm emit the enclosing continuation too (tail duplication).
-                    // Keep it only if it reaches the stop; otherwise this branch
-                    // has no merge of its own and the arms stop at the enclosing one.
-                    let merge = match (merge, ctx.stop) {
-                        (Some(m), Some(s)) if m != s && !self.reaches(m, s, ctx.region) => {
-                            note(|| {
-                                format!(
-                                    "2-way merge {m} is past enclosing stop {s}; arms stop at the stop"
-                                )
-                            });
-                            None
+                    // A merge that lies past the enclosing stop cannot be
+                    // reached by the arms without copying its continuation
+                    // into each of them, and nested copies compound. Such a
+                    // merge becomes an escape instead: arms that reach it set
+                    // a flag, and the code after the branch emits it once.
+                    let (merge, escape) = match (merge, ctx.stop) {
+                        (Some(m), _) if ctx.esc.iter().any(|(n, _)| *n == m) => (None, None),
+                        (Some(m), Some(s))
+                            if m != s && !self.reaches(m, s, ctx.region) =>
+                        {
+                            (None, Some(m))
                         }
-                        (m, _) => m,
+                        (m, _) => (m, None),
                     };
+                    if let Some(m) = escape {
+                        note(|| format!("2-way merge {m} is past enclosing stop; escape flag"));
+                    }
                     // Diagnostic only: a branch with no merge copies its
                     // continuation into both arms. Counted by arm kind.
-                    if merge.is_none() {
+                    if merge.is_none() && escape.is_none() {
                         note(|| {
                             format!(
                                 "2-way no-merge: then_in_region={} else_in_region={} then_exit={} else_exit={} then_is_stop={} else_is_stop={} stop_set={}",
@@ -839,13 +861,23 @@ impl Structurer {
                             )
                         });
                     }
+                    let escape_flag = escape.map(|_| RcLocal::default());
+                    let mut arm_esc = ctx.esc.clone();
+                    if let (Some(m), Some(f)) = (escape, &escape_flag) {
+                        arm_esc.push((m, f.clone()));
+                    }
                     let arm_ctx = Ctx {
                         region: ctx.region,
                         stop: merge.or(ctx.stop),
                         flag: ctx.flag.clone(),
+                        esc: arm_esc,
                     };
                     let then_b = self.arm(&then_s, &arm_ctx, depth)?;
                     let else_b = self.arm(&else_s, &arm_ctx, depth)?;
+                    if let (Some(m), Some(flag)) = (escape, escape_flag) {
+                        out = self.emit_escape_branch(out, cond, then_b, else_b, m, flag, ctx, depth)?;
+                        return Some(out);
+                    }
                     if !then_b.is_empty() || !else_b.is_empty() {
                         out.push(If::new(cond, Block(then_b), Block(else_b)).into());
                     }
@@ -857,6 +889,47 @@ impl Structurer {
                 _ => return None,
             }
         }
+    }
+
+    /// Emit a branch whose merge `m` lies past the enclosing stop. The arms
+    /// set `flag` when they reach `m` and stop at the enclosing stop
+    /// otherwise. The branch sits in a one-shot `repeat ... until true` so the
+    /// flag is read after it; `m` is emitted once, guarded by the flag. A
+    /// `break` or `continue` in an arm would bind to that repeat, so such an
+    /// arm gives up (`None`).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_escape_branch(
+        &mut self,
+        mut out: Vec<Statement>,
+        cond: RValue,
+        then_b: Vec<Statement>,
+        else_b: Vec<Statement>,
+        m: usize,
+        flag: RcLocal,
+        ctx: &Ctx,
+        depth: usize,
+    ) -> Option<Vec<Statement>> {
+        if has_loose_jump(&then_b) || has_loose_jump(&else_b) {
+            note(|| format!("escape to {m}: an arm holds a loop jump; giving up"));
+            return None;
+        }
+        if then_b.is_empty() && else_b.is_empty() {
+            return Some(out);
+        }
+        let mut decl = Assign::new(
+            vec![LValue::Local(flag.clone())],
+            vec![RValue::Literal(Literal::Boolean(false))],
+        );
+        decl.prefix = true;
+        out.push(decl.into());
+        let branch = If::new(cond, Block(then_b), Block(else_b));
+        out.push(Repeat::new(RValue::Literal(Literal::Boolean(true)), Block(vec![branch.into()])).into());
+        // `ctx` has no entry for `m`, so this emits the target itself.
+        let tail = self.seq(m, ctx, depth + 1, false)?;
+        if !tail.is_empty() {
+            out.push(If::new(RValue::Local(flag), Block(tail), Block(Vec::new())).into());
+        }
+        Some(out)
     }
 
     /// Emit loop `l` as a statement list plus the node control continues at
@@ -928,6 +1001,7 @@ impl Structurer {
             region: Some(l),
             stop: None,
             flag: flag.clone(),
+            esc: Vec::new(),
         };
 
         if for_like {
@@ -988,6 +1062,7 @@ impl Structurer {
                 region: outer.region,
                 stop: merge,
                 flag: outer.flag.clone(),
+                esc: outer.esc.clone(),
             };
             let fl = flag.clone()?;
             let mut natural: Vec<Statement> = Vec::new();
@@ -1053,6 +1128,7 @@ impl Structurer {
                     region: outer.region,
                     stop: merge,
                     flag: outer.flag.clone(),
+                    esc: outer.esc.clone(),
                 };
                 let fl = flag?;
                 let n = fexits.len();
@@ -1077,6 +1153,7 @@ impl Structurer {
             region: None,
             stop: None,
             flag: None,
+            esc: Vec::new(),
         };
         let body = self.seq(self.entry, &ctx, 0, false)?;
         // Every reachable node must have been emitted somewhere.
