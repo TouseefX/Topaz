@@ -249,6 +249,32 @@ fn push_unique(v: &mut Vec<RcLocal>, l: RcLocal) {
     }
 }
 
+/// Balanced `if` tree that runs the arm whose node id matches `state`.
+fn dispatch_tree(state: &RcLocal, mut arms: Vec<(usize, Vec<Statement>)>) -> Vec<Statement> {
+    if arms.is_empty() {
+        return Vec::new();
+    }
+    if arms.len() == 1 {
+        let (v, body) = arms.pop().unwrap();
+        let test = RValue::Binary(Binary::new(
+            RValue::Local(state.clone()),
+            number(v),
+            BinaryOperation::Equal,
+        ));
+        return vec![If::new(test, Block(body), Block::default()).into()];
+    }
+    let right = arms.split_off(arms.len() / 2);
+    let pivot = right[0].0;
+    let test = RValue::Binary(Binary::new(
+        RValue::Local(state.clone()),
+        number(pivot),
+        BinaryOperation::LessThan,
+    ));
+    let left_b = dispatch_tree(state, arms);
+    let right_b = dispatch_tree(state, right);
+    vec![If::new(test, Block(left_b), Block(right_b)).into()]
+}
+
 fn is_for_ir(s: &Statement) -> bool {
     matches!(
         s,
@@ -1331,17 +1357,9 @@ impl Structurer {
             arms.push((v, body));
         }
 
-        // Nested `else if` chain; the formatter prints it flat as `elseif`.
-        let mut chain: Vec<Statement> = Vec::new();
-        for (v, body) in arms.into_iter().rev() {
-            let test = RValue::Binary(Binary::new(
-                RValue::Local(state.clone()),
-                number(v),
-                BinaryOperation::Equal,
-            ));
-            let node = If::new(test, Block(body), Block(chain));
-            chain = vec![node.into()];
-        }
+        // Binary search over the node ids. A flat `elseif` chain with one
+        // arm per node exceeds the Luau parser's recursion limit.
+        let chain = dispatch_tree(&state, arms);
         let running = RValue::Binary(Binary::new(
             RValue::Local(state.clone()),
             number(0),
