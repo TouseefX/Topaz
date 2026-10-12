@@ -154,6 +154,9 @@ jobs:
           res4836="$(printf '%s\n' "$res4836_all" | sed -E 's/^structured\[[^]]*\]: //; s/[0-9]+/N/g' | sort | uniq -c | sort -rn | head -n 25 | cut -c1-200)"
           res4836_tail="$(printf '%s\n' "$res4836_all" | tail -n 8 | cut -c1-240)"
           printf '::notice title=result 4836 (%s)::%s\n' "$label" "$(printf 'counts:\n%s\nlast:\n%s\n' "$res4836" "$res4836_tail" | esc)"
+          req_count=$(grep -c 'Request == "' "$out" 2>/dev/null || true)
+          req_sample="$(grep -n 'Request == "' "$out" 2>/dev/null | head -n 12 | cut -c1-160 || true)"
+          printf '::notice title=request checks (%s)::%s\n' "$label" "$(printf 'Request == "X" lines: %s\n%s\n' "$req_count" "$req_sample" | esc)"
           tail_log="$(tail -n 40 out/topaz.log 2>/dev/null | cut -c1-300 || true)"
           printf '::notice title=topaz log tail (%s)::%s\n' "$label" "$(printf '%s\n' "$tail_log" | esc)"
           # Where the output is incomplete: the reason line and the first
