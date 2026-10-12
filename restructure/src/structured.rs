@@ -533,16 +533,21 @@ impl Structurer {
     /// Nearest node reachable from every target (the first target's walk
     /// order decides ties).
     fn join_all(&self, targets: &[usize], region: Option<usize>, cur: usize) -> Option<usize> {
-        const LIMIT: usize = 4096;
+        // Large functions have thousands of region nodes, and the shared node
+        // can sit past a small cap in breadth-first order. A capped walk can
+        // miss the join, which then copies the tail into every arm.
+        const LIMIT: usize = 16384;
         let header = region.and_then(|r| self.loops.get(r)).map(|l| l.header);
-        let walk = |start: usize| -> Vec<usize> {
+        let walk = |start: usize| -> (Vec<usize>, bool) {
             let mut order: Vec<usize> = Vec::new();
+            let mut truncated = false;
             let mut seen: FxHashSet<usize> = FxHashSet::default();
             let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
             seen.insert(start);
             queue.push_back(start);
             while let Some(v) = queue.pop_front() {
                 if order.len() >= LIMIT {
+                    truncated = true;
                     break;
                 }
                 if Some(v) == header || !self.in_region(v, region) {
@@ -555,14 +560,19 @@ impl Structurer {
                     }
                 }
             }
-            order
+            (order, truncated)
         };
         let (&first, rest) = targets.split_first()?;
-        let mut common: FxHashSet<usize> = walk(first).into_iter().collect();
-        let mut order: Vec<usize> = walk(first);
+        let (mut order, mut truncated) = walk(first);
+        let mut common: FxHashSet<usize> = order.iter().copied().collect();
         for &t in rest {
-            let w: FxHashSet<usize> = walk(t).into_iter().collect();
+            let (w_order, w_truncated) = walk(t);
+            truncated |= w_truncated;
+            let w: FxHashSet<usize> = w_order.into_iter().collect();
             common.retain(|v| w.contains(v));
+        }
+        if truncated {
+            note(|| format!("join walk truncated at {LIMIT} nodes (cur={cur})"));
         }
         order.retain(|v| *v != cur && common.contains(v));
         order.into_iter().next()
