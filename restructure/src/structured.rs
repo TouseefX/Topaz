@@ -443,6 +443,29 @@ impl Structurer {
         Some(this)
     }
 
+    /// Whether `to` is reachable from `from` inside `region` (the region's
+    /// header and nodes outside the region are not walked through).
+    fn reaches(&self, from: usize, to: usize, region: Option<usize>) -> bool {
+        let header = region.and_then(|r| self.loops.get(r)).map(|l| l.header);
+        let mut seen: FxHashSet<usize> = FxHashSet::default();
+        let mut stack: Vec<usize> = vec![from];
+        seen.insert(from);
+        while let Some(v) = stack.pop() {
+            if v == to {
+                return true;
+            }
+            if Some(v) == header || !self.in_region(v, region) {
+                continue;
+            }
+            for s in &self.succs[v] {
+                if seen.insert(s.target) {
+                    stack.push(s.target);
+                }
+            }
+        }
+        false
+    }
+
     fn in_region(&self, v: usize, region: Option<usize>) -> bool {
         match region {
             Some(r) => {
@@ -783,6 +806,21 @@ impl Structurer {
                     let merge = self
                         .merge_of(ctx.region, cur)
                         .or_else(|| self.join_of(then_s.target, else_s.target, ctx.region, cur));
+                    // A merge that lies past the enclosing stop would make each
+                    // arm emit the enclosing continuation too (tail duplication).
+                    // Keep it only if it reaches the stop; otherwise this branch
+                    // has no merge of its own and the arms stop at the enclosing one.
+                    let merge = match (merge, ctx.stop) {
+                        (Some(m), Some(s)) if m != s && !self.reaches(m, s, ctx.region) => {
+                            note(|| {
+                                format!(
+                                    "2-way merge {m} is past enclosing stop {s}; arms stop at the stop"
+                                )
+                            });
+                            None
+                        }
+                        (m, _) => m,
+                    };
                     // Diagnostic only: a branch with no merge copies its
                     // continuation into both arms. Counted by arm kind.
                     if merge.is_none() {

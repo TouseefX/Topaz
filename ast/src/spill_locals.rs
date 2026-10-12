@@ -153,15 +153,11 @@ fn spill_function(block: &mut Block) {
     top.sort();
     nested.sort();
 
-    // Step 1: move only the top-level tail.
-    let (mut spilled, fits) = choose_tail(block, &HashSet::new(), &top);
-    if !fits {
-        // Step 2: move every eligible nested local, then the top-level tail.
-        let base: HashSet<RcLocal> = nested.iter().cloned().collect();
-        let (tail, _) = choose_tail(block, &base, &top);
-        spilled = tail;
-        spilled.extend(nested);
-    }
+    // Move as few locals as possible. Nested locals go first, because they
+    // are the ones that keep many scopes busy at once, then top-level locals.
+    let mut candidates: Vec<RcLocal> = nested;
+    candidates.extend(top);
+    let mut spilled = choose_minimal(block, &candidates);
     spilled.sort();
     if spilled.is_empty() {
         return;
@@ -190,41 +186,31 @@ fn spill_function(block: &mut Block) {
     block.0.insert(0, Statement::Assign(decl));
 }
 
-/// Finds the most top-level locals that can stay real while the peak stays at
-/// or below the target, given that every local in `base` is moved. `top` is in
-/// creation order. The tail of `top` is moved, and the first `k` stay real.
-/// Returns the tail to move, and whether it meets the target.
-fn choose_tail(block: &Block, base: &HashSet<RcLocal>, top: &[RcLocal]) -> (Vec<RcLocal>, bool) {
-    let peak_moving_tail_from = |k: usize| -> usize {
-        let mut excluded = base.clone();
-        excluded.extend(top[k..].iter().cloned());
+/// Returns the smallest prefix of `candidates` whose move brings the peak
+/// active-local count to the target. Moving more locals never raises the peak,
+/// so the peak is non-increasing in the prefix length and a binary search
+/// finds the cut. If even moving every candidate is not enough, all of them are
+/// returned.
+fn choose_minimal(block: &Block, candidates: &[RcLocal]) -> Vec<RcLocal> {
+    let peak_moving_first = |k: usize| -> usize {
+        let excluded: HashSet<RcLocal> = candidates[..k].iter().cloned().collect();
         let mut decls: Vec<Decl> = Vec::new();
         let mut seen: HashSet<RcLocal> = HashSet::new();
         scan_block(block, 0, false, 0, &excluded, &mut decls, &mut seen)
     };
-
-    // peak_moving_tail_from(k) is non-decreasing in k, because a larger k
-    // moves fewer locals. Find the largest k that fits.
-    let mut best: Option<usize> = None;
-    let (mut lo, mut hi) = (0usize, top.len());
-    while lo <= hi {
+    let (mut lo, mut hi) = (0usize, candidates.len());
+    while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        if peak_moving_tail_from(mid) <= TARGET_ACTIVE_LOCALS {
-            best = Some(mid);
-            lo = mid + 1;
+        if peak_moving_first(mid) <= TARGET_ACTIVE_LOCALS {
+            hi = mid;
         } else {
-            if mid == 0 {
-                break;
-            }
-            hi = mid - 1;
+            lo = mid + 1;
         }
     }
-    match best {
-        Some(k) => (top[k..].to_vec(), true),
-        // Even moving the whole tail does not fit. Move all of it anyway; the
-        // remaining locals are the ones a closure captures inside a loop.
-        None => (top.to_vec(), false),
+    if peak_moving_first(lo) > TARGET_ACTIVE_LOCALS {
+        return candidates.to_vec();
     }
+    candidates[..lo].to_vec()
 }
 
 /// Measures the peak number of simultaneously active locals in one function
