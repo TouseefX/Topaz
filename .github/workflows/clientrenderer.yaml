@@ -150,7 +150,7 @@ jobs:
           printf '::notice title=structured fallbacks (%s)::%s\n' "$label" "$(printf '%s\n%s\n' "$s0" "$s1" | esc)"
           esc_sites="$(grep -h 'Some(4836)\]: ESC site' out/topaz.log 2>/dev/null | head -n 60 | cut -c1-400 || true)"
           printf '::notice title=escape sites 4836 (%s)::%s\n' "$label" "$(printf '%s\n' "$esc_sites" | esc)"
-          res4836="$(grep -h 'Some(4836)\]' out/topaz.log 2>/dev/null | grep -v ': ok (' | head -n 25 | cut -c1-240 || true)"
+          res4836="$(grep -h 'Some(4836)\]' out/topaz.log 2>/dev/null | grep -v 'no-merge\|: built:' | head -n 25 | cut -c1-240 || true)"
           printf '::notice title=result 4836 (%s)::%s\n' "$label" "$(printf '%s\n' "$res4836" | esc)"
           tail_log="$(tail -n 40 out/topaz.log 2>/dev/null | cut -c1-300 || true)"
           printf '::notice title=topaz log tail (%s)::%s\n' "$label" "$(printf '%s\n' "$tail_log" | esc)"
