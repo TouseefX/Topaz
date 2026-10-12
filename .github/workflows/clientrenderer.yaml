@@ -1,0 +1,168 @@
+name: ClientRenderer bytecode
+
+# Decompiles the large Roblox ClientRenderer LocalScript dump with the
+# topaz CLI, bounded by an outer `timeout -s KILL` (the output must never
+# be left unbounded, see CODEBASE.md) and an internal --time-budget.
+#
+# A run is a PASS only when all of these hold (exit 0 alone is not enough):
+#   - topaz exited 0 (no timeout, no panic)
+#   - no TOPAZ_INCOMPLETE marker in the output
+#   - no goto / ::label:: in the output
+#   - the decompiled output still compiles with luau-compile
+#
+# The verdict is published as an annotation and as a step summary. The
+# decompiled file, the topaz log and the verdict are uploaded as an artifact.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'arena/**'
+    paths:
+      - 'ClientRenderer_LocalScript_88615311464962_Bytecode.txt'
+      - '.github/workflows/clientrenderer.yaml'
+      - 'topaz/**'
+      - 'luau-lifter/**'
+      - 'lua51-deserializer/**'
+      - 'restructure/**'
+      - 'cfg/**'
+      - 'ast/**'
+
+env:
+  BYTECODE: ClientRenderer_LocalScript_88615311464962_Bytecode.txt
+  BUDGET_SECS: '600'
+  KILL_SECS: '900'
+
+jobs:
+  decompile:
+    name: ClientRenderer (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: new
+            src: .
+          - label: baseline
+            src: baseline
+    steps:
+      - name: Checkout this branch
+        uses: actions/checkout@v4
+
+      - name: Checkout main as baseline
+        if: matrix.label == 'baseline'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: baseline
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.src }}
+
+      - name: Build topaz CLI
+        working-directory: ${{ matrix.src }}
+        run: cargo build --release -p topaz
+
+      - name: Build luau-compile
+        run: |
+          git clone --depth 1 https://github.com/luau-lang/luau.git /tmp/luau
+          cmake -S /tmp/luau -B /tmp/luau/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/luau/build --target Luau.Compile.CLI --parallel 4
+          LUAU_COMPILE="$(find /tmp/luau/build -type f -name 'luau-compile' | head -n 1)"
+          test -x "$LUAU_COMPILE"
+          echo "LUAU_COMPILE=$LUAU_COMPILE" >> "$GITHUB_ENV"
+
+      - name: Decompile ClientRenderer (bounded)
+        env:
+          TOPAZ_STRUCTURED_DEBUG: '1'
+          TOPAZ_DEBUG_CYCLES: '1'
+        run: |
+          mkdir -p out
+          start=$(date +%s)
+          rc=0
+          timeout -s KILL "$KILL_SECS" "${{ matrix.src }}/target/release/topaz" decompile \
+            --time-budget "$BUDGET_SECS" \
+            --input "$GITHUB_WORKSPACE/$BYTECODE" \
+            --output "out/ClientRenderer.luau" > out/topaz.log 2>&1 || rc=$?
+          echo "$rc" > out/exit.txt
+          echo "$(( $(date +%s) - start ))" > out/elapsed.txt
+          echo "topaz exit=$rc elapsed=$(cat out/elapsed.txt)s"
+
+      - name: Score output and publish verdict
+        if: always()
+        id: score
+        run: |
+          esc() { sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/$/%0A/' | tr -d '\n'; }
+          label="${{ matrix.label }}"
+          out=out/ClientRenderer.luau
+          rc="$(cat out/exit.txt 2>/dev/null || echo missing)"
+          elapsed="$(cat out/elapsed.txt 2>/dev/null || echo ?)"
+          if [ -f "$out" ]; then
+            lines=$(wc -l < "$out")
+            bytes=$(wc -c < "$out")
+            gotos=$(grep -c -E '^[[:space:]]*goto[[:space:]]|::[A-Za-z_][A-Za-z0-9_]*::' "$out" || true)
+            blocks=$(grep -c -- '-- block' "$out" || true)
+            incomplete=$(grep -c 'TOPAZ_INCOMPLETE' "$out" || true)
+          else
+            lines=0; bytes=0; gotos=0; blocks=0; incomplete=0
+          fi
+          compile="not-run"
+          if [ -f "$out" ]; then
+            if "$LUAU_COMPILE" "$out" > /dev/null 2> out/compile.err; then
+              compile=ok
+            else
+              compile=fail
+            fi
+          fi
+          reasons=""
+          [ "$rc" = "0" ] || reasons="$reasons topaz-exit-$rc;"
+          [ "$incomplete" = "0" ] || reasons="$reasons incomplete-marker;"
+          [ "$gotos" = "0" ] || reasons="$reasons gotos=$gotos;"
+          [ "$compile" = "ok" ] || reasons="$reasons compile=$compile;"
+          if [ -z "$reasons" ]; then verdict=PASS; else verdict="FAIL ($reasons)"; fi
+          {
+            echo "## ClientRenderer ($label)"
+            echo ""
+            echo "| metric | value |"
+            echo "| --- | --- |"
+            echo "| topaz exit | $rc |"
+            echo "| elapsed | ${elapsed}s (budget ${BUDGET_SECS}s, kill ${KILL_SECS}s) |"
+            echo "| output lines | $lines |"
+            echo "| output bytes | $bytes |"
+            echo "| goto / ::label:: | $gotos |"
+            echo "| -- block | $blocks |"
+            echo "| TOPAZ_INCOMPLETE | $incomplete |"
+            echo "| luau-compile | $compile |"
+            echo "| **verdict** | **$verdict** |"
+          } > out/verdict.md
+          cat out/verdict.md >> "$GITHUB_STEP_SUMMARY"
+          printf '::notice title=ClientRenderer verdict (%s)::%s\n' "$label" "$(cat out/verdict.md | esc)"
+          s1="$(grep -h '^structured:' out/topaz.log 2>/dev/null | sed -E 's/[0-9]+/N/g' | sort | uniq -c | sort -rn | head -30)"
+          printf '::notice title=structured reasons (%s)::%s\n' "$label" "$(printf '%s\n' "$s1" | esc)"
+          tail_log="$(tail -n 40 out/topaz.log 2>/dev/null | cut -c1-300)"
+          printf '::notice title=topaz log tail (%s)::%s\n' "$label" "$(printf '%s\n' "$tail_log" | esc)"
+          cerr="$(head -n 20 out/compile.err 2>/dev/null | cut -c1-300)"
+          if [ -n "$cerr" ]; then
+            printf '::notice title=luau-compile errors (%s)::%s\n' "$label" "$(printf '%s\n' "$cerr" | esc)"
+          fi
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+
+      - name: Upload ClientRenderer output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clientrenderer-${{ matrix.label }}
+          path: out
+          if-no-files-found: warn
+
+      - name: Fail the branch run on a FAIL verdict
+        if: matrix.label == 'new' && steps.score.outputs.verdict != 'PASS'
+        run: |
+          echo "ClientRenderer verdict: ${{ steps.score.outputs.verdict }}"
+          exit 1
