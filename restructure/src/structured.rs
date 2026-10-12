@@ -598,17 +598,15 @@ impl Structurer {
     /// not in the view at all.
     fn compute_ipdom(&self, region: Option<usize>) -> FxHashMap<usize, usize> {
         let header = region.map(|r| self.loops[r].header);
-        // A single-predecessor `return` block is a pure early exit: leave it
-        // out of the view so the other arm can merge past the `if`. A shared
-        // `return` block is a real merge point and stays in.
+        // `return` blocks are not in the view: a path that returns never
+        // reaches a merge, so it must not stop the other arm from finding
+        // one. When no merge is found, `join_all` falls back to the nearest
+        // common node, which includes the shared end of the function.
         let members: Vec<usize> = self
             .reach
             .iter()
             .copied()
-            .filter(|&v| {
-                self.in_region(v, region)
-                    && (!self.succs[v].is_empty() || self.preds[v].len() >= 2)
-            })
+            .filter(|&v| self.in_region(v, region) && !self.succs[v].is_empty())
             .collect();
         let m = members.len();
         let mut local: FxHashMap<usize, usize> = FxHashMap::default();
@@ -620,26 +618,28 @@ impl Structurer {
         let mut rpred: Vec<Vec<usize>> = vec![Vec::new(); m + 1];
         for (i, &v) in members.iter().enumerate() {
             let mut vs: Vec<usize> = Vec::new();
-            // A successor that is an excluded early `return` (in the region,
-            // not in the view) makes `v` a dead end for merges: the arm that
-            // returns never reaches the merge, and the other arm must still
-            // find it. Treating `v` as an exit here made every diamond with an
-            // early return in one arm lose its post-dominator, so the merge
-            // fell back to the nearest common node and the arms escaped.
-            let mut returns_only = false;
+            // Successors that are not members are either `return` blocks
+            // (dead ends for merges: the arm that returns never reaches the
+            // merge) or real sinks (a loop exit, or the loop header). Only a
+            // real sink makes `v` an exit. Treating a return as an exit made
+            // every diamond with an early return in one arm lose its
+            // post-dominator, so the merge fell back to the nearest common
+            // node, which is not a merge and made the arms escape.
+            let mut sink = false;
             for s in &self.succs[v] {
                 if Some(s.target) == header {
+                    sink = true;
                     continue;
                 }
                 if let Some(&j) = local.get(&s.target) {
                     if !vs.contains(&j) {
                         vs.push(j);
                     }
-                } else if self.succs[s.target].is_empty() && self.in_region(s.target, region) {
-                    returns_only = true;
+                } else if !(self.succs[s.target].is_empty() && self.in_region(s.target, region)) {
+                    sink = true;
                 }
             }
-            if vs.is_empty() && !returns_only {
+            if vs.is_empty() && sink {
                 rsucc[exit].push(i);
                 rpred[i].push(exit);
             }
