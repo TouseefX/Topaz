@@ -533,9 +533,10 @@ impl Structurer {
     /// Nearest node reachable from every target (the first target's walk
     /// order decides ties).
     fn join_all(&self, targets: &[usize], region: Option<usize>, cur: usize) -> Option<usize> {
-        // Large functions have thousands of region nodes, and the shared node
-        // can sit past a small cap in breadth-first order. A capped walk can
-        // miss the join, which then copies the tail into every arm.
+        // Cap on nodes visited per walk. It was 4096. Raising it to 16384 did
+        // not change the duplicate emits on ClientRenderer, and the walk never
+        // reached the cap there, so the cap is not the cause. The note below
+        // reports any truncation.
         const LIMIT: usize = 16384;
         let header = region.and_then(|r| self.loops.get(r)).map(|l| l.header);
         let walk = |start: usize| -> (Vec<usize>, bool) {
