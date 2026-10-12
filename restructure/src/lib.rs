@@ -11,6 +11,7 @@ use tuple::Map;
 mod conditional;
 mod jump;
 mod r#loop;
+mod structured;
 
 /// Post-dominators of `graph` (virtual super-sink, no mutation).
 pub fn post_dominators<N, E>(graph: &StableDiGraph<N, E>) -> IDom<NodeIndex> {
@@ -509,5 +510,11 @@ impl GraphStructurer {
 }
 
 pub fn lift(function: cfg::function::Function) -> ast::Block {
+    // Goto-free structurer first. It only reads `function`, and returns
+    // `None` unless its output is provably clean (no goto / labels / leftover
+    // for-loop IR). Anything else falls back to the legacy goto structurer.
+    if let Some(block) = structured::try_lift(&function) {
+        return block;
+    }
     GraphStructurer::new(function).structure()
 }

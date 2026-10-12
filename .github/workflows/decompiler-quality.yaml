@@ -1,0 +1,79 @@
+name: Decompiler quality
+
+# Builds the decompiler from this branch and from main, decompiles the
+# Lua corpus in decompiler-corpus/ with both, and reports goto counts,
+# incomplete markers and whether each decompiled output still compiles.
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - 'arena/**'
+
+jobs:
+  corpus:
+    name: Corpus (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: new
+            src: .
+          - label: baseline
+            src: baseline
+    steps:
+      - name: Checkout this branch
+        uses: actions/checkout@v4
+
+      - name: Checkout main as baseline
+        if: matrix.label == 'baseline'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: baseline
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.src }}
+
+      - name: Unit tests (ast, cfg, restructure)
+        if: matrix.label == 'new'
+        run: cargo test -p ast -p cfg -p restructure --lib
+        env:
+          RUST_BACKTRACE: '1'
+
+      - name: Build topaz CLI
+        working-directory: ${{ matrix.src }}
+        run: cargo build --release -p topaz
+
+      - name: Build luau-compile
+        run: |
+          git clone --depth 1 https://github.com/luau-lang/luau.git /tmp/luau
+          cmake -S /tmp/luau -B /tmp/luau/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/luau/build --target Luau.Compile.CLI --parallel 4
+          LUAU_COMPILE="$(find /tmp/luau/build -type f -name 'luau-compile' | head -n 1)"
+          test -x "$LUAU_COMPILE"
+          echo "LUAU_COMPILE=$LUAU_COMPILE" >> "$GITHUB_ENV"
+
+      - name: Decompile corpus
+        run: |
+          bash scripts/decompile_corpus.sh \
+            "${{ matrix.src }}/target/release/topaz" \
+            "$LUAU_COMPILE" \
+            decompiler-corpus \
+            "corpus-out/${{ matrix.label }}"
+          cat "corpus-out/${{ matrix.label }}/SUMMARY.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload corpus output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: decompile-corpus-${{ matrix.label }}
+          path: corpus-out/${{ matrix.label }}
+          if-no-files-found: warn
