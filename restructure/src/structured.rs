@@ -797,23 +797,6 @@ impl Structurer {
         let hsuccs = self.succs[header].clone();
         let hstmts = self.stmts[header].clone();
 
-        let flag = if fexits.len() > 1 {
-            Some(RcLocal::default())
-        } else {
-            None
-        };
-        let mut pre: Vec<Statement> = Vec::new();
-        if let Some(f) = &flag {
-            let mut decl = Assign::new(vec![LValue::Local(f.clone())], vec![]);
-            decl.prefix = true;
-            pre.push(decl.into());
-        }
-        let inner = Ctx {
-            region: Some(l),
-            stop: None,
-            flag: flag.clone(),
-        };
-
         let body_idx: Vec<usize> = (0..hsuccs.len())
             .filter(|&i| self.loops[l].body.contains(&hsuccs[i].target))
             .collect();
@@ -833,6 +816,39 @@ impl Structurer {
             [only] => exit_idx.len() == 1 && hsuccs[exit_idx[0]].target == *only,
             _ => false,
         };
+        // The header's own exit when the header is a plain two-way node.
+        let header_exit = if hsuccs.len() == 2 && body_idx.len() == 1 && exit_idx.len() == 1 {
+            Some(hsuccs[exit_idx[0]].target)
+        } else {
+            None
+        };
+        // A `for` loop needs the flag when another real exit exists beside
+        // its header exit (a return-block header exit is copied inline).
+        let flagged = if for_like {
+            match fexits.as_slice() {
+                [] => false,
+                [only] => header_exit != Some(*only),
+                _ => true,
+            }
+        } else {
+            fexits.len() > 1
+        };
+        let flag = if flagged {
+            Some(RcLocal::default())
+        } else {
+            None
+        };
+        let mut pre: Vec<Statement> = Vec::new();
+        if let Some(f) = &flag {
+            let mut decl = Assign::new(vec![LValue::Local(f.clone())], vec![]);
+            decl.prefix = true;
+            pre.push(decl.into());
+        }
+        let inner = Ctx {
+            region: Some(l),
+            stop: None,
+            flag: flag.clone(),
+        };
 
         if for_like {
             // Only the plain shape `for` recovers; anything else is unknown IR.
@@ -840,14 +856,8 @@ impl Structurer {
             // header's own exit is one of them: the body sets the flag and
             // breaks (see `classify`), and the exits are dispatched after the
             // loop, the same way the generic form does it.
-            let shape_ok = hsuccs.len() == 2 && body_idx.len() == 1 && exit_idx.len() == 1;
-            let header_exit = if shape_ok { Some(hsuccs[exit_idx[0]].target) } else { None };
-            // With several real exits the header's exit is dispatched like any
-            // other (a return block outside the loop is copied by `classify`).
-            let exits_ok = match fexits.len() {
-                0 | 1 => single_exit,
-                _ => header_exit.is_some(),
-            };
+            let shape_ok = header_exit.is_some();
+            let exits_ok = flagged || fexits.is_empty() || header_exit == fexits.first().copied();
             if !(shape_ok && exits_ok) {
                 note(|| format!("for header {header}: unexpected shape (exits={}, fexits={}, succs={}, body={}, outside={})", exits.len(), fexits.len(), hsuccs.len(), body_idx.len(), exit_idx.len()));
                 return None;
@@ -882,7 +892,7 @@ impl Structurer {
             };
             let mut out = pre;
             out.push(stmt);
-            if fexits.len() <= 1 {
+            if !flagged {
                 if let Some(a) = parallel_assign_from_args(&es.args) {
                     out.push(a.into());
                 }
