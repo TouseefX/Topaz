@@ -712,7 +712,7 @@ impl eframe::App for TopazApp {
             ui.horizontal(|ui| {
                 ui.heading("Topaz");
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new("Luau / Lua 5.1 decompiler").weak());
+                ui.label(egui::RichText::new("Luau decompiler").weak());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     server_status_badge(ui, &state);
                 });
@@ -1417,7 +1417,7 @@ impl TopazApp {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.label(egui::RichText::new("About").strong());
             ui.add_space(4.0);
-            ui.label("Topaz · Luau and Lua 5.1 decompiler");
+            ui.label("Topaz · Luau decompiler");
             #[cfg(target_os = "android")]
             ui.label("Android build · pure Rust · eframe + NativeActivity · system clipboard + SAF browser");
             #[cfg(not(target_os = "android"))]
