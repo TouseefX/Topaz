@@ -117,6 +117,8 @@ struct Structurer {
     visits: Vec<u32>,
     /// Diagnostic: how many times each escape target was emitted.
     escapes: FxHashMap<usize, u32>,
+    /// Diagnostic: escape sites dumped so far.
+    dumps: u32,
 }
 
 /// Immediate dominators (or post-dominators) with Cooper–Harvey–Kennedy.
@@ -424,6 +426,7 @@ impl Structurer {
             spent: 0,
             visits: vec![0; n],
             escapes: FxHashMap::default(),
+            dumps: 0,
         };
 
         // For-loops: take NumForInit / GenericForInit out of the single
@@ -797,7 +800,7 @@ impl Structurer {
                     let esc: Vec<String> = esc
                         .iter()
                         .take(6)
-                        .map(|&(c, m)| format!("tail {m} x{c}"))
+                        .map(|&(c, m)| format!("tail {m} x{c} preds={:?}", self.preds[m]))
                         .collect();
                     format!(
                         "statement budget exceeded ({} > {}); most emitted: {}; escapes: {}",
@@ -855,7 +858,22 @@ impl Structurer {
                         (m, _) => (m, None),
                     };
                     if let Some(m) = escape {
-                        note(|| format!("2-way merge {m} is past enclosing stop; escape flag"));
+                        // Diagnostic dump, capped so a large function cannot flood the log.
+                        if self.dumps < 400 {
+                            self.dumps += 1;
+                            note(|| {
+                                format!(
+                                    "ESC site cur={cur} then={} else={} merge={m} stop={:?} region={:?} m_preds={:?} m_succs={:?} stop_succs={:?}",
+                                    then_s.target,
+                                    else_s.target,
+                                    ctx.stop,
+                                    ctx.region,
+                                    self.preds[m],
+                                    self.succs[m].iter().map(|x| x.target).collect::<Vec<_>>(),
+                                    ctx.stop.map(|st| self.succs[st].iter().map(|x| x.target).collect::<Vec<_>>())
+                                )
+                            });
+                        }
                     }
                     // Diagnostic only: a branch with no merge copies its
                     // continuation into both arms. Counted by arm kind.
