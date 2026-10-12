@@ -1043,14 +1043,17 @@ impl Structurer {
             return None;
         }
         let var = self.scopes[si].var.clone();
-        if !self.scopes[si].used {
-            // No path reached a target: the branch is plain code.
-            if !then_b.is_empty() || !else_b.is_empty() {
-                out.push(If::new(cond, Block(then_b), Block(else_b)).into());
-            }
-            return Some(out);
-        }
         let targets = self.scopes[si].targets.clone();
+        // Always emit the targets, even when no arm set `var`: a target is
+        // the continuation of the branch, and dropping it would leave its
+        // nodes unemitted. Its dispatch arm then stays dead.
+        note(|| {
+            format!(
+                "escape scope {si}: {} targets, used={}",
+                targets.len(),
+                self.scopes[si].used
+            )
+        });
         let mut decl = Assign::new(vec![LValue::Local(var.clone())], vec![number(0)]);
         decl.prefix = true;
         out.push(decl.into());
