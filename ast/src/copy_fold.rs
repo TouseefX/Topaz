@@ -367,27 +367,72 @@ fn inline_consecutive(
             i += 1;
             continue;
         }
-        if lvalue_object_is(&block.0[i + 1], &local) {
+        let Some(j) = find_reader(block, i, &local, &expr) else {
+            i += 1;
+            continue;
+        };
+        if lvalue_object_is(&block.0[j], &local) {
             i += 1;
             continue;
         }
-        let reads_next = block.0[i + 1]
-            .values_read()
-            .iter()
-            .any(|l| *l == &local);
-        if !reads_next {
+        if stmt_captures_upvalue(&block.0[j], &local) {
             i += 1;
             continue;
         }
-        if stmt_captures_upvalue(&block.0[i + 1], &local) {
-            i += 1;
-            continue;
-        }
-        replace_local_in_stmt(&mut block.0[i + 1], &local, expr);
+        replace_local_in_stmt(&mut block.0[j], &local, expr);
         block.0.remove(i);
         changed = true;
     }
     changed
+}
+
+/// How far past its definition a value may be carried to its reader.
+const MAX_INLINE_SKIP: usize = 32;
+
+/// An expression that cannot run a call, so moving it past other pure
+/// declarations cannot reorder a side effect. Reads of locals, globals and
+/// fields are allowed.
+fn is_pure_rvalue(rv: &RValue) -> bool {
+    match rv {
+        RValue::Local(_) | RValue::Global(_) | RValue::Literal(_) | RValue::Closure(_) => true,
+        RValue::Index(i) => is_pure_rvalue(&i.left) && is_pure_rvalue(&i.right),
+        RValue::Binary(b) => is_pure_rvalue(&b.left) && is_pure_rvalue(&b.right),
+        RValue::Unary(u) => is_pure_rvalue(&u.value),
+        RValue::Table(t) => t.0.iter().all(|(k, v)| {
+            k.as_ref().is_none_or(is_pure_rvalue) && is_pure_rvalue(v)
+        }),
+        RValue::Call(_) | RValue::MethodCall(_) | RValue::VarArg(_) | RValue::Select(_) => false,
+    }
+}
+
+/// A `local x = <pure>` declaration: it runs no call and writes only its
+/// own new locals.
+fn is_pure_local_decl(stmt: &Statement) -> bool {
+    let Statement::Assign(a) = stmt else {
+        return false;
+    };
+    a.prefix
+        && a.left.iter().all(|l| l.as_local().is_some())
+        && a.right.iter().all(is_pure_rvalue)
+}
+
+/// The statement that reads `local`, found by scanning forward from `i`.
+/// The first statement may be the reader directly. Pure local declarations
+/// may sit in between when the value is itself pure, so the value can move
+/// past them without reordering a call. Any other statement stops the scan.
+fn find_reader(block: &Block, i: usize, local: &RcLocal, expr: &RValue) -> Option<usize> {
+    let expr_pure = is_pure_rvalue(expr);
+    for j in i + 1..block.0.len().min(i + 2 + MAX_INLINE_SKIP) {
+        let stmt = &block.0[j];
+        if stmt.values_read().iter().any(|l| *l == local) {
+            return (j == i + 1 || expr_pure).then_some(j);
+        }
+        let writes_local = stmt.values_written().iter().any(|l| *l == local);
+        if writes_local || !is_pure_local_decl(stmt) {
+            return None;
+        }
+    }
+    None
 }
 
 fn merge_decl_assign(block: &mut Block) {
