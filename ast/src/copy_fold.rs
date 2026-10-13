@@ -634,6 +634,61 @@ pub fn apply_protected(block: &mut Block, protected: &HashSet<RcLocal>) {
     let mut reads = HashSet::new();
     collect_reads(block, &mut reads);
     dce_unused(block, &reads, &captured);
+    if block.0.len() > 500 && std::env::var_os("TOPAZ_DEBUG_INLINE").is_some() {
+        let mut counts = HashMap::new();
+        collect_read_counts(block, &mut counts);
+        debug_reject_reasons(block, &counts, &captured);
+    }
+}
+
+/// Debug only (`TOPAZ_DEBUG_INLINE`): after folding, why each top-level
+/// `local x = e` whose value is read once is still a local. Reasons are
+/// checked in the same order as `inline_consecutive`.
+fn debug_reject_reasons(block: &Block, counts: &HashMap<RcLocal, usize>, skip: &HashSet<RcLocal>) {
+    let (mut skipped, mut ctor, mut multi, mut nomatch, mut lvalue, mut upval, mut ok) =
+        (0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    let mut total = 0usize;
+    let mut i = 0;
+    while i + 1 < block.0.len() {
+        let Some((local, expr)) = assigned_local(&block.0[i]) else {
+            i += 1;
+            continue;
+        };
+        total += 1;
+        if skip.contains(&local) {
+            skipped += 1;
+        } else if is_constructor_like(&expr) {
+            ctor += 1;
+        } else if counts.get(&local).copied().unwrap_or(0) != 1 {
+            multi += 1;
+        } else {
+            match find_reader(block, i, &local, &expr) {
+                None => nomatch += 1,
+                Some(j) => {
+                    if lvalue_object_is(&block.0[j], &local) {
+                        lvalue += 1;
+                    } else if stmt_captures_upvalue(&block.0[j], &local) {
+                        upval += 1;
+                    } else {
+                        ok += 1;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    eprintln!(
+        "[inline] stmts={} local_decls={} skip={} ctor={} read_count_not_1={} no_reader={} lvalue_obj={} upvalue={} would_inline={}",
+        block.0.len(),
+        total,
+        skipped,
+        ctor,
+        multi,
+        nomatch,
+        lvalue,
+        upval,
+        ok
+    );
 }
 
 #[cfg(test)]
