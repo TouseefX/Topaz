@@ -137,7 +137,12 @@ fn debug_local_stats(block: &Block, decls: &[Decl]) {
     top.truncate(8);
     let top_level = decls.iter().filter(|d| d.top_level).count();
     let in_loop = decls.iter().filter(|d| d.in_loop).count();
-    let mentions = format!("{:?}", block).contains("ClientRenderRequest");
+    // Literal::String holds bytes, so its Debug form is a byte list.
+    let needle: Vec<String> = "ClientRenderRequest"
+        .bytes()
+        .map(|b| b.to_string())
+        .collect();
+    let mentions = format!("{:?}", block).contains(&needle.join(", "));
     eprintln!(
         "[spill-stats] decls={} top_level={} in_loop={} bare={} reads0={} reads1={} reads2plus={} mentions_ClientRenderRequest={} prefixes={:?}",
         decls.len(),
