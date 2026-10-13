@@ -359,7 +359,7 @@ fn inline_consecutive(
             i += 1;
             continue;
         }
-        if is_constructor_like(&expr) {
+        if is_constructor_like(&expr) && !matches!(expr, RValue::Select(_)) {
             i += 1;
             continue;
         }
@@ -416,6 +416,95 @@ fn is_pure_local_decl(stmt: &Statement) -> bool {
         && a.right.iter().all(is_pure_rvalue)
 }
 
+/// Order of evaluation of an expression, as far as `local` is concerned.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Eval {
+    /// `local` is read before any call runs.
+    Found,
+    /// A call runs before `local` is read, or the call itself runs.
+    Effect,
+    /// No call runs and `local` is not read.
+    Pure,
+}
+
+fn eval_seq<'a>(items: impl Iterator<Item = &'a RValue>, local: &RcLocal) -> Eval {
+    for item in items {
+        match eval_first(item, local) {
+            Eval::Pure => continue,
+            other => return other,
+        }
+    }
+    Eval::Pure
+}
+
+/// A call evaluates its operands first and runs itself last, so it is always
+/// an effect; `local` only counts when it is read among the operands.
+fn call_eval<'a>(items: impl Iterator<Item = &'a RValue>, local: &RcLocal) -> Eval {
+    match eval_seq(items, local) {
+        Eval::Found => Eval::Found,
+        _ => Eval::Effect,
+    }
+}
+
+fn eval_first(rv: &RValue, local: &RcLocal) -> Eval {
+    match rv {
+        RValue::Local(l) => {
+            if l == local {
+                Eval::Found
+            } else {
+                Eval::Pure
+            }
+        }
+        RValue::Global(_) | RValue::Literal(_) | RValue::Closure(_) | RValue::VarArg(_) => {
+            Eval::Pure
+        }
+        RValue::Index(i) => eval_seq([i.left.as_ref(), i.right.as_ref()].into_iter(), local),
+        RValue::Binary(b) => eval_seq([b.left.as_ref(), b.right.as_ref()].into_iter(), local),
+        RValue::Unary(u) => eval_first(&u.value, local),
+        RValue::Table(t) => eval_seq(
+            t.0.iter().flat_map(|(k, v)| k.iter().chain(std::iter::once(v))),
+            local,
+        ),
+        RValue::Call(c) => call_eval(
+            std::iter::once(c.value.as_ref()).chain(c.arguments.iter()),
+            local,
+        ),
+        RValue::MethodCall(m) => call_eval(
+            std::iter::once(m.value.as_ref()).chain(m.arguments.iter()),
+            local,
+        ),
+        RValue::Select(Select::Call(c)) => call_eval(
+            std::iter::once(c.value.as_ref()).chain(c.arguments.iter()),
+            local,
+        ),
+        RValue::Select(Select::MethodCall(m)) => call_eval(
+            std::iter::once(m.value.as_ref()).chain(m.arguments.iter()),
+            local,
+        ),
+        RValue::Select(Select::VarArg(_)) => Eval::Pure,
+    }
+}
+
+/// Whether the statement reads `local` before running any call, so a call
+/// moved into that read keeps the original order of effects.
+fn reads_before_any_call(stmt: &Statement, local: &RcLocal) -> bool {
+    let eval = match stmt {
+        Statement::Assign(a) => {
+            if a.left.iter().any(|l| !matches!(l, LValue::Local(_))) {
+                return false;
+            }
+            eval_seq(a.right.iter(), local)
+        }
+        Statement::If(st) => eval_seq(std::iter::once(&st.condition), local),
+        Statement::Call(c) => call_eval(
+            std::iter::once(c.value.as_ref()).chain(c.arguments.iter()),
+            local,
+        ),
+        _ => return false,
+    };
+    eval == Eval::Found
+}
+
 /// The statement that reads `local`, found by scanning forward from `i`.
 /// The first statement may be the reader directly. Pure local declarations
 /// may sit in between when the value is itself pure, so the value can move
@@ -425,7 +514,13 @@ fn find_reader(block: &Block, i: usize, local: &RcLocal, expr: &RValue) -> Optio
     for j in i + 1..block.0.len().min(i + 2 + MAX_INLINE_SKIP) {
         let stmt = &block.0[j];
         if stmt.values_read().iter().any(|l| *l == local) {
-            return (j == i + 1 || expr_pure).then_some(j);
+            return if expr_pure {
+                Some(j)
+            } else if matches!(expr, RValue::Select(_)) {
+                reads_before_any_call(stmt, local).then_some(j)
+            } else {
+                (j == i + 1).then_some(j)
+            };
         }
         let writes_local = stmt.values_written().iter().any(|l| *l == local);
         if writes_local || !is_pure_local_decl(stmt) {
@@ -657,7 +752,7 @@ fn debug_reject_reasons(block: &Block, counts: &HashMap<RcLocal, usize>, skip: &
         total += 1;
         if skip.contains(&local) {
             skipped += 1;
-        } else if is_constructor_like(&expr) {
+        } else if is_constructor_like(&expr) && !matches!(expr, RValue::Select(_)) {
             ctor += 1;
         } else if counts.get(&local).copied().unwrap_or(0) != 1 {
             multi += 1;
@@ -725,6 +820,48 @@ mod tests {
             !printed.contains("local v"),
             "temp should be gone: {printed}"
         );
+    }
+
+    #[test]
+    fn inlines_single_value_call_into_first_read() {
+        // local ty = typeof(req); assert(ty, "msg")  ->  assert(typeof(req), "msg")
+        let ty = named("ty");
+        let typeof_call = crate::Select::Call(Call::new(
+            crate::Global::new(b"typeof".to_vec()).into(),
+            vec![RValue::Local(named("req"))],
+        ));
+        let mut decl = Assign::new(vec![ty.clone().into()], vec![RValue::Select(typeof_call)]);
+        decl.prefix = true;
+        let assert_call = Call::new(
+            crate::Global::new(b"assert".to_vec()).into(),
+            vec![RValue::Local(ty), Literal::String(b"msg".to_vec()).into()],
+        );
+        let mut block = Block(vec![decl.into(), Statement::Call(assert_call)]);
+        apply(&mut block);
+        let printed = block.to_string();
+        assert!(printed.contains("typeof(req)"), "expected inlined call: {printed}");
+        assert!(!printed.contains("local ty"), "temp should be gone: {printed}");
+    }
+
+    #[test]
+    fn keeps_single_value_call_when_another_call_runs_first() {
+        // local ty = typeof(req); assert(f(), ty)  must keep f() before typeof(req).
+        let ty = named("ty");
+        let typeof_call = crate::Select::Call(Call::new(
+            crate::Global::new(b"typeof".to_vec()).into(),
+            vec![RValue::Local(named("req"))],
+        ));
+        let mut decl = Assign::new(vec![ty.clone().into()], vec![RValue::Select(typeof_call)]);
+        decl.prefix = true;
+        let f_call = Call::new(crate::Global::new(b"f".to_vec()).into(), vec![]);
+        let assert_call = Call::new(
+            crate::Global::new(b"assert".to_vec()).into(),
+            vec![RValue::Call(f_call), RValue::Local(ty)],
+        );
+        let mut block = Block(vec![decl.into(), Statement::Call(assert_call)]);
+        apply(&mut block);
+        let printed = block.to_string();
+        assert!(printed.contains("local ty"), "call order must be kept: {printed}");
     }
 
     #[test]
