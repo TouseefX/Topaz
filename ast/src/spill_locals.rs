@@ -212,6 +212,17 @@ fn debug_use_gaps(block: &Block, decls: &[Decl]) {
         let gap = j.saturating_sub(i);
         if gap <= 1 {
             g1 += 1;
+            if g1 <= 3 {
+                let d = format!("{:?}", block.0[i]);
+                let u = format!("{:?}", block.0[j]);
+                eprintln!(
+                    "[spill-gap-sample] decl@{} {} | use@{} {}",
+                    i,
+                    d.chars().take(400).collect::<String>(),
+                    j,
+                    u.chars().take(400).collect::<String>()
+                );
+            }
         } else if gap <= 32 {
             g32 += 1;
         } else if gap <= 256 {
