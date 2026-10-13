@@ -195,6 +195,10 @@ fn spill_function(block: &mut Block) {
 /// finds the cut. If even moving every candidate is not enough, all of them are
 /// returned.
 fn choose_minimal(block: &Block, candidates: &[RcLocal]) -> Vec<RcLocal> {
+    // The spill table is itself a local, live for the whole body, and it is
+    // declared after this measurement. The peak after spilling must leave room
+    // for it, or Luau rejects the 201st local.
+    let target = TARGET_ACTIVE_LOCALS - 1;
     let peak_moving_first = |k: usize| -> usize {
         let excluded: HashSet<RcLocal> = candidates[..k].iter().cloned().collect();
         let mut decls: Vec<Decl> = Vec::new();
@@ -204,13 +208,13 @@ fn choose_minimal(block: &Block, candidates: &[RcLocal]) -> Vec<RcLocal> {
     let (mut lo, mut hi) = (0usize, candidates.len());
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        if peak_moving_first(mid) <= TARGET_ACTIVE_LOCALS {
+        if peak_moving_first(mid) <= target {
             hi = mid;
         } else {
             lo = mid + 1;
         }
     }
-    if peak_moving_first(lo) > TARGET_ACTIVE_LOCALS {
+    if peak_moving_first(lo) > target {
         return candidates.to_vec();
     }
     candidates[..lo].to_vec()
