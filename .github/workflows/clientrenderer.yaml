@@ -173,7 +173,7 @@ jobs:
           if [ -n "$cerr" ]; then
             printf '::notice title=luau-compile errors (%s)::%s\n' "$label" "$(printf '%s\n' "$cerr" | esc)"
           fi
-          spill=$(grep -h '^\[spill\]' out/topaz.log 2>/dev/null | head -n 40 | cut -c1-240 || true)
+          spill=$(grep -h '^\[spill' out/topaz.log 2>/dev/null | head -n 40 | cut -c1-1200 || true)
           printf '::notice title=spilled locals (%s)::%s\n' "$label" "$(printf '%s\n' "$spill" | esc)"
           errline=$(sed -n 's/.*ClientRenderer\.luau(\([0-9]*\),.*/\1/p' out/compile.err 2>/dev/null | head -n 1 || true)
           if [ -n "$errline" ] && [ -f "$out" ]; then

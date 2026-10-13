@@ -110,6 +110,98 @@ struct Decl {
 /// Handles one function body. Nested closures are not measured here, because
 /// each closure is its own Luau function. Their references to moved locals are
 /// still rewritten.
+/// Debug only (`TOPAZ_DEBUG_SPILL`): what the declared locals of an
+/// oversized body are. Counts declarations with no initializer, reads per
+/// local, top-level versus nested declarations, the most common name
+/// prefixes, and whether the body mentions the string "ClientRenderRequest".
+fn debug_local_stats(block: &Block, decls: &[Decl]) {
+    let mut reads: HashMap<RcLocal, usize> = HashMap::new();
+    let mut bare: HashSet<RcLocal> = HashSet::new();
+    count_reads(block, &mut reads, &mut bare);
+    let (mut r0, mut r1, mut r2) = (0usize, 0usize, 0usize);
+    let mut prefixes: HashMap<String, usize> = HashMap::new();
+    for d in decls {
+        match reads.get(&d.local).copied().unwrap_or(0) {
+            0 => r0 += 1,
+            1 => r1 += 1,
+            _ => r2 += 1,
+        }
+        let name = d.local.0 .0.lock().0.clone().unwrap_or_default();
+        let prefix: String = name
+            .trim_end_matches(|c: char| c.is_ascii_digit())
+            .to_string();
+        *prefixes.entry(prefix).or_insert(0) += 1;
+    }
+    let mut top: Vec<(String, usize)> = prefixes.into_iter().collect();
+    top.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    top.truncate(8);
+    let top_level = decls.iter().filter(|d| d.top_level).count();
+    let in_loop = decls.iter().filter(|d| d.in_loop).count();
+    let mentions = format!("{:?}", block).contains("ClientRenderRequest");
+    eprintln!(
+        "[spill-stats] decls={} top_level={} in_loop={} bare={} reads0={} reads1={} reads2plus={} mentions_ClientRenderRequest={} prefixes={:?}",
+        decls.len(),
+        top_level,
+        in_loop,
+        bare.len(),
+        r0,
+        r1,
+        r2,
+        mentions,
+        top
+    );
+}
+
+/// Read counts per local and the set of locals declared without a value,
+/// over the whole body (nested blocks included, closure bodies excluded).
+fn count_reads(block: &Block, reads: &mut HashMap<RcLocal, usize>, bare: &mut HashSet<RcLocal>) {
+    for statement in &block.0 {
+        if let Statement::Assign(assign) = statement {
+            if assign.prefix && assign.right.is_empty() {
+                for lv in &assign.left {
+                    if let LValue::Local(l) = lv {
+                        bare.insert(l.clone());
+                    }
+                }
+            }
+        }
+        for local in statement.values_read() {
+            *reads.entry(local.clone()).or_insert(0) += 1;
+        }
+        match statement {
+            Statement::If(r#if) => {
+                if let Some(b) = r#if.then_block.try_lock() {
+                    count_reads(&b, reads, bare);
+                }
+                if let Some(b) = r#if.else_block.try_lock() {
+                    count_reads(&b, reads, bare);
+                }
+            }
+            Statement::While(r#while) => {
+                if let Some(b) = r#while.block.try_lock() {
+                    count_reads(&b, reads, bare);
+                }
+            }
+            Statement::Repeat(repeat) => {
+                if let Some(b) = repeat.block.try_lock() {
+                    count_reads(&b, reads, bare);
+                }
+            }
+            Statement::NumericFor(numeric_for) => {
+                if let Some(b) = numeric_for.block.try_lock() {
+                    count_reads(&b, reads, bare);
+                }
+            }
+            Statement::GenericFor(generic_for) => {
+                if let Some(b) = generic_for.block.try_lock() {
+                    count_reads(&b, reads, bare);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn spill_function(block: &mut Block) {
     // A body that already has its spill table (a shared body reached twice)
     // is done. A second table with the same name would shadow the first.
@@ -130,6 +222,9 @@ fn spill_function(block: &mut Block) {
     let peak = scan_block(block, 0, false, 0, &none, &mut decls, &mut seen);
     if peak <= TARGET_ACTIVE_LOCALS {
         return;
+    }
+    if std::env::var_os("TOPAZ_DEBUG_SPILL").is_some() {
+        debug_local_stats(block, &decls);
     }
 
     // Locals a closure references, so a closure may observe their value.
