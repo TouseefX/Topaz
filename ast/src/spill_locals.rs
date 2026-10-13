@@ -157,6 +157,81 @@ fn debug_local_stats(block: &Block, decls: &[Decl]) {
     );
 }
 
+/// Debug only: for top-level declarations read exactly once, how many
+/// top-level statements separate the declaration from its read. Also counts
+/// top-level declarations that are plain copies (`local a = b`).
+fn debug_use_gaps(block: &Block, decls: &[Decl]) {
+    let top: HashSet<RcLocal> = decls
+        .iter()
+        .filter(|d| d.top_level)
+        .map(|d| d.local.clone())
+        .collect();
+    let mut def: HashMap<RcLocal, usize> = HashMap::new();
+    let mut copies = 0usize;
+    for (i, statement) in block.0.iter().enumerate() {
+        if let Statement::Assign(assign) = statement {
+            if !assign.prefix {
+                continue;
+            }
+            if assign.left.len() == 1
+                && assign.right.len() == 1
+                && matches!(assign.right[0], RValue::Local(_))
+            {
+                copies += 1;
+            }
+            for lv in &assign.left {
+                if let LValue::Local(l) = lv {
+                    if top.contains(l) {
+                        def.entry(l.clone()).or_insert(i);
+                    }
+                }
+            }
+        }
+    }
+    let mut uses: HashMap<RcLocal, Vec<usize>> = HashMap::new();
+    let mut total: HashMap<RcLocal, usize> = HashMap::new();
+    for (j, statement) in block.0.iter().enumerate() {
+        let one = Block(vec![statement.clone()]);
+        let mut reads: HashMap<RcLocal, usize> = HashMap::new();
+        let mut bare: HashSet<RcLocal> = HashSet::new();
+        count_reads(&one, &mut reads, &mut bare);
+        for (l, n) in reads {
+            if def.contains_key(&l) {
+                *total.entry(l.clone()).or_insert(0) += n;
+                uses.entry(l).or_default().push(j);
+            }
+        }
+    }
+    let (mut g1, mut g32, mut g256, mut gfar, mut single) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    for (l, &i) in &def {
+        if total.get(l).copied().unwrap_or(0) != 1 {
+            continue;
+        }
+        single += 1;
+        let j = uses.get(l).and_then(|v| v.first().copied()).unwrap_or(i);
+        let gap = j.saturating_sub(i);
+        if gap <= 1 {
+            g1 += 1;
+        } else if gap <= 32 {
+            g32 += 1;
+        } else if gap <= 256 {
+            g256 += 1;
+        } else {
+            gfar += 1;
+        }
+    }
+    eprintln!(
+        "[spill-gaps] top_level_decls={} copies={} single_read={} gap<=1:{} gap<=32:{} gap<=256:{} gap>256:{}",
+        def.len(),
+        copies,
+        single,
+        g1,
+        g32,
+        g256,
+        gfar
+    );
+}
+
 /// Read counts per local and the set of locals declared without a value,
 /// over the whole body (nested blocks included, closure bodies excluded).
 fn count_reads(block: &Block, reads: &mut HashMap<RcLocal, usize>, bare: &mut HashSet<RcLocal>) {
@@ -230,6 +305,7 @@ fn spill_function(block: &mut Block) {
     }
     if std::env::var_os("TOPAZ_DEBUG_SPILL").is_some() {
         debug_local_stats(block, &decls);
+        debug_use_gaps(block, &decls);
     }
 
     // Locals a closure references, so a closure may observe their value.
