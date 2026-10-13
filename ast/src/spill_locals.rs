@@ -26,9 +26,12 @@ use crate::{
     Traverse,
 };
 
-/// Peak number of simultaneously active locals a function may use. Luau's
-/// limit is 200. The margin covers temporaries used by expressions.
-pub const TARGET_ACTIVE_LOCALS: usize = 150;
+/// Peak number of simultaneously active locals a function may use. This is
+/// Luau's own limit (`exceeded limit 200`): only the number of active locals
+/// counts against it, not expression temporaries, so no extra margin is kept.
+/// Functions that fit are left alone, so only the functions Luau would reject
+/// get a `_spilled` table.
+pub const TARGET_ACTIVE_LOCALS: usize = 200;
 
 /// Hidden registers a Luau `for` loop keeps for its iteration state.
 const LOOP_HIDDEN_REGISTERS: usize = 3;
