@@ -769,15 +769,6 @@ impl<'a, W: fmt::Write> Formatter<'a, W> {
             .map(|b| b.is_empty())
             .unwrap_or(true);
 
-        // `if true then ... end` with no else is a scope (see spill_locals).
-        if else_empty && matches!(r#if.condition, RValue::Literal(Literal::Boolean(true))) {
-            writeln!(self.output, "do")?;
-            self.format_shared_block(&r#if.then_block)?;
-            writeln!(self.output)?;
-            self.indent()?;
-            return write!(self.output, "end");
-        }
-
         if then_empty && !else_empty {
             write!(self.output, "if ")?;
             let cond = Unary::new(r#if.condition.clone(), UnaryOperation::Not).reduce_condition();
