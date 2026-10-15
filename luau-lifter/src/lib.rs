@@ -1128,8 +1128,9 @@ fn scope_note(
     seed: &[ast::RcLocal],
     counts: &mut Vec<String>,
     examples: &mut Vec<String>,
+    closures: bool,
 ) {
-    let r = ast::scope_check::check_function(body, seed, false);
+    let r = ast::scope_check::check_function(body, seed, closures);
     counts.push(format!("{}={}/{}", stage, r.unresolved, r.skipped_blocks));
     for e in r.examples {
         if examples.len() < 60 {
@@ -1317,7 +1318,10 @@ fn decompile_function(
 
     let mut body = Arc::try_unwrap(block).unwrap().into_inner();
     if scope_on {
-        scope_note("declare", &mut body, &scope_seed, &mut scope_counts, &mut scope_examples);
+        scope_note("declare", &mut body, &scope_seed, &mut scope_counts, &mut scope_examples, false);
+        // Same check, but entering the closures in the body: a local that a
+        // closure uses while this function never declares it shows up here.
+        scope_note("declare_sub", &mut body, &scope_seed, &mut scope_counts, &mut scope_examples, true);
         let mut lines = vec![format!(
             "TOPAZ_SCOPE function line {:?}: {}",
             func_line,
