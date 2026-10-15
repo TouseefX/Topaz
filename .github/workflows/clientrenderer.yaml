@@ -26,6 +26,8 @@ on:
       - 'restructure/**'
       - 'cfg/**'
       - 'ast/**'
+      - 'reference/**'
+      - 'scripts/compare_decompile.py'
 
 env:
   BYTECODE: ClientRenderer_LocalScript_88615311464962_Bytecode.txt
@@ -72,10 +74,13 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/luau-lang/luau.git /tmp/luau
           cmake -S /tmp/luau -B /tmp/luau/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build /tmp/luau/build --target Luau.Compile.CLI --parallel 4
+          cmake --build /tmp/luau/build --target Luau.Compile.CLI Luau.Analyze.CLI --parallel 4
           LUAU_COMPILE="$(find /tmp/luau/build -type f -name 'luau-compile' | head -n 1)"
           test -x "$LUAU_COMPILE"
           echo "LUAU_COMPILE=$LUAU_COMPILE" >> "$GITHUB_ENV"
+          LUAU_ANALYZE="$(find /tmp/luau/build -type f -name 'luau-analyze' | head -n 1)"
+          test -x "$LUAU_ANALYZE"
+          echo "LUAU_ANALYZE=$LUAU_ANALYZE" >> "$GITHUB_ENV"
 
       - name: Decompile ClientRenderer (bounded)
         env:
@@ -182,6 +187,20 @@ jobs:
             printf '::notice title=compile error context (%s)::%s\n' "$label" "$(printf '%s\n' "$ectx" | esc)"
           fi
           echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+
+      - name: Compare with the cleaned reference
+        if: always() && matrix.label == 'new'
+        run: |
+          esc() { sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/$/%0A/' | tr -d '\n'; }
+          python3 scripts/compare_decompile.py reference/ClientRenderer.cleaned.luau out/ClientRenderer.luau "$LUAU_COMPILE" "$LUAU_ANALYZE" > out/compare.txt 2>&1 || echo "compare script exit=$?" >> out/compare.txt
+          cat out/compare.txt >> "$GITHUB_STEP_SUMMARY"
+          split -C 2800 -d -a 2 out/compare.txt out/cmp_
+          n=0
+          for part in out/cmp_*; do
+            n=$((n+1))
+            [ "$n" -le 40 ] || break
+            printf '::notice title=compare with cleaned reference %s::%s\n' "$n" "$(cat "$part" | esc)"
+          done
 
       - name: Upload ClientRenderer output
         if: always()
