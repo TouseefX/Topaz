@@ -359,7 +359,7 @@ fn inline_consecutive(
             i += 1;
             continue;
         }
-        if is_constructor_like(&expr) && !matches!(expr, RValue::Select(_)) {
+        if is_constructor_like(&expr) && !matches!(expr, RValue::Select(_) | RValue::Closure(_)) {
             i += 1;
             continue;
         }
@@ -800,7 +800,7 @@ fn debug_reject_reasons(block: &Block, counts: &HashMap<RcLocal, usize>, skip: &
         total += 1;
         let outcome = if skip.contains(&local) {
             "skip"
-        } else if is_constructor_like(&expr) && !matches!(expr, RValue::Select(_)) {
+        } else if is_constructor_like(&expr) && !matches!(expr, RValue::Select(_) | RValue::Closure(_)) {
             "ctor"
         } else if counts.get(&local).copied().unwrap_or(0) != 1 {
             "multi"
