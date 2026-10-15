@@ -294,7 +294,19 @@ def main(argv):
     with open(output, encoding="utf-8", errors="replace") as fh:
         scope_lines = [l.strip() for l in fh if l.strip().startswith("-- TOPAZ_SCOPE")]
     report.append(f"topaz scope check lines in output: {len(scope_lines)}")
-    report.extend(scope_lines[:300])
+    sums = {"declare": 0, "post": 0}
+    nonzero = []
+    for l in scope_lines:
+        m = re.search(r"TOPAZ_SCOPE function line .*?: (declare|post)=(\d+)/", l)
+        if m:
+            sums[m.group(1)] += int(m.group(2))
+            if int(m.group(2)) and len(nonzero) < 40:
+                nonzero.append(l)
+    report.append(
+        f"per-function unresolved summed over all functions: declare {sums['declare']}, post {sums['post']}"
+    )
+    report.extend(nonzero)
+    report.extend(scope_lines[:200])
 
     print("\n".join(report))
     return 0

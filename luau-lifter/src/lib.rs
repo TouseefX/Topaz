@@ -1092,6 +1092,25 @@ fn finish_function(
         ast_function.body = body;
         if post && !ast_function.body.0.is_empty() && ast_function.body.0.len() < 250_000 {
             post_process::apply_all_with_upvalues(&mut ast_function.body, &upvalues_in);
+            if std::env::var_os("TOPAZ_SCOPE_CHECK").is_some() {
+                let seed: Vec<ast::RcLocal> = upvalues_in
+                    .iter()
+                    .chain(params.iter())
+                    .cloned()
+                    .collect();
+                let mut counts: Vec<String> = Vec::new();
+                let mut examples: Vec<String> = Vec::new();
+                scope_note("post", &mut ast_function.body, &seed, &mut counts, &mut examples);
+                let mut lines = vec![format!(
+                    "TOPAZ_SCOPE function line {:?}: {}",
+                    func_line,
+                    counts.join(" ")
+                )];
+                lines.extend(examples);
+                for text in lines.into_iter().rev() {
+                    ast_function.body.0.insert(0, ast::Comment::new(text).into());
+                }
+            }
         }
         ast_function.parameters = params;
         ast_function.is_variadic = is_variadic;
