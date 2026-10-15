@@ -173,12 +173,23 @@ fn check_statement(
     // below, inside that scope.
     let before = report.unresolved;
     if !matches!(statement, Statement::Repeat(_)) {
-        let reads: Vec<RcLocal> = statement.values_read().into_iter().cloned().collect();
+        // Read the expression tree itself. A closure's `values_read` also lists
+        // its upvalues, which are not printed and may still name a local that
+        // was moved elsewhere, so they are left out here.
+        let mut reads: Vec<RcLocal> = Vec::new();
+        let mut writes: Vec<RcLocal> = Vec::new();
+        statement.post_traverse_values(&mut |value| -> Option<()> {
+            match value {
+                Either::Left(LValue::Local(local)) => writes.push(local.clone()),
+                Either::Right(RValue::Local(local)) => reads.push(local.clone()),
+                _ => {}
+            }
+            None
+        });
         for local in &reads {
             check_use(local, scope, line, report);
         }
         if !declares {
-            let writes: Vec<RcLocal> = statement.values_written().into_iter().cloned().collect();
             for local in &writes {
                 check_use(local, scope, line, report);
             }
