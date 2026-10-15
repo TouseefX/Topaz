@@ -1131,7 +1131,10 @@ fn scope_note(
     closures: bool,
 ) {
     let r = ast::scope_check::check_function(body, seed, closures);
-    counts.push(format!("{}={}/{}", stage, r.unresolved, r.skipped_blocks));
+    counts.push(format!(
+        "{}={}/{}/{}",
+        stage, r.unresolved, r.never_declared, r.skipped_blocks
+    ));
     for e in r.examples {
         if examples.len() < 60 {
             examples.push(format!("TOPAZ_SCOPE {} fn: {}", stage, e));
