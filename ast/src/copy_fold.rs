@@ -351,7 +351,7 @@ fn inline_consecutive(
     });
     let mut i = 0;
     while i + 1 < block.0.len() {
-        let Some((local, expr)) = assigned_local(&block.0[i]) else {
+        let Some((local, expr)) = inline_candidate(&block.0[i]) else {
             i += 1;
             continue;
         };
@@ -367,7 +367,7 @@ fn inline_consecutive(
             i += 1;
             continue;
         }
-        let Some(j) = find_reader(block, i, &local, &expr) else {
+        let Some(j) = find_reader(block, i, &local, &expr, skip) else {
             i += 1;
             continue;
         };
@@ -505,25 +505,58 @@ fn reads_before_any_call(stmt: &Statement, local: &RcLocal) -> bool {
     eval == Eval::Found
 }
 
+/// The value a declaration `local x = e` would inline. A call in a
+/// single-local declaration is truncated to one value; `Select` is the form
+/// that keeps that truncation when the value moves into another expression.
+fn inline_candidate(stmt: &Statement) -> Option<(RcLocal, RValue)> {
+    let (local, expr) = assigned_local(stmt)?;
+    let expr = match expr {
+        RValue::Call(c) => RValue::Select(Select::Call(c)),
+        RValue::MethodCall(m) => RValue::Select(Select::MethodCall(m)),
+        other => other,
+    };
+    Some((local, expr))
+}
+
 /// The statement that reads `local`, found by scanning forward from `i`.
-/// The first statement may be the reader directly. Pure local declarations
-/// may sit in between when the value is itself pure, so the value can move
-/// past them without reordering a call. Any other statement stops the scan.
-fn find_reader(block: &Block, i: usize, local: &RcLocal, expr: &RValue) -> Option<usize> {
-    let expr_pure = is_pure_rvalue(expr);
+///
+/// A value that depends on calls or table state (anything but a local, a
+/// literal or a closure) must be read before any call in the reader.
+/// Between the definition and the reader, only pure local declarations may
+/// sit, or, for a plain local copy `x = b` where `b` is not captured, simple
+/// assignments and calls that do not write `b`.
+fn find_reader(
+    block: &Block,
+    i: usize,
+    local: &RcLocal,
+    expr: &RValue,
+    skip: &HashSet<RcLocal>,
+) -> Option<usize> {
+    let copy_src = match expr {
+        RValue::Local(b) if !skip.contains(b) => Some(b),
+        _ => None,
+    };
+    let needs_order = !matches!(
+        expr,
+        RValue::Local(_) | RValue::Literal(_) | RValue::Closure(_)
+    );
     for j in i + 1..block.0.len().min(i + 2 + MAX_INLINE_SKIP) {
         let stmt = &block.0[j];
         if stmt.values_read().iter().any(|l| *l == local) {
-            return if expr_pure {
-                Some(j)
-            } else if matches!(expr, RValue::Select(_)) {
-                reads_before_any_call(stmt, local).then_some(j)
-            } else {
-                (j == i + 1).then_some(j)
-            };
+            return (!needs_order || reads_before_any_call(stmt, local)).then_some(j);
         }
-        let writes_local = stmt.values_written().iter().any(|l| *l == local);
-        if writes_local || !is_pure_local_decl(stmt) {
+        if stmt.values_written().iter().any(|l| *l == local) {
+            return None;
+        }
+        if let Some(src) = copy_src {
+            if stmt.values_written().iter().any(|l| *l == src) {
+                return None;
+            }
+            if matches!(stmt, Statement::Assign(_) | Statement::Call(_)) {
+                continue;
+            }
+        }
+        if !is_pure_local_decl(stmt) {
             return None;
         }
     }
@@ -745,7 +778,7 @@ fn debug_reject_reasons(block: &Block, counts: &HashMap<RcLocal, usize>, skip: &
     let mut total = 0usize;
     let mut i = 0;
     while i + 1 < block.0.len() {
-        let Some((local, expr)) = assigned_local(&block.0[i]) else {
+        let Some((local, expr)) = inline_candidate(&block.0[i]) else {
             i += 1;
             continue;
         };
@@ -757,7 +790,7 @@ fn debug_reject_reasons(block: &Block, counts: &HashMap<RcLocal, usize>, skip: &
         } else if counts.get(&local).copied().unwrap_or(0) != 1 {
             multi += 1;
         } else {
-            match find_reader(block, i, &local, &expr) {
+            match find_reader(block, i, &local, &expr, skip) {
                 None => nomatch += 1,
                 Some(j) => {
                     if lvalue_object_is(&block.0[j], &local) {
@@ -862,6 +895,100 @@ mod tests {
         apply(&mut block);
         let printed = block.to_string();
         assert!(printed.contains("local ty"), "call order must be kept: {printed}");
+    }
+
+    #[test]
+    fn inlines_copy_past_unrelated_call() {
+        // local a = b; f(); g(a)  ->  f(); g(b)
+        let a = named("a");
+        let mut decl = Assign::new(vec![a.clone().into()], vec![RValue::Local(named("b"))]);
+        decl.prefix = true;
+        let f_call = Call::new(crate::Global::new(b"f".to_vec()).into(), vec![]);
+        let g_call = Call::new(
+            crate::Global::new(b"g".to_vec()).into(),
+            vec![RValue::Local(a)],
+        );
+        let mut block = Block(vec![
+            decl.into(),
+            Statement::Call(f_call),
+            Statement::Call(g_call),
+        ]);
+        apply(&mut block);
+        let printed = block.to_string();
+        assert!(printed.contains("g(b)"), "expected copy inlined: {printed}");
+        assert!(!printed.contains("local a"), "copy should be gone: {printed}");
+    }
+
+    #[test]
+    fn keeps_copy_when_source_is_written_first() {
+        // local a = b; b = 2; g(a)  must keep the old value of b in a.
+        let a = named("a");
+        let b = named("b");
+        let mut decl = Assign::new(vec![a.clone().into()], vec![RValue::Local(b.clone())]);
+        decl.prefix = true;
+        let write_b = Assign::new(
+            vec![b.into()],
+            vec![Literal::Integer(2).into()],
+        );
+        let g_call = Call::new(
+            crate::Global::new(b"g".to_vec()).into(),
+            vec![RValue::Local(a)],
+        );
+        let mut block = Block(vec![
+            decl.into(),
+            write_b.into(),
+            Statement::Call(g_call),
+        ]);
+        apply(&mut block);
+        let printed = block.to_string();
+        assert!(printed.contains("local a"), "copy must stay: {printed}");
+    }
+
+    #[test]
+    fn keeps_bare_call_when_another_call_runs_first() {
+        // local x = f(); g(h(), x)  must keep f() before h().
+        let x = named("x");
+        let mut decl = Assign::new(
+            vec![x.clone().into()],
+            vec![RValue::Call(Call::new(
+                crate::Global::new(b"f".to_vec()).into(),
+                vec![],
+            ))],
+        );
+        decl.prefix = true;
+        let g_call = Call::new(
+            crate::Global::new(b"g".to_vec()).into(),
+            vec![
+                RValue::Call(Call::new(crate::Global::new(b"h".to_vec()).into(), vec![])),
+                RValue::Local(x),
+            ],
+        );
+        let mut block = Block(vec![decl.into(), Statement::Call(g_call)]);
+        apply(&mut block);
+        let printed = block.to_string();
+        assert!(printed.contains("local x"), "call order must be kept: {printed}");
+    }
+
+    #[test]
+    fn inlines_bare_call_into_first_argument() {
+        // local x = f(); g(x, 1)  ->  g(f(), 1)
+        let x = named("x");
+        let mut decl = Assign::new(
+            vec![x.clone().into()],
+            vec![RValue::Call(Call::new(
+                crate::Global::new(b"f".to_vec()).into(),
+                vec![],
+            ))],
+        );
+        decl.prefix = true;
+        let g_call = Call::new(
+            crate::Global::new(b"g".to_vec()).into(),
+            vec![RValue::Local(x), Literal::Integer(1).into()],
+        );
+        let mut block = Block(vec![decl.into(), Statement::Call(g_call)]);
+        apply(&mut block);
+        let printed = block.to_string();
+        assert!(printed.contains("g(f(), 1)"), "expected inlined call: {printed}");
     }
 
     #[test]
