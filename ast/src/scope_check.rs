@@ -23,6 +23,11 @@ pub struct ScopeReport {
     pub examples: Vec<String>,
     /// The first few statements that contain an offender, as text.
     pub snippets: Vec<String>,
+    /// Unresolved uses of locals that no declaration in the whole tree
+    /// declares at all.
+    pub never_declared: usize,
+    /// Every local declared anywhere in the checked tree.
+    declared: HashSet<RcLocal>,
 }
 
 const MAX_EXAMPLES: usize = 4;
@@ -31,15 +36,70 @@ const MAX_SNIPPETS: usize = 3;
 /// Checks `block` as a whole program: its own locals and every closure in it.
 pub fn check(block: &mut Block) -> ScopeReport {
     let mut report = ScopeReport::default();
+    collect_declared(block, &mut report.declared);
     let mut scope: HashSet<RcLocal> = HashSet::new();
     check_block(block, &mut scope, None, &mut report);
     report
+}
+
+/// Every local a `local` statement, loop or parameter declares in `block`,
+/// its nested blocks and the closures inside it.
+fn collect_declared(block: &mut Block, out: &mut HashSet<RcLocal>) {
+    for statement in block.0.iter_mut() {
+        if let Statement::Assign(assign) = &*statement {
+            if assign.prefix {
+                for lvalue in &assign.left {
+                    if let LValue::Local(local) = lvalue {
+                        out.insert(local.clone());
+                    }
+                }
+            }
+        }
+        statement.post_traverse_values(&mut |value| -> Option<()> {
+            if let Either::Right(RValue::Closure(closure)) = value {
+                if let Some(mut function) = closure.function.try_lock() {
+                    for param in &function.parameters {
+                        out.insert(param.clone());
+                    }
+                    collect_declared(&mut function.body, out);
+                }
+            }
+            None
+        });
+        match statement {
+            Statement::If(r#if) => {
+                collect_declared_shared(&r#if.then_block, out);
+                collect_declared_shared(&r#if.else_block, out);
+            }
+            Statement::While(r#while) => collect_declared_shared(&r#while.block, out),
+            Statement::Repeat(repeat) => collect_declared_shared(&repeat.block, out),
+            Statement::NumericFor(numeric_for) => {
+                out.insert(numeric_for.counter.clone());
+                collect_declared_shared(&numeric_for.block, out);
+            }
+            Statement::GenericFor(generic_for) => {
+                for local in &generic_for.res_locals {
+                    out.insert(local.clone());
+                }
+                collect_declared_shared(&generic_for.block, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_declared_shared(block: &SharedBlock, out: &mut HashSet<RcLocal>) {
+    if let Some(mut b) = block.try_lock() {
+        collect_declared(&mut b, out);
+    }
 }
 
 /// Checks one function body. `seed` holds the locals that are in scope before
 /// the body starts: its upvalues, parameters and hoisted locals.
 pub fn check_function(block: &mut Block, seed: &[RcLocal]) -> ScopeReport {
     let mut report = ScopeReport::default();
+    collect_declared(block, &mut report.declared);
+    report.declared.extend(seed.iter().cloned());
     let mut scope: HashSet<RcLocal> = seed.iter().cloned().collect();
     check_block(block, &mut scope, None, &mut report);
     report
@@ -55,6 +115,10 @@ fn check_use(
         return;
     }
     report.unresolved += 1;
+    let declared_somewhere = report.declared.contains(local);
+    if !declared_somewhere {
+        report.never_declared += 1;
+    }
     if report.examples.len() < MAX_EXAMPLES {
         let name = local
             .0
@@ -63,9 +127,14 @@ fn check_use(
             .0
             .clone()
             .unwrap_or_else(|| "?".to_string());
+        let kind = if declared_somewhere {
+            "declared elsewhere"
+        } else {
+            "never declared"
+        };
         report
             .examples
-            .push(format!("{} (function at line {:?})", name, line));
+            .push(format!("{} ({}, function at line {:?})", name, kind, line));
     }
 }
 

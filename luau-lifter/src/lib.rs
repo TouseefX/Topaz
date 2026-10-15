@@ -525,7 +525,10 @@ fn run_post_wave(
             $e;
             if scope_on {
                 let r = ast::scope_check::check(&mut body);
-                scope_steps.push(format!("{}={}/{}", $name, r.unresolved, r.skipped_blocks));
+                scope_steps.push(format!(
+                    "{}={}/{}/{}",
+                    $name, r.unresolved, r.never_declared, r.skipped_blocks
+                ));
                 for e in r.examples {
                     if scope_examples.len() < 60 {
                         scope_examples.push(format!("TOPAZ_SCOPE {}: {}", $name, e));
@@ -549,6 +552,23 @@ fn run_post_wave(
     }
     if dbg {
         eprintln!("[post] start t+0.0s: {}", report_cycles(&mut body));
+    }
+    if scope_on {
+        let r = ast::scope_check::check(&mut body);
+        scope_steps.push(format!(
+            "start={}/{}/{}",
+            r.unresolved, r.never_declared, r.skipped_blocks
+        ));
+        for e in r.examples {
+            if scope_examples.len() < 60 {
+                scope_examples.push(format!("TOPAZ_SCOPE start: {}", e));
+            }
+        }
+        for e in r.snippets {
+            if scope_examples.len() < 60 {
+                scope_examples.push(format!("TOPAZ_SCOPE start stmt: {}", e));
+            }
+        }
     }
     step!("link_upvalues", link_upvalues(&mut body, &mut upvalues));
     const QUALITY_STMT_CAP: usize = 250_000;
@@ -615,7 +635,10 @@ fn run_post_wave(
     ast::spill_locals::spill_locals(&mut body);
     if scope_on {
         let r = ast::scope_check::check(&mut body);
-        scope_steps.push(format!("spill={}/{}", r.unresolved, r.skipped_blocks));
+        scope_steps.push(format!(
+            "spill={}/{}/{}",
+            r.unresolved, r.never_declared, r.skipped_blocks
+        ));
         for e in r.examples {
             if scope_examples.len() < 60 {
                 scope_examples.push(format!("TOPAZ_SCOPE spill: {}", e));
@@ -627,7 +650,7 @@ fn run_post_wave(
             }
         }
         let mut header = vec![format!(
-            "TOPAZ_SCOPE unresolved/skipped per step: {}",
+            "TOPAZ_SCOPE unresolved/never-declared/skipped per step: {}",
             scope_steps.join(" ")
         )];
         header.extend(scope_examples);

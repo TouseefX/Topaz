@@ -207,7 +207,12 @@ def undeclared_report(output_path, positions, ref_unknown, out_unknown, limit=16
         for name, count in out_unknown.items()
         if count > ref_unknown.get(name, 0) and name not in ROBLOX_GLOBALS
     ]
+    absolute = {n: c for n, c in out_unknown.items() if n not in ROBLOX_GLOBALS}
+    ref_absolute = {n: c for n, c in ref_unknown.items() if n not in ROBLOX_GLOBALS}
     lines_out = [
+        f"absolute, not Roblox globals: output {len(absolute)} names / "
+        f"{sum(absolute.values())} uses, reference {len(ref_absolute)} names / "
+        f"{sum(ref_absolute.values())} uses",
         f"unknown names used more in the output than in the reference, not Roblox "
         f"globals: {len(suspects)} names, {sum(out_unknown[n] - ref_unknown.get(n, 0) for n in suspects)} uses"
     ]
