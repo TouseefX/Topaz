@@ -177,6 +177,67 @@ def analyze_kinds(path, analyzer):
     return kinds, unknown_globals
 
 
+ROBLOX_GLOBALS = {
+    "game", "workspace", "task", "CFrame", "Enum", "Vector3", "Vector2", "Color3",
+    "UDim2", "UDim", "Instance", "Random", "NumberRange", "NumberSequence",
+    "ColorSequence", "Ray", "Region3", "TweenInfo", "Rect", "BrickColor", "script",
+    "shared", "plugin", "tick", "warn", "wait", "spawn", "delay", "vector",
+    "DateTime", "buffer", "Font", "PhysicalProperties", "NumberSequenceKeypoint",
+}
+
+
+def unknown_positions(path, analyzer):
+    """(line, name) for each `Unknown global` the analyzer reports."""
+    text = run([analyzer, path])
+    found = []
+    for line in text.splitlines():
+        m = re.match(r"^.*\((\d+),\d+\): TypeError: Unknown global '([^']*)'", line)
+        if m:
+            found.append((int(m.group(1)), m.group(2)))
+    return found
+
+
+def undeclared_report(output_path, positions, ref_unknown, out_unknown, limit=160):
+    """Names that the output uses more often than the reference, and that are
+    not Roblox globals: each is a variable used where nothing declares it."""
+    with open(output_path, encoding="utf-8", errors="replace") as fh:
+        lines = fh.read().split("\n")
+    suspects = [
+        name
+        for name, count in out_unknown.items()
+        if count > ref_unknown.get(name, 0) and name not in ROBLOX_GLOBALS
+    ]
+    lines_out = [
+        f"unknown names used more in the output than in the reference, not Roblox "
+        f"globals: {len(suspects)} names, {sum(out_unknown[n] - ref_unknown.get(n, 0) for n in suspects)} uses"
+    ]
+    if not suspects:
+        return lines_out
+    suspect_set = set(suspects)
+    shown = 0
+    for line_no, name in sorted(positions):
+        if name not in suspect_set:
+            continue
+        if shown >= limit:
+            lines_out.append("  ... more not shown")
+            break
+        shown += 1
+        text = lines[line_no - 1].strip() if 0 < line_no <= len(lines) else "?"
+        header = "?"
+        for back in range(line_no - 1, max(-1, line_no - 400), -1):
+            if re.search(r"\bfunction\b", lines[back]):
+                header = lines[back].strip()[:90]
+                break
+        declared = sum(
+            1 for l in lines if re.search(r"\blocal\b", l) and re.search(r"\b" + re.escape(name) + r"\b", l)
+        )
+        lines_out.append(
+            f"  L{line_no} {name} (declared on {declared} lines): {text[:150]}"
+        )
+        lines_out.append(f"      in: {header}")
+    return lines_out
+
+
 def diff_counter(name, ref, out, limit=40):
     lines = []
     only_ref = ref - out
@@ -224,6 +285,7 @@ def main(argv):
     out_kinds, out_unknown = analyze_kinds(output, analyzer)
     report.extend(diff_counter("analyzer errors by kind", ref_kinds, out_kinds, limit=60))
     report.extend(diff_counter("unknown globals", ref_unknown, out_unknown, limit=80))
+    report.extend(undeclared_report(output, unknown_positions(output, analyzer), ref_unknown, out_unknown))
 
     print("\n".join(report))
     return 0
