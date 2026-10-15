@@ -506,6 +506,11 @@ fn run_post_wave(
         .filter(|s| s != "0" && !s.eq_ignore_ascii_case("false"))
         .is_some();
     let post_start = Instant::now();
+    // `TOPAZ_SCOPE_CHECK`: after every step, count reads of locals no scope
+    // declares. The counts go into the output as `-- TOPAZ_SCOPE` comments.
+    let scope_on = std::env::var_os("TOPAZ_SCOPE_CHECK").is_some();
+    let mut scope_steps: Vec<String> = Vec::new();
+    let mut scope_examples: Vec<String> = Vec::new();
     macro_rules! step {
         ($name:expr, $e:expr) => {{
             let _ = tx.send(PostEvent::Entering($name));
@@ -518,6 +523,15 @@ fn run_post_wave(
             }
             let t0 = Instant::now();
             $e;
+            if scope_on {
+                let r = ast::scope_check::check(&mut body);
+                scope_steps.push(format!("{}={}/{}", $name, r.unresolved, r.skipped_blocks));
+                for e in r.examples {
+                    if scope_examples.len() < 40 {
+                        scope_examples.push(format!("{}: {}", $name, e));
+                    }
+                }
+            }
             if dbg {
                 eprintln!(
                     "[post] after {} ({:.1}s): {}",
@@ -594,6 +608,23 @@ fn run_post_wave(
     // excess top-level locals of each function into a table. Runs after the
     // cycle check, because the walk uses try_lock on shared blocks.
     ast::spill_locals::spill_locals(&mut body);
+    if scope_on {
+        let r = ast::scope_check::check(&mut body);
+        scope_steps.push(format!("spill={}/{}", r.unresolved, r.skipped_blocks));
+        for e in r.examples {
+            if scope_examples.len() < 40 {
+                scope_examples.push(format!("spill: {}", e));
+            }
+        }
+        let mut header = vec![format!(
+            "TOPAZ_SCOPE unresolved/skipped per step: {}",
+            scope_steps.join(" ")
+        )];
+        header.extend(scope_examples);
+        for text in header.into_iter().rev() {
+            body.0.insert(0, ast::Comment::new(text).into());
+        }
+    }
     let _ = tx.send(PostEvent::Done(render_complete(&mut body)));
 }
 

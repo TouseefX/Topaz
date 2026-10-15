@@ -85,6 +85,7 @@ jobs:
       - name: Decompile ClientRenderer (bounded)
         env:
           TOPAZ_STRUCTURED_DEBUG: '1'
+          TOPAZ_SCOPE_CHECK: '1'
           TOPAZ_DEBUG_CYCLES: '1'
           TOPAZ_DEBUG_SPILL: '1'
           TOPAZ_DEBUG_INLINE: '1'

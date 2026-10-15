@@ -286,6 +286,10 @@ def main(argv):
     report.extend(diff_counter("analyzer errors by kind", ref_kinds, out_kinds, limit=60))
     report.extend(diff_counter("unknown globals", ref_unknown, out_unknown, limit=80))
     report.extend(undeclared_report(output, unknown_positions(output, analyzer), ref_unknown, out_unknown))
+    with open(output, encoding="utf-8", errors="replace") as fh:
+        scope_lines = [l.strip() for l in fh if l.strip().startswith("-- TOPAZ_SCOPE")]
+    report.append(f"topaz scope check lines in output: {len(scope_lines)}")
+    report.extend(scope_lines[:60])
 
     print("\n".join(report))
     return 0
