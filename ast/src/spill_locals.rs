@@ -7,7 +7,9 @@
 //! hidden registers of loops.
 //!
 //! For each function body this module measures that peak. If the peak is above
-//! [`TARGET_ACTIVE_LOCALS`], it moves locals into one table, `_spilled`,
+//! [`TARGET_ACTIVE_LOCALS`], it first moves top-level declarations down to
+//! their first use (`sink_decls`) and measures again. If it is still above,
+//! it moves locals into one table, `_spilled`,
 //! created at the start of the function, so each use becomes `_spilled.<name>`.
 //! The table is only used when needed, and in two steps:
 //!
@@ -21,6 +23,7 @@ use std::collections::{HashMap, HashSet};
 
 use itertools::Either;
 
+use crate::sink_decls::sink_declarations;
 use crate::{
     Assign, Block, Index, LValue, Literal, Local, LocalRw, RValue, RcLocal, Statement, Table,
     Traverse,
@@ -310,7 +313,32 @@ fn spill_function(block: &mut Block) {
     let none: HashSet<RcLocal> = HashSet::new();
     let mut decls: Vec<Decl> = Vec::new();
     let mut seen: HashSet<RcLocal> = HashSet::new();
-    let peak = scan_block(block, 0, false, 0, &none, &mut decls, &mut seen);
+    let mut peak = scan_block(block, 0, false, 0, &none, &mut decls, &mut seen);
+    if peak <= TARGET_ACTIVE_LOCALS {
+        return;
+    }
+    // Move top-level declarations down to their first use, which ends their
+    // lifetimes early. Only a function Luau would reject gets this far.
+    let before = peak;
+    let sink = sink_declarations(block);
+    decls.clear();
+    seen.clear();
+    peak = scan_block(block, 0, false, 0, &none, &mut decls, &mut seen);
+    if std::env::var_os("TOPAZ_DEBUG_SPILL").is_some() {
+        eprintln!(
+            "[spill-sink] peak {} -> {}; candidates {} moved {} not_movable {} unused {} first_use_writes {} blocked writes {} calls {} metamethod {}",
+            before,
+            peak,
+            sink.candidates,
+            sink.moved,
+            sink.not_movable,
+            sink.unused,
+            sink.first_use_writes,
+            sink.blocked_writes,
+            sink.blocked_calls,
+            sink.blocked_metamethod
+        );
+    }
     if peak <= TARGET_ACTIVE_LOCALS {
         return;
     }
