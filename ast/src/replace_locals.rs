@@ -4,6 +4,10 @@ use itertools::Either;
 
 use crate::{Block, LocalRw, RValue, RcLocal, Statement, Traverse};
 
+/// Closure bodies `replace_locals` could not lock and so did not visit.
+/// A skipped body keeps its old names, so it is a debug signal (`[ab]`).
+pub static LOCKED_SKIPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 pub fn replace_locals<H: std::hash::BuildHasher>(
     block: &mut Block,
     map: &HashMap<RcLocal, RcLocal, H>,
@@ -22,8 +26,11 @@ pub fn replace_locals<H: std::hash::BuildHasher>(
         
         statement.post_traverse_values(&mut |value| -> Option<()> {
             if let Either::Right(RValue::Closure(closure)) = value {
-                if let Some(mut function) = closure.function.try_lock() {
-                    replace_locals(&mut function.body, map)
+                match closure.function.try_lock() {
+                    Some(mut function) => replace_locals(&mut function.body, map),
+                    None => {
+                        LOCKED_SKIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
             };
             None

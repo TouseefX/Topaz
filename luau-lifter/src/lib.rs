@@ -658,6 +658,13 @@ fn run_post_wave(
             body.0.insert(0, ast::Comment::new(text).into());
         }
     }
+    if std::env::var_os("TOPAZ_AB_REPORT").is_some() {
+        eprintln!(
+            "[ab] captured renames={} replace skips={}",
+            ast::copy_fold::CAPTURED_RENAMES.load(std::sync::atomic::Ordering::Relaxed),
+            ast::replace_locals::LOCKED_SKIPS.load(std::sync::atomic::Ordering::Relaxed),
+        );
+    }
     let _ = tx.send(PostEvent::Done(render_complete(&mut body)));
 }
 
@@ -1293,10 +1300,13 @@ fn decompile_function(
     // (v11 CameraShaker Update).
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ast::flatten_dispatch::flatten_string_dispatch(&mut body);
-        ast::fold_copies::fold_copy_locals_with(
-            &mut body,
-            &upvalues_in.iter().cloned().collect(),
-        );
+        // A/B switch: skip the fold before local declaration.
+        if std::env::var_os("TOPAZ_AB_NO_FOLD_COPIES").is_none() {
+            ast::fold_copies::fold_copy_locals_with(
+                &mut body,
+                &upvalues_in.iter().cloned().collect(),
+            );
+        }
     }));
     let block = ast::share_block(body);
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

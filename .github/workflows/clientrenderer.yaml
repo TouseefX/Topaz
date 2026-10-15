@@ -203,6 +203,31 @@ jobs:
             printf '::notice title=compare with cleaned reference %s::%s\n' "$n" "$(cat "$part" | esc)"
           done
 
+      - name: A/B each suspect pass switched off
+        if: matrix.label == 'new'
+        run: |
+          esc() { sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/$/%0A/' | tr -d '\n'; }
+          topaz="${{ matrix.src }}/target/release/topaz"
+          for variant in BASELINE NO_CAPTURED_RENAME NO_POST_COPY_FOLD NO_FOLD_COPIES; do
+            switch=""
+            [ "$variant" = BASELINE ] || switch="TOPAZ_AB_${variant}=1"
+            rc=0
+            # shellcheck disable=SC2086
+            env TOPAZ_AB_REPORT=1 $switch timeout -s KILL 300 "$topaz" decompile \
+              --time-budget 200 \
+              --input "$GITHUB_WORKSPACE/$BYTECODE" \
+              --output "out/ab_$variant.luau" > "out/ab_$variant.log" 2>&1 || rc=$?
+            ab_line="$(grep -h '^\[ab\]' "out/ab_$variant.log" | tail -n 1 || true)"
+            summary=""
+            if [ "$variant" != BASELINE ] && [ -f "out/ab_$variant.luau" ]; then
+              python3 scripts/compare_decompile.py reference/ClientRenderer.cleaned.luau \
+                "out/ab_$variant.luau" "$LUAU_COMPILE" "$LUAU_ANALYZE" \
+                > "out/ab_$variant.compare" 2>&1 || true
+              summary="$(grep -E '^absolute, not Roblox|^functions:|^string constants' "out/ab_$variant.compare" | head -n 4 || true)"
+            fi
+            printf '::notice title=A/B %s (topaz exit %s)::%s\n' "$variant" "$rc" "$(printf '%s\n%s\n' "$ab_line" "$summary" | esc)"
+          done
+
       - name: Upload ClientRenderer output
         if: always()
         uses: actions/upload-artifact@v4

@@ -23,7 +23,10 @@ pub fn apply_all_with_upvalues(block: &mut Block, upvalues: &[RcLocal]) {
     // DUPTABLE nils folded, loop-carried copies dropped, temps inlined.
     cond_expr::apply(block);
     table_cleanup::cleanup_table_constructors(block);
-    copy_fold::apply_protected(block, &protected);
+    // A/B switch: skip copy folding in the post passes.
+    if std::env::var_os("TOPAZ_AB_NO_POST_COPY_FOLD").is_none() {
+        copy_fold::apply_protected(block, &protected);
+    }
 
     // Detect and convert compound assignments (x = x + 1 -> x += 1)
     compound_assign::detect_compound_assignments(block);

@@ -824,11 +824,18 @@ fn captured_copy(
 /// Renames captured copies (see [`captured_copy`]) to their source in the
 /// rest of the block, closures and their upvalue lists included, and drops
 /// the copy. Nested blocks first, then this block.
+/// Captured copies renamed to their source (debug signal, `[ab]`).
+pub static CAPTURED_RENAMES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn inline_captured_copies(
     block: &mut Block,
     captured: &HashSet<RcLocal>,
     protected: &HashSet<RcLocal>,
 ) -> bool {
+    // A/B switch: skip the captured-copy rename entirely.
+    if std::env::var_os("TOPAZ_AB_NO_CAPTURED_RENAME").is_some() {
+        return false;
+    }
     let mut writes: HashMap<RcLocal, usize> = HashMap::new();
     let mut valued: HashSet<RcLocal> = HashSet::new();
     collect_decl_writes(block, &mut writes, &mut valued);
@@ -856,6 +863,7 @@ fn rewrite_captured_copies(
         block.0.pop();
         let map: HashMap<RcLocal, RcLocal> = HashMap::from([(a, b)]);
         replace_locals(&mut tail, &map);
+        CAPTURED_RENAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         block.0.extend(tail.0);
         changed = true;
     }
