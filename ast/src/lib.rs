@@ -39,7 +39,6 @@ pub mod local_declarations;
 pub mod name_locals;
 mod repeat;
 pub mod replace_locals;
-pub mod sink_decls;
 pub mod spill_locals;
 mod r#return;
 mod set_list;
