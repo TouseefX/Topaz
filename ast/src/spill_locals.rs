@@ -25,7 +25,7 @@ use itertools::Either;
 
 use crate::sink_decls::sink_declarations;
 use crate::{
-    Assign, Block, Index, LValue, Literal, Local, LocalRw, RValue, RcLocal, Statement, Table,
+    Assign, Block, If, Index, LValue, Literal, Local, LocalRw, RValue, RcLocal, Statement, Table,
     Traverse,
 };
 
@@ -342,6 +342,24 @@ fn spill_function(block: &mut Block) {
     if peak <= TARGET_ACTIVE_LOCALS {
         return;
     }
+    // First try scopes: a `do` block releases its locals at its end, so no
+    // table is needed for them. Only what is still over the limit is spilled.
+    let runs = scope_top_level(block);
+    if runs > 0 {
+        decls.clear();
+        seen.clear();
+        let before = peak;
+        peak = scan_block(block, 0, false, 0, &none, &mut decls, &mut seen);
+        if std::env::var_os("TOPAZ_DEBUG_SPILL").is_some() {
+            eprintln!(
+                "[spill-scope] wrapped {} runs; peak {} -> {}",
+                runs, before, peak
+            );
+        }
+        if peak <= TARGET_ACTIVE_LOCALS {
+            return;
+        }
+    }
     if std::env::var_os("TOPAZ_DEBUG_SPILL").is_some() {
         debug_local_stats(block, &decls);
         debug_use_gaps(block, &decls);
@@ -402,6 +420,295 @@ fn spill_function(block: &mut Block) {
     );
     decl.prefix = true;
     block.0.insert(0, Statement::Assign(decl));
+}
+
+/// How many scopes may nest. Deeper nesting buys little, and Luau limits how
+/// deeply blocks may nest.
+const MAX_SCOPE_DEPTH: usize = 12;
+
+/// Adds every local the statement reads or writes, at any depth, closure
+/// bodies included.
+fn mentioned_by(statement: &mut Statement, out: &mut HashSet<RcLocal>) {
+    for local in statement.values_read_mut() {
+        out.insert(local.clone());
+    }
+    for local in statement.values_written_mut() {
+        out.insert(local.clone());
+    }
+    statement.post_traverse_values(&mut |value| -> Option<()> {
+        if let Either::Right(RValue::Closure(closure)) = value {
+            if let Some(mut function) = closure.function.try_lock() {
+                mentioned_in_block(&mut function.body, out);
+            }
+        }
+        None
+    });
+    match statement {
+        Statement::If(r#if) => {
+            if let Some(mut b) = r#if.then_block.try_lock() {
+                mentioned_in_block(&mut b, out);
+            }
+            if let Some(mut b) = r#if.else_block.try_lock() {
+                mentioned_in_block(&mut b, out);
+            }
+        }
+        Statement::While(r#while) => {
+            if let Some(mut b) = r#while.block.try_lock() {
+                mentioned_in_block(&mut b, out);
+            }
+        }
+        Statement::Repeat(repeat) => {
+            if let Some(mut b) = repeat.block.try_lock() {
+                mentioned_in_block(&mut b, out);
+            }
+        }
+        Statement::NumericFor(numeric_for) => {
+            if let Some(mut b) = numeric_for.block.try_lock() {
+                mentioned_in_block(&mut b, out);
+            }
+        }
+        Statement::GenericFor(generic_for) => {
+            if let Some(mut b) = generic_for.block.try_lock() {
+                mentioned_in_block(&mut b, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn mentioned_in_block(block: &mut Block, out: &mut HashSet<RcLocal>) {
+    for statement in &mut block.0 {
+        mentioned_by(statement, out);
+    }
+}
+
+/// Wraps runs of top-level statements in a scope, so the locals a run declares
+/// go out of scope after their last use. A run starts at a declaration and
+/// reaches the last use of everything it declares. Its end is extended the
+/// same way for each declaration inside it, so runs nest but never cross.
+/// Returns how many runs were wrapped.
+///
+/// A scope is written as `if true then ... end` with no `else`; the formatter
+/// prints it as `do ... end`. Spilling runs after this, and nothing else
+/// changes the block afterwards.
+fn scope_top_level(block: &mut Block) -> usize {
+    let n = block.0.len();
+    let decls_at: Vec<Vec<RcLocal>> = block
+        .0
+        .iter()
+        .map(|s| match s {
+            Statement::Assign(a) if a.prefix => a
+                .left
+                .iter()
+                .filter_map(|lv| match lv {
+                    LValue::Local(l) => Some(l.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+
+    // Last statement that mentions each local, reads and writes included.
+    let mut last_use: HashMap<RcLocal, usize> = HashMap::new();
+    for (k, statement) in block.0.iter_mut().enumerate() {
+        let mut set: HashSet<RcLocal> = HashSet::new();
+        mentioned_by(statement, &mut set);
+        for local in set {
+            last_use.insert(local, k);
+        }
+    }
+
+    // End of the run that starts at declaration `d`.
+    let run_end = |d: usize| -> usize {
+        let mut end = d;
+        let mut k = d;
+        while k <= end {
+            for local in &decls_at[k] {
+                end = end.max(last_use.get(local).copied().unwrap_or(k));
+            }
+            k += 1;
+        }
+        end
+    };
+
+    // A run that reaches the last statement frees nothing.
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for d in 0..n {
+        if decls_at[d].is_empty() {
+            continue;
+        }
+        let end = run_end(d);
+        if end + 1 < n {
+            runs.push((d, end));
+        }
+    }
+
+    if std::env::var_os("TOPAZ_DEBUG_SPILL").is_some() {
+        // Floor for any scoping (live range to last use), and the peak when every
+        // run is kept, with no depth limit.
+        let mut live = vec![0i64; n + 1];
+        let mut ideal = vec![0i64; n + 1];
+        for d in 0..n {
+            for local in &decls_at[d] {
+                let u = last_use.get(local).copied().unwrap_or(d).max(d);
+                live[d] += 1;
+                live[u + 1] -= 1;
+                let e = run_end(d);
+                ideal[d] += 1;
+                ideal[e + 1] -= 1;
+            }
+        }
+        let peak = |v: &[i64]| {
+            let mut sum = 0i64;
+            let mut best = 0i64;
+            for x in v {
+                sum += x;
+                best = best.max(sum);
+            }
+            best
+        };
+        eprintln!(
+            "[spill-scope] plan: runs={} ideal_peak={} live_peak={} statements={}",
+            runs.len(),
+            peak(&ideal),
+            peak(&live),
+            n
+        );
+    }
+    // Keep the runs that nest within the depth limit. Runs come in start
+    // order; `open` holds the ends of the kept runs that contain the next
+    // start, innermost last.
+    let mut chosen: HashMap<usize, usize> = HashMap::new();
+    let mut open: Vec<usize> = Vec::new();
+    for &(start, end) in &runs {
+        while open.last().is_some_and(|&e| e < start) {
+            open.pop();
+        }
+        if open.len() < MAX_SCOPE_DEPTH {
+            chosen.insert(start, end);
+            open.push(end);
+        }
+    }
+    if chosen.is_empty() {
+        return 0;
+    }
+
+    let mut slots: Vec<Option<Statement>> = std::mem::take(&mut block.0)
+        .into_iter()
+        .map(Some)
+        .collect();
+    block.0 = emit_scoped(0, n - 1, None, &chosen, &mut slots);
+    chosen.len()
+}
+
+/// Statements `lo..=hi`, with each chosen run wrapped in a scope. `suppress`
+/// is the run whose own start is already being emitted inside its scope.
+fn emit_scoped(
+    lo: usize,
+    hi: usize,
+    suppress: Option<usize>,
+    chosen: &HashMap<usize, usize>,
+    slots: &mut [Option<Statement>],
+) -> Vec<Statement> {
+    let mut out = Vec::new();
+    let mut i = lo;
+    while i <= hi {
+        match chosen.get(&i) {
+            Some(&end) if end <= hi && suppress != Some(i) => {
+                let inner = emit_scoped(i, end, Some(i), chosen, slots);
+                out.push(scope_block(inner));
+                i = end + 1;
+            }
+            _ => {
+                if let Some(statement) = slots[i].take() {
+                    out.push(statement);
+                }
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+fn scope_block(body: Vec<Statement>) -> Statement {
+    Statement::If(If {
+        condition: RValue::Literal(Literal::Boolean(true)),
+        then_block: crate::share_block(Block(body)),
+        else_block: crate::share_block(Block::default()),
+    })
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    use crate::{Call, Global, Local, RValue, RcLocal, Statement};
+
+    fn local(name: &str) -> RcLocal {
+        RcLocal::new(Local::new(Some(name.into())))
+    }
+
+    fn decl(l: &RcLocal, value: RValue) -> Statement {
+        let mut a = Assign::new(vec![l.clone().into()], vec![value]);
+        a.prefix = true;
+        a.into()
+    }
+
+    fn global(name: &str) -> RValue {
+        Global::new(name.as_bytes().to_vec()).into()
+    }
+
+    fn call(name: &str, args: Vec<RValue>) -> Statement {
+        Statement::Call(Call::new(Global::new(name.as_bytes().to_vec()).into(), args))
+    }
+
+    #[test]
+    fn wraps_each_run_after_its_last_use() {
+        // a = f(); g(a); x = k(); m(x); p()  ->  do a = f(); g(a) end; do x = k(); m(x) end; p()
+        let a = local("a");
+        let x = local("x");
+        let mut block = Block(vec![
+            decl(&a, global("f")),
+            call("g", vec![RValue::Local(a.clone())]),
+            decl(&x, global("k")),
+            call("m", vec![RValue::Local(x.clone())]),
+            call("p", vec![]),
+        ]);
+        assert_eq!(scope_top_level(&mut block), 2);
+        let printed = block.to_string();
+        assert_eq!(printed.matches("do").count(), 2, "{printed}");
+        assert!(printed.contains("g(a)") && printed.contains("m(x)"), "{printed}");
+    }
+
+    #[test]
+    fn nests_runs_that_are_contained_in_another() {
+        // a = f(); x = k(); m(x); g(a); p()  ->  do a = f(); do x = k(); m(x) end; g(a) end; p()
+        let a = local("a");
+        let x = local("x");
+        let mut block = Block(vec![
+            decl(&a, global("f")),
+            decl(&x, global("k")),
+            call("m", vec![RValue::Local(x.clone())]),
+            call("g", vec![RValue::Local(a.clone())]),
+            call("p", vec![]),
+        ]);
+        assert_eq!(scope_top_level(&mut block), 2);
+        let printed = block.to_string();
+        assert_eq!(printed.matches("do").count(), 2, "{printed}");
+    }
+
+    #[test]
+    fn keeps_a_local_used_at_the_end() {
+        // a = f(); g(); p(a)  -> nothing to free
+        let a = local("a");
+        let mut block = Block(vec![
+            decl(&a, global("f")),
+            call("g", vec![]),
+            call("p", vec![RValue::Local(a.clone())]),
+        ]);
+        assert_eq!(scope_top_level(&mut block), 0);
+        assert!(!block.to_string().contains("do"));
+    }
 }
 
 /// Returns the smallest prefix of `candidates` whose move brings the peak
