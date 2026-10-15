@@ -527,8 +527,13 @@ fn run_post_wave(
                 let r = ast::scope_check::check(&mut body);
                 scope_steps.push(format!("{}={}/{}", $name, r.unresolved, r.skipped_blocks));
                 for e in r.examples {
-                    if scope_examples.len() < 40 {
+                    if scope_examples.len() < 60 {
                         scope_examples.push(format!("TOPAZ_SCOPE {}: {}", $name, e));
+                    }
+                }
+                for e in r.snippets {
+                    if scope_examples.len() < 60 {
+                        scope_examples.push(format!("TOPAZ_SCOPE {} stmt: {}", $name, e));
                     }
                 }
             }
@@ -612,8 +617,13 @@ fn run_post_wave(
         let r = ast::scope_check::check(&mut body);
         scope_steps.push(format!("spill={}/{}", r.unresolved, r.skipped_blocks));
         for e in r.examples {
-            if scope_examples.len() < 40 {
+            if scope_examples.len() < 60 {
                 scope_examples.push(format!("TOPAZ_SCOPE spill: {}", e));
+            }
+        }
+        for e in r.snippets {
+            if scope_examples.len() < 60 {
+                scope_examples.push(format!("TOPAZ_SCOPE spill stmt: {}", e));
             }
         }
         let mut header = vec![format!(
@@ -1079,8 +1089,13 @@ fn scope_note(
     let r = ast::scope_check::check_function(body, seed);
     counts.push(format!("{}={}/{}", stage, r.unresolved, r.skipped_blocks));
     for e in r.examples {
-        if examples.len() < 40 {
+        if examples.len() < 60 {
             examples.push(format!("TOPAZ_SCOPE {} fn: {}", stage, e));
+        }
+    }
+    for e in r.snippets {
+        if examples.len() < 60 {
+            examples.push(format!("TOPAZ_SCOPE {} fn stmt: {}", stage, e));
         }
     }
 }
@@ -1231,9 +1246,6 @@ fn decompile_function(
         .collect();
     let mut scope_counts: Vec<String> = Vec::new();
     let mut scope_examples: Vec<String> = Vec::new();
-    if scope_on {
-        scope_note("lift", &mut body, &scope_seed, &mut scope_counts, &mut scope_examples);
-    }
     // Flatten inverted `x ~= "A"` wrappers that swallowed later `x == "B"`
     // cases (v11 IOInvis else). Then fold SSA copies, never into upvalues
     // (v11 CameraShaker Update).
@@ -1244,9 +1256,6 @@ fn decompile_function(
             &upvalues_in.iter().cloned().collect(),
         );
     }));
-    if scope_on {
-        scope_note("fold", &mut body, &scope_seed, &mut scope_counts, &mut scope_examples);
-    }
     let block = ast::share_block(body);
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         LocalDeclarer::default().declare_locals(

@@ -21,9 +21,12 @@ pub struct ScopeReport {
     pub skipped_blocks: usize,
     /// The first few offenders, as `name (function at line N)`.
     pub examples: Vec<String>,
+    /// The first few statements that contain an offender, as text.
+    pub snippets: Vec<String>,
 }
 
 const MAX_EXAMPLES: usize = 4;
+const MAX_SNIPPETS: usize = 3;
 
 /// Checks `block` as a whole program: its own locals and every closure in it.
 pub fn check(block: &mut Block) -> ScopeReport {
@@ -99,6 +102,7 @@ fn check_statement(
 
     // A repeat's condition sees the locals of its block, so it is checked
     // below, inside that scope.
+    let before = report.unresolved;
     if !matches!(statement, Statement::Repeat(_)) {
         let reads: Vec<RcLocal> = statement.values_read().into_iter().cloned().collect();
         for local in &reads {
@@ -110,6 +114,10 @@ fn check_statement(
                 check_use(local, scope, line, report);
             }
         }
+    }
+    if report.unresolved > before && report.snippets.len() < MAX_SNIPPETS {
+        let text = format!("{}", statement).replace('\n', " ");
+        report.snippets.push(text.chars().take(220).collect());
     }
 
     // Closures see the locals in scope at the statement, not the ones it
