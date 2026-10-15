@@ -294,16 +294,28 @@ def main(argv):
     with open(output, encoding="utf-8", errors="replace") as fh:
         scope_lines = [l.strip() for l in fh if l.strip().startswith("-- TOPAZ_SCOPE")]
     report.append(f"topaz scope check lines in output: {len(scope_lines)}")
-    sums = {"declare": 0, "post": 0}
+    out_by_stage = collections.Counter()
+    never_by_stage = collections.Counter()
     nonzero = []
     for l in scope_lines:
-        m = re.search(r"TOPAZ_SCOPE function line .*?: (declare|post)=(\d+)/", l)
-        if m:
-            sums[m.group(1)] += int(m.group(2))
-            if int(m.group(2)) and len(nonzero) < 40:
-                nonzero.append(l)
+        if "TOPAZ_SCOPE function line" not in l:
+            continue
+        hit = False
+        for stage, unresolved, never, _skipped in re.findall(
+            r"([a-z_]+)=(\d+)/(\d+)/(\d+)", l.split(":", 1)[1]
+        ):
+            out_by_stage[stage] += int(unresolved) - int(never)
+            never_by_stage[stage] += int(never)
+            hit = hit or int(unresolved) > int(never)
+        if hit and len(nonzero) < 40:
+            nonzero.append(l[:300])
     report.append(
-        f"per-function unresolved summed over all functions: declare {sums['declare']}, post {sums['post']}"
+        "reads of a local out of its scope, summed over all functions, by stage: "
+        + ", ".join(f"{k} {v}" for k, v in out_by_stage.items())
+    )
+    report.append(
+        "reads of a local never declared in the function (upvalue identities, noise before link): "
+        + ", ".join(f"{k} {v}" for k, v in never_by_stage.items())
     )
     report.extend(nonzero)
     report.extend(scope_lines[:200])

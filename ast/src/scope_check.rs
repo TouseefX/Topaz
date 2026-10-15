@@ -1,11 +1,19 @@
 //! Debug check, enabled by `TOPAZ_SCOPE_CHECK`.
 //!
-//! Walks a block the way Luau scopes it and counts every read or write of a
-//! local that no enclosing scope declares. Such a name is a global at run
-//! time, which is `nil` unless something defines it, so each one is a
-//! functional break and not a readability problem. A block whose lock is
-//! already held cannot be walked, so it is counted separately.
+//! Walks a block the way Luau scopes it and counts reads and writes of locals
+//! that are not in scope where they are used. Two kinds are reported apart:
+//!
+//! - *out of scope*: the local is declared in this body, but not in an
+//!   enclosing scope at the use. This is a real scoping bug, and the name is a
+//!   global at run time.
+//! - *never declared*: no declaration is visible from this body. Before link
+//!   time, closure upvalues still carry their pre-link identity, so this kind
+//!   is mostly noise per function and is only meaningful in the whole-tree
+//!   check.
+//!
+//! A block whose lock is already held cannot be walked, and is counted apart.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 
 use itertools::Either;
@@ -15,36 +23,81 @@ use crate::{Block, LValue, LocalRw, RValue, RcLocal, SharedBlock, Statement, Tra
 /// What one check found.
 #[derive(Default)]
 pub struct ScopeReport {
-    /// Reads and writes of locals that no enclosing scope declares.
+    /// Reads and writes of locals not in scope at the use.
     pub unresolved: usize,
+    /// Of those, the locals that no declaration in the checked part declares.
+    pub never_declared: usize,
     /// Blocks that could not be locked, so their contents were not checked.
     pub skipped_blocks: usize,
-    /// The first few offenders, as `name (function at line N)`.
+    /// The first few offenders, as `name (kind, function at line N)`.
     pub examples: Vec<String>,
     /// The first few statements that contain an offender, as text.
     pub snippets: Vec<String>,
-    /// Unresolved uses of locals that no declaration in the whole tree
-    /// declares at all.
-    pub never_declared: usize,
-    /// Every local declared anywhere in the checked tree.
+    /// Every local declared in the checked part.
     declared: HashSet<RcLocal>,
 }
 
 const MAX_EXAMPLES: usize = 4;
 const MAX_SNIPPETS: usize = 3;
 
+thread_local! {
+    static SEED: RefCell<Vec<RcLocal>> = RefCell::new(Vec::new());
+    static LOG: RefCell<Vec<String>> = RefCell::new(Vec::new());
+}
+
+pub fn enabled() -> bool {
+    std::env::var_os("TOPAZ_SCOPE_CHECK").is_some()
+}
+
+/// Sets the locals in scope on entry to the function whose body the post
+/// passes are about to change (its upvalues and parameters).
+pub fn set_seed(seed: Vec<RcLocal>) {
+    SEED.with(|s| *s.borrow_mut() = seed);
+}
+
+/// Records the per-function check of `block` after one pass.
+pub fn note(stage: &str, block: &mut Block) {
+    if !enabled() {
+        return;
+    }
+    let seed = SEED.with(|s| s.borrow().clone());
+    let r = check_function(block, &seed, false);
+    let line = format!(
+        "{}={}/{}/{}",
+        stage, r.unresolved, r.never_declared, r.skipped_blocks
+    );
+    LOG.with(|l| l.borrow_mut().push(line));
+}
+
+/// Returns and clears the records made by [`note`] on this thread.
+pub fn take_log() -> Vec<String> {
+    LOG.with(|l| std::mem::take(&mut *l.borrow_mut()))
+}
+
 /// Checks `block` as a whole program: its own locals and every closure in it.
 pub fn check(block: &mut Block) -> ScopeReport {
     let mut report = ScopeReport::default();
-    collect_declared(block, &mut report.declared);
+    collect_declared(block, &mut report.declared, true);
     let mut scope: HashSet<RcLocal> = HashSet::new();
-    check_block(block, &mut scope, None, &mut report);
+    check_block(block, &mut scope, None, &mut report, true);
+    report
+}
+
+/// Checks one function body. `seed` holds the locals in scope before the body
+/// starts. With `closures` false, nested closures are not entered; their own
+/// bodies are checked when they are finished.
+pub fn check_function(block: &mut Block, seed: &[RcLocal], closures: bool) -> ScopeReport {
+    let mut report = ScopeReport::default();
+    collect_declared(block, &mut report.declared, closures);
+    report.declared.extend(seed.iter().cloned());
+    let mut scope: HashSet<RcLocal> = seed.iter().cloned().collect();
+    check_block(block, &mut scope, None, &mut report, closures);
     report
 }
 
 /// Every local a `local` statement, loop or parameter declares in `block`,
-/// its nested blocks and the closures inside it.
-fn collect_declared(block: &mut Block, out: &mut HashSet<RcLocal>) {
+/// its nested blocks and, when `closures`, the closures inside it.
+fn collect_declared(block: &mut Block, out: &mut HashSet<RcLocal>, closures: bool) {
     for statement in block.0.iter_mut() {
         if let Statement::Assign(assign) = &*statement {
             if assign.prefix {
@@ -55,54 +108,45 @@ fn collect_declared(block: &mut Block, out: &mut HashSet<RcLocal>) {
                 }
             }
         }
-        statement.post_traverse_values(&mut |value| -> Option<()> {
-            if let Either::Right(RValue::Closure(closure)) = value {
-                if let Some(mut function) = closure.function.try_lock() {
-                    for param in &function.parameters {
-                        out.insert(param.clone());
+        if closures {
+            statement.post_traverse_values(&mut |value| -> Option<()> {
+                if let Either::Right(RValue::Closure(closure)) = value {
+                    if let Some(mut function) = closure.function.try_lock() {
+                        for param in &function.parameters {
+                            out.insert(param.clone());
+                        }
+                        collect_declared(&mut function.body, out, true);
                     }
-                    collect_declared(&mut function.body, out);
                 }
-            }
-            None
-        });
+                None
+            });
+        }
         match statement {
             Statement::If(r#if) => {
-                collect_declared_shared(&r#if.then_block, out);
-                collect_declared_shared(&r#if.else_block, out);
+                collect_declared_shared(&r#if.then_block, out, closures);
+                collect_declared_shared(&r#if.else_block, out, closures);
             }
-            Statement::While(r#while) => collect_declared_shared(&r#while.block, out),
-            Statement::Repeat(repeat) => collect_declared_shared(&repeat.block, out),
+            Statement::While(r#while) => collect_declared_shared(&r#while.block, out, closures),
+            Statement::Repeat(repeat) => collect_declared_shared(&repeat.block, out, closures),
             Statement::NumericFor(numeric_for) => {
                 out.insert(numeric_for.counter.clone());
-                collect_declared_shared(&numeric_for.block, out);
+                collect_declared_shared(&numeric_for.block, out, closures);
             }
             Statement::GenericFor(generic_for) => {
                 for local in &generic_for.res_locals {
                     out.insert(local.clone());
                 }
-                collect_declared_shared(&generic_for.block, out);
+                collect_declared_shared(&generic_for.block, out, closures);
             }
             _ => {}
         }
     }
 }
 
-fn collect_declared_shared(block: &SharedBlock, out: &mut HashSet<RcLocal>) {
+fn collect_declared_shared(block: &SharedBlock, out: &mut HashSet<RcLocal>, closures: bool) {
     if let Some(mut b) = block.try_lock() {
-        collect_declared(&mut b, out);
+        collect_declared(&mut b, out, closures);
     }
-}
-
-/// Checks one function body. `seed` holds the locals that are in scope before
-/// the body starts: its upvalues, parameters and hoisted locals.
-pub fn check_function(block: &mut Block, seed: &[RcLocal]) -> ScopeReport {
-    let mut report = ScopeReport::default();
-    collect_declared(block, &mut report.declared);
-    report.declared.extend(seed.iter().cloned());
-    let mut scope: HashSet<RcLocal> = seed.iter().cloned().collect();
-    check_block(block, &mut scope, None, &mut report);
-    report
 }
 
 fn check_use(
@@ -128,7 +172,7 @@ fn check_use(
             .clone()
             .unwrap_or_else(|| "?".to_string());
         let kind = if declared_somewhere {
-            "declared elsewhere"
+            "out of scope"
         } else {
             "never declared"
         };
@@ -143,9 +187,10 @@ fn check_block(
     scope: &mut HashSet<RcLocal>,
     line: Option<usize>,
     report: &mut ScopeReport,
+    closures: bool,
 ) {
     for statement in block.0.iter_mut() {
-        check_statement(statement, scope, line, report);
+        check_statement(statement, scope, line, report, closures);
     }
 }
 
@@ -154,9 +199,10 @@ fn check_owned_block(
     mut scope: HashSet<RcLocal>,
     line: Option<usize>,
     report: &mut ScopeReport,
+    closures: bool,
 ) {
     match block.try_lock() {
-        Some(mut b) => check_block(&mut b, &mut scope, line, report),
+        Some(mut b) => check_block(&mut b, &mut scope, line, report, closures),
         None => report.skipped_blocks += 1,
     }
 }
@@ -166,6 +212,7 @@ fn check_statement(
     scope: &mut HashSet<RcLocal>,
     line: Option<usize>,
     report: &mut ScopeReport,
+    closures: bool,
 ) {
     let declares = matches!(statement, Statement::Assign(assign) if assign.prefix);
 
@@ -202,22 +249,24 @@ fn check_statement(
 
     // Closures see the locals in scope at the statement, not the ones it
     // declares, so they are checked before the declarations below.
-    statement.post_traverse_values(&mut |value| -> Option<()> {
-        if let Either::Right(RValue::Closure(closure)) = value {
-            match closure.function.try_lock() {
-                Some(mut function) => {
-                    let mut inner = scope.clone();
-                    for param in &function.parameters {
-                        inner.insert(param.clone());
+    if closures {
+        statement.post_traverse_values(&mut |value| -> Option<()> {
+            if let Either::Right(RValue::Closure(closure)) = value {
+                match closure.function.try_lock() {
+                    Some(mut function) => {
+                        let mut inner = scope.clone();
+                        for param in &function.parameters {
+                            inner.insert(param.clone());
+                        }
+                        let func_line = function.line;
+                        check_block(&mut function.body, &mut inner, func_line, report, true);
                     }
-                    let func_line = function.line;
-                    check_block(&mut function.body, &mut inner, func_line, report);
+                    None => report.skipped_blocks += 1,
                 }
-                None => report.skipped_blocks += 1,
             }
-        }
-        None
-    });
+            None
+        });
+    }
 
     if let Statement::Assign(assign) = &*statement {
         if assign.prefix {
@@ -231,11 +280,11 @@ fn check_statement(
 
     match statement {
         Statement::If(r#if) => {
-            check_owned_block(&r#if.then_block, scope.clone(), line, report);
-            check_owned_block(&r#if.else_block, scope.clone(), line, report);
+            check_owned_block(&r#if.then_block, scope.clone(), line, report, closures);
+            check_owned_block(&r#if.else_block, scope.clone(), line, report, closures);
         }
         Statement::While(r#while) => {
-            check_owned_block(&r#while.block, scope.clone(), line, report);
+            check_owned_block(&r#while.block, scope.clone(), line, report, closures);
         }
         Statement::Repeat(repeat) => {
             let mut inner = scope.clone();
@@ -255,19 +304,19 @@ fn check_statement(
             for local in repeat.condition.values_read() {
                 check_use(local, &inner, line, report);
             }
-            check_owned_block(&repeat.block, scope.clone(), line, report);
+            check_owned_block(&repeat.block, scope.clone(), line, report, closures);
         }
         Statement::NumericFor(numeric_for) => {
             let mut inner = scope.clone();
             inner.insert(numeric_for.counter.clone());
-            check_owned_block(&numeric_for.block, inner, line, report);
+            check_owned_block(&numeric_for.block, inner, line, report, closures);
         }
         Statement::GenericFor(generic_for) => {
             let mut inner = scope.clone();
             for local in &generic_for.res_locals {
                 inner.insert(local.clone());
             }
-            check_owned_block(&generic_for.block, inner, line, report);
+            check_owned_block(&generic_for.block, inner, line, report, closures);
         }
         _ => {}
     }
