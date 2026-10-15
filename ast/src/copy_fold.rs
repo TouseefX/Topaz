@@ -769,53 +769,63 @@ pub fn apply_protected(block: &mut Block, protected: &HashSet<RcLocal>) {
     }
 }
 
-/// Debug only (`TOPAZ_DEBUG_INLINE`): after folding, why each top-level
-/// `local x = e` whose value is read once is still a local. Reasons are
-/// checked in the same order as `inline_consecutive`.
+/// Debug only (`TOPAZ_DEBUG_INLINE`): after folding, every top-level
+/// `local x = e` in a large body, tallied by the kind of `e` and by why it
+/// is still a local. Outcomes are checked in the same order as
+/// `inline_consecutive`.
 fn debug_reject_reasons(block: &Block, counts: &HashMap<RcLocal, usize>, skip: &HashSet<RcLocal>) {
-    let (mut skipped, mut ctor, mut multi, mut nomatch, mut lvalue, mut upval, mut ok) =
-        (0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    let mut tally: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut total = 0usize;
-    let mut i = 0;
-    while i + 1 < block.0.len() {
+    for i in 0..block.0.len().saturating_sub(1) {
+        let Some((_, raw)) = assigned_local(&block.0[i]) else {
+            continue;
+        };
+        let kind = match &raw {
+            RValue::Local(_) => "local",
+            RValue::Literal(_) => "lit",
+            RValue::Global(_) => "global",
+            RValue::Index(_) => "index",
+            RValue::Binary(_) => "binary",
+            RValue::Unary(_) => "unary",
+            RValue::Call(_) => "call",
+            RValue::MethodCall(_) => "mcall",
+            RValue::Select(_) => "select",
+            RValue::Table(_) => "table",
+            RValue::Closure(_) => "closure",
+            RValue::VarArg(_) => "vararg",
+        };
         let Some((local, expr)) = inline_candidate(&block.0[i]) else {
-            i += 1;
             continue;
         };
         total += 1;
-        if skip.contains(&local) {
-            skipped += 1;
+        let outcome = if skip.contains(&local) {
+            "skip"
         } else if is_constructor_like(&expr) && !matches!(expr, RValue::Select(_)) {
-            ctor += 1;
+            "ctor"
         } else if counts.get(&local).copied().unwrap_or(0) != 1 {
-            multi += 1;
+            "multi"
         } else {
             match find_reader(block, i, &local, &expr, skip) {
-                None => nomatch += 1,
+                None => "no_reader",
                 Some(j) => {
                     if lvalue_object_is(&block.0[j], &local) {
-                        lvalue += 1;
+                        "lvalue"
                     } else if stmt_captures_upvalue(&block.0[j], &local) {
-                        upval += 1;
+                        "upval"
                     } else {
-                        ok += 1;
+                        "ok"
                     }
                 }
             }
-        }
-        i += 1;
+        };
+        *tally.entry(format!("{kind}:{outcome}")).or_insert(0) += 1;
     }
+    let parts: Vec<String> = tally.iter().map(|(k, v)| format!("{k}={v}")).collect();
     eprintln!(
-        "[inline] stmts={} local_decls={} skip={} ctor={} read_count_not_1={} no_reader={} lvalue_obj={} upvalue={} would_inline={}",
+        "[inline] stmts={} local_decls={} {}",
         block.0.len(),
         total,
-        skipped,
-        ctor,
-        multi,
-        nomatch,
-        lvalue,
-        upval,
-        ok
+        parts.join(" ")
     );
 }
 
