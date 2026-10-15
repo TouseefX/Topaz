@@ -530,6 +530,39 @@ fn scope_top_level(block: &mut Block) -> usize {
             open.push(end);
         }
     }
+    if std::env::var_os("TOPAZ_DEBUG_SPILL").is_some() {
+        // Lower bounds for any scoping: a local is live from its declaration
+        // to its last mention; the ideal nesting keeps it to its run.
+        let mut live = vec![0i64; n + 1];
+        let mut ideal = vec![0i64; n + 1];
+        for d in 0..n {
+            for local in &decls_at[d] {
+                let u = last_use.get(local).copied().unwrap_or(d).max(d);
+                live[d] += 1;
+                live[u + 1] -= 1;
+                let e = run_end(d);
+                ideal[d] += 1;
+                ideal[e + 1] -= 1;
+            }
+        }
+        let peak = |v: &[i64]| {
+            let mut sum = 0i64;
+            let mut best = 0i64;
+            for x in v {
+                sum += x;
+                best = best.max(sum);
+            }
+            best
+        };
+        eprintln!(
+            "[spill-scope] plan: runs={} kept={} ideal_peak={} live_peak={} statements={}",
+            runs.len(),
+            chosen.len(),
+            peak(&ideal),
+            peak(&live),
+            n
+        );
+    }
     if chosen.is_empty() {
         return 0;
     }
