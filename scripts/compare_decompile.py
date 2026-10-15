@@ -8,8 +8,10 @@ names, so the comparison looks at what names cannot hide:
   literal values, error messages);
 * the number of functions and the count of each bytecode operation, from
   `luau-compile -g0 -O0`;
-* the `luau-analyze` errors, grouped by kind (unknown symbols, wrong arity,
-  type errors), with names removed.
+* functions that have the same normalised code (duplicated code);
+* the `luau-analyze` errors, grouped by kind, with the names of unknown
+  globals listed (an unknown global is a variable that is used but never
+  declared, so it is nil at run time).
 
 Passing these checks does not prove the two scripts behave the same. It finds
 the differences that would make one of them break.
@@ -18,6 +20,7 @@ usage: compare_decompile.py REFERENCE.luau OUTPUT.luau LUAU_COMPILE LUAU_ANALYZE
 """
 
 import collections
+import hashlib
 import re
 import subprocess
 import sys
@@ -28,11 +31,15 @@ def run(cmd):
     return proc.stdout + proc.stderr
 
 
-def constants(path, compiler):
-    text = run([compiler, "--text", "-g0", "-O0", "--dump-constants", path])
+def compiled(path, compiler):
+    """Text listing with constants, from luau-compile -g0 -O0."""
+    return run([compiler, "--text", "-g0", "-O0", "--dump-constants", path])
+
+
+def constants(listing):
     strings = collections.Counter()
     numbers = collections.Counter()
-    for line in text.splitlines():
+    for line in listing.splitlines():
         m = re.match(r"^K\d+: '(.*)'$", line)
         if m:
             strings[m.group(1)] += 1
@@ -40,33 +47,134 @@ def constants(path, compiler):
         m = re.match(r"^K\d+: (-?[0-9][^ ]*|nan|-nan|inf|-inf)$", line)
         if m:
             numbers[m.group(1)] += 1
-    return strings, numbers, text
+    return strings, numbers
 
 
-def opcodes(listing):
-    counts = collections.Counter()
+def instructions(listing):
     for line in listing.splitlines():
         m = re.match(r"^([A-Z][A-Z0-9_]+) ", line)
         if m and m.group(1) != "REMARK":
-            counts[m.group(1)] += 1
+            yield m.group(1), line
+
+
+def opcodes(listing):
+    counts = collections.Counter(op for op, _ in instructions(listing))
     return counts
 
 
-def function_count(listing):
-    return sum(1 for line in listing.splitlines() if re.match(r"^Function \d+", line))
+def functions(listing):
+    """Each function's instructions, with registers and constant slots removed,
+    so identical code compares equal whatever the local names are."""
+    bodies = []
+    current = None
+    for line in listing.splitlines():
+        if re.match(r"^Function \d+", line):
+            if current is not None:
+                bodies.append(current)
+            current = []
+            continue
+        if current is None:
+            continue
+        m = re.match(r"^([A-Z][A-Z0-9_]+) ", line)
+        if not m or m.group(1) == "REMARK":
+            continue
+        # Drop register, upvalue and constant slot numbers; keep the value.
+        text = re.sub(r"\b[RKU]\d+\b", "", line)
+        text = re.sub(r"\s+", " ", text).strip()
+        current.append(text)
+    if current is not None:
+        bodies.append(current)
+    return bodies
+
+
+def duplicate_report(listing, label, limit=12):
+    bodies = [b for b in functions(listing) if len(b) >= 4]
+    sig_count = collections.Counter(
+        hashlib.sha1("\n".join(b).encode()).hexdigest() for b in bodies
+    )
+    by_sig = {}
+    for b in bodies:
+        by_sig.setdefault(hashlib.sha1("\n".join(b).encode()).hexdigest(), b)
+    dup_functions = sum(c - 1 for c in sig_count.values() if c > 1)
+    lines = [
+        f"{label}: {len(bodies)} functions with 4+ instructions, "
+        f"{len(sig_count)} distinct shapes, {dup_functions} repeats of an existing shape"
+    ]
+    for sig, count in sig_count.most_common(limit):
+        if count < 2:
+            break
+        body = by_sig[sig]
+        first = body[0][:90]
+        lines.append(f"  {count}x shape of {len(body)} instructions, starts: {first}")
+    return lines
+
+
+def shape_diff(ref_listing, out_listing, limit=12):
+    """Functions whose normalised code has no counterpart in the other file."""
+    def shapes(listing):
+        out = {}
+        for body in functions(listing):
+            if len(body) < 4:
+                continue
+            key = hashlib.sha1("\n".join(body).encode()).hexdigest()
+            out.setdefault(key, body)
+        return out
+
+    def count(listing):
+        return collections.Counter(
+            hashlib.sha1("\n".join(b).encode()).hexdigest()
+            for b in functions(listing)
+            if len(b) >= 4
+        )
+
+    ref_count = count(ref_listing)
+    out_count = count(out_listing)
+    ref_bodies = shapes(ref_listing)
+    out_bodies = shapes(out_listing)
+    lines = []
+    for label, mine, other, bodies in (
+        ("output", out_count, ref_count, out_bodies),
+        ("reference", ref_count, out_count, ref_bodies),
+    ):
+        missing = [k for k in mine if k not in other]
+        total = sum(mine[k] for k in missing)
+        lines.append(
+            f"{label} functions whose shape is not in the other file: "
+            f"{total} functions, {len(missing)} shapes"
+        )
+        missing.sort(key=lambda k: -len(bodies[k]))
+        for k in missing[:limit]:
+            body = bodies[k]
+            strings = []
+            for line in body:
+                for v in re.findall(r"\['([^']*)'\]", line):
+                    if v not in strings:
+                        strings.append(v)
+            lines.append(
+                f"  {mine[k]}x, {len(body)} instructions, strings: "
+                + ", ".join(repr(v) for v in strings[:8])
+            )
+    return lines
 
 
 def analyze_kinds(path, analyzer):
     text = run([analyzer, path])
     kinds = collections.Counter()
+    unknown_globals = collections.Counter()
     for line in text.splitlines():
         m = re.match(r"^.*\(\d+,\d+\): (\w+): (.*)$", line)
         if not m:
             continue
-        # Names change between the two files, so they are removed from the kind.
-        kind = m.group(1) + ": " + re.sub(r"'[^']*'", "'X'", m.group(2))
+        message = m.group(2)
+        g = re.match(r"^Unknown global '([^']*)'", message)
+        if g:
+            unknown_globals[g.group(1)] += 1
+        # Ids and numbers change between the two files, so they are removed.
+        message = re.sub(r"\*blocked-\d+\*", "*blocked*", message)
+        message = re.sub(r"\d+", "N", message)
+        kind = m.group(1) + ": " + re.sub(r"'[^']*'", "'X'", message)
         kinds[kind] += 1
-    return kinds, text
+    return kinds, unknown_globals
 
 
 def diff_counter(name, ref, out, limit=40):
@@ -89,13 +197,15 @@ def main(argv):
         return 2
     reference, output, compiler, analyzer = argv[1:]
 
-    ref_strings, ref_numbers, ref_listing = constants(reference, compiler)
-    out_strings, out_numbers, out_listing = constants(output, compiler)
+    ref_listing = compiled(reference, compiler)
+    out_listing = compiled(output, compiler)
+    ref_strings, ref_numbers = constants(ref_listing)
+    out_strings, out_numbers = constants(out_listing)
 
     report = []
-    report.append(
-        f"functions: reference {function_count(ref_listing)}, output {function_count(out_listing)}"
-    )
+    ref_fn = sum(1 for line in ref_listing.splitlines() if re.match(r"^Function \d+", line))
+    out_fn = sum(1 for line in out_listing.splitlines() if re.match(r"^Function \d+", line))
+    report.append(f"functions: reference {ref_fn}, output {out_fn}")
 
     ref_ops = opcodes(ref_listing)
     out_ops = opcodes(out_listing)
@@ -106,10 +216,14 @@ def main(argv):
 
     report.extend(diff_counter("string constants", ref_strings, out_strings))
     report.extend(diff_counter("number constants", ref_numbers, out_numbers))
+    report.extend(duplicate_report(ref_listing, "reference duplicates"))
+    report.extend(duplicate_report(out_listing, "output duplicates"))
+    report.extend(shape_diff(ref_listing, out_listing))
 
-    ref_kinds, ref_analysis = analyze_kinds(reference, analyzer)
-    out_kinds, out_analysis = analyze_kinds(output, analyzer)
+    ref_kinds, ref_unknown = analyze_kinds(reference, analyzer)
+    out_kinds, out_unknown = analyze_kinds(output, analyzer)
     report.extend(diff_counter("analyzer errors by kind", ref_kinds, out_kinds, limit=60))
+    report.extend(diff_counter("unknown globals", ref_unknown, out_unknown, limit=80))
 
     print("\n".join(report))
     return 0
