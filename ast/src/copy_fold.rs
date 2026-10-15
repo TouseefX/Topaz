@@ -736,6 +736,132 @@ fn dce_unused(block: &mut Block, reads: &HashSet<RcLocal>, ref_captured: &HashSe
     }
 }
 
+/// Writes per local over the whole body (closure bodies included), and the
+/// locals that are declared with a value by `local x = e`.
+fn collect_decl_writes(
+    block: &Block,
+    writes: &mut HashMap<RcLocal, usize>,
+    valued: &mut HashSet<RcLocal>,
+) {
+    for s in &block.0 {
+        for l in s.values_written() {
+            *writes.entry(l.clone()).or_insert(0) += 1;
+        }
+        if let Statement::Assign(a) = s {
+            if a.prefix && a.left.len() == 1 && a.right.len() == 1 {
+                if let Some(l) = a.left[0].as_local() {
+                    valued.insert(l.clone());
+                }
+            }
+        }
+        for_stmt_closure_bodies(s, &mut |body| collect_decl_writes(body, writes, valued));
+        match s {
+            Statement::If(st) => {
+                if let Some(b) = st.then_block.try_lock() {
+                    collect_decl_writes(&b, writes, valued);
+                }
+                if let Some(b) = st.else_block.try_lock() {
+                    collect_decl_writes(&b, writes, valued);
+                }
+            }
+            Statement::While(st) => {
+                if let Some(b) = st.block.try_lock() {
+                    collect_decl_writes(&b, writes, valued);
+                }
+            }
+            Statement::Repeat(st) => {
+                if let Some(b) = st.block.try_lock() {
+                    collect_decl_writes(&b, writes, valued);
+                }
+            }
+            Statement::NumericFor(st) => {
+                if let Some(b) = st.block.try_lock() {
+                    collect_decl_writes(&b, writes, valued);
+                }
+            }
+            Statement::GenericFor(st) => {
+                if let Some(b) = st.block.try_lock() {
+                    collect_decl_writes(&b, writes, valued);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `local a = b` where `a` is captured by a closure and never written again,
+/// and `b` is declared with a value and never written again. `b` then has one
+/// value for its whole life, so every use of `a` can read `b` instead.
+fn captured_copy(
+    stmt: &Statement,
+    captured: &HashSet<RcLocal>,
+    protected: &HashSet<RcLocal>,
+    writes: &HashMap<RcLocal, usize>,
+    valued: &HashSet<RcLocal>,
+) -> Option<(RcLocal, RcLocal)> {
+    let Statement::Assign(assign) = stmt else {
+        return None;
+    };
+    if !assign.prefix || assign.left.len() != 1 || assign.right.len() != 1 {
+        return None;
+    }
+    let a = assign.left[0].as_local()?.clone();
+    let RValue::Local(b) = &assign.right[0] else {
+        return None;
+    };
+    if *b == a || !captured.contains(&a) || protected.contains(&a) {
+        return None;
+    }
+    if writes.get(&a) != Some(&1) {
+        return None;
+    }
+    if protected.contains(b) || writes.get(b) != Some(&1) || !valued.contains(b) {
+        return None;
+    }
+    Some((a, b.clone()))
+}
+
+/// Renames captured copies (see [`captured_copy`]) to their source in the
+/// rest of the block, closures and their upvalue lists included, and drops
+/// the copy. Nested blocks first, then this block.
+fn inline_captured_copies(
+    block: &mut Block,
+    captured: &HashSet<RcLocal>,
+    protected: &HashSet<RcLocal>,
+) -> bool {
+    let mut writes: HashMap<RcLocal, usize> = HashMap::new();
+    let mut valued: HashSet<RcLocal> = HashSet::new();
+    collect_decl_writes(block, &mut writes, &mut valued);
+    rewrite_captured_copies(block, captured, protected, &writes, &valued)
+}
+
+fn rewrite_captured_copies(
+    block: &mut Block,
+    captured: &HashSet<RcLocal>,
+    protected: &HashSet<RcLocal>,
+    writes: &HashMap<RcLocal, usize>,
+    valued: &HashSet<RcLocal>,
+) -> bool {
+    let mut changed = false;
+    for_nested_blocks(block, &mut |b| {
+        changed |= rewrite_captured_copies(b, captured, protected, writes, valued);
+    });
+    let mut i = 0;
+    while i < block.0.len() {
+        let Some((a, b)) = captured_copy(&block.0[i], captured, protected, writes, valued) else {
+            i += 1;
+            continue;
+        };
+        let mut tail = Block(block.0.split_off(i + 1));
+        block.0.pop();
+        let map: HashMap<RcLocal, RcLocal> = HashMap::from([(a, b)]);
+        replace_locals(&mut tail, &map);
+        block.0.extend(tail.0);
+        changed = true;
+    }
+    changed
+}
+
 pub fn apply(block: &mut Block) {
     apply_protected(block, &HashSet::new());
 }
@@ -747,6 +873,10 @@ pub fn apply_protected(block: &mut Block, protected: &HashSet<RcLocal>) {
     merge_decl_assign(block);
     fold_loop_carried(block);
     remove_identity(block);
+    let mut captured = HashSet::new();
+    collect_ref_captured(block, &mut captured);
+    captured.extend(protected.iter().cloned());
+    inline_captured_copies(block, &captured, protected);
     let mut captured = HashSet::new();
     collect_ref_captured(block, &mut captured);
     captured.extend(protected.iter().cloned());
@@ -999,6 +1129,95 @@ mod tests {
         apply(&mut block);
         let printed = block.to_string();
         assert!(printed.contains("g(f(), 1)"), "expected inlined call: {printed}");
+    }
+
+    fn closure_printing(local: RcLocal, upvalue: crate::Upvalue) -> RValue {
+        let body = Block(vec![Statement::Call(Call::new(
+            crate::Global::new(b"print".to_vec()).into(),
+            vec![RValue::Local(local)],
+        ))]);
+        let inner = crate::Function {
+            name: None,
+            line: None,
+            parameters: vec![],
+            is_variadic: false,
+            body,
+        };
+        RValue::Closure(crate::Closure {
+            function: by_address::ByAddress(crate::share_function(inner)),
+            upvalues: vec![upvalue],
+        })
+    }
+
+    #[test]
+    fn renames_captured_copy_to_its_source() {
+        // local b = 1; local a = b; register(function() print(a) end)
+        //   ->  local b = 1; register(function() print(b) end)
+        let b = named("b");
+        let a = named("a");
+        let mut decl_b = Assign::new(vec![b.clone().into()], vec![Literal::Integer(1).into()]);
+        decl_b.prefix = true;
+        let mut decl_a = Assign::new(vec![a.clone().into()], vec![RValue::Local(b.clone())]);
+        decl_a.prefix = true;
+        let register = Call::new(
+            crate::Global::new(b"register".to_vec()).into(),
+            vec![closure_printing(a.clone(), crate::Upvalue::Copy(a.clone()))],
+        );
+        let mut block = Block(vec![decl_b.into(), decl_a.into(), Statement::Call(register)]);
+        apply(&mut block);
+        let printed = block.to_string();
+        assert!(!printed.contains("local a"), "copy should be gone: {printed}");
+        assert!(printed.contains("print(b)"), "closure should read b: {printed}");
+    }
+
+    #[test]
+    fn keeps_captured_copy_when_target_is_rewritten() {
+        // local b = 1; local a = b; a = 2; register(function() print(a) end)
+        let b = named("b");
+        let a = named("a");
+        let mut decl_b = Assign::new(vec![b.clone().into()], vec![Literal::Integer(1).into()]);
+        decl_b.prefix = true;
+        let mut decl_a = Assign::new(vec![a.clone().into()], vec![RValue::Local(b.clone())]);
+        decl_a.prefix = true;
+        let rewrite_a = Assign::new(vec![a.clone().into()], vec![Literal::Integer(2).into()]);
+        let register = Call::new(
+            crate::Global::new(b"register".to_vec()).into(),
+            vec![closure_printing(a.clone(), crate::Upvalue::Copy(a.clone()))],
+        );
+        let mut block = Block(vec![
+            decl_b.into(),
+            decl_a.into(),
+            rewrite_a.into(),
+            Statement::Call(register),
+        ]);
+        apply(&mut block);
+        let printed = block.to_string();
+        assert!(printed.contains("local a"), "copy must stay: {printed}");
+    }
+
+    #[test]
+    fn keeps_captured_copy_when_source_is_rewritten() {
+        // local b = 1; local a = b; b = 2; register(function() print(a) end)
+        let b = named("b");
+        let a = named("a");
+        let mut decl_b = Assign::new(vec![b.clone().into()], vec![Literal::Integer(1).into()]);
+        decl_b.prefix = true;
+        let mut decl_a = Assign::new(vec![a.clone().into()], vec![RValue::Local(b.clone())]);
+        decl_a.prefix = true;
+        let rewrite_b = Assign::new(vec![b.clone().into()], vec![Literal::Integer(2).into()]);
+        let register = Call::new(
+            crate::Global::new(b"register".to_vec()).into(),
+            vec![closure_printing(a.clone(), crate::Upvalue::Copy(a.clone()))],
+        );
+        let mut block = Block(vec![
+            decl_b.into(),
+            decl_a.into(),
+            rewrite_b.into(),
+            Statement::Call(register),
+        ]);
+        apply(&mut block);
+        let printed = block.to_string();
+        assert!(printed.contains("local a"), "copy must stay: {printed}");
     }
 
     #[test]
