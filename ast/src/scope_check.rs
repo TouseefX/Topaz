@@ -33,6 +33,15 @@ pub fn check(block: &mut Block) -> ScopeReport {
     report
 }
 
+/// Checks one function body. `seed` holds the locals that are in scope before
+/// the body starts: its upvalues, parameters and hoisted locals.
+pub fn check_function(block: &mut Block, seed: &[RcLocal]) -> ScopeReport {
+    let mut report = ScopeReport::default();
+    let mut scope: HashSet<RcLocal> = seed.iter().cloned().collect();
+    check_block(block, &mut scope, None, &mut report);
+    report
+}
+
 fn check_use(
     local: &RcLocal,
     scope: &HashSet<RcLocal>,

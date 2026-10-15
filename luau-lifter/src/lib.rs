@@ -528,7 +528,7 @@ fn run_post_wave(
                 scope_steps.push(format!("{}={}/{}", $name, r.unresolved, r.skipped_blocks));
                 for e in r.examples {
                     if scope_examples.len() < 40 {
-                        scope_examples.push(format!("{}: {}", $name, e));
+                        scope_examples.push(format!("TOPAZ_SCOPE {}: {}", $name, e));
                     }
                 }
             }
@@ -613,7 +613,7 @@ fn run_post_wave(
         scope_steps.push(format!("spill={}/{}", r.unresolved, r.skipped_blocks));
         for e in r.examples {
             if scope_examples.len() < 40 {
-                scope_examples.push(format!("spill: {}", e));
+                scope_examples.push(format!("TOPAZ_SCOPE spill: {}", e));
             }
         }
         let mut header = vec![format!(
@@ -1067,6 +1067,24 @@ fn finish_function(
     (ByAddress(ast_function), upvalues_in)
 }
 
+/// `TOPAZ_SCOPE_CHECK`: counts the reads of undeclared locals in one
+/// function body at one stage of its decompilation.
+fn scope_note(
+    stage: &str,
+    body: &mut ast::Block,
+    seed: &[ast::RcLocal],
+    counts: &mut Vec<String>,
+    examples: &mut Vec<String>,
+) {
+    let r = ast::scope_check::check_function(body, seed);
+    counts.push(format!("{}={}/{}", stage, r.unresolved, r.skipped_blocks));
+    for e in r.examples {
+        if examples.len() < 40 {
+            examples.push(format!("TOPAZ_SCOPE {} fn: {}", stage, e));
+        }
+    }
+}
+
 fn decompile_function(
     ast_function: ast::SharedFunction,
     mut function: Function,
@@ -1204,6 +1222,18 @@ fn decompile_function(
             ast::Comment::new("failed to decompile function".to_string()).into(),
         ]),
     };
+    let scope_on = std::env::var_os("TOPAZ_SCOPE_CHECK").is_some();
+    let scope_seed: Vec<ast::RcLocal> = upvalues_in
+        .iter()
+        .chain(params.iter())
+        .chain(hoisted.iter())
+        .cloned()
+        .collect();
+    let mut scope_counts: Vec<String> = Vec::new();
+    let mut scope_examples: Vec<String> = Vec::new();
+    if scope_on {
+        scope_note("lift", &mut body, &scope_seed, &mut scope_counts, &mut scope_examples);
+    }
     // Flatten inverted `x ~= "A"` wrappers that swallowed later `x == "B"`
     // cases (v11 IOInvis else). Then fold SSA copies, never into upvalues
     // (v11 CameraShaker Update).
@@ -1214,6 +1244,9 @@ fn decompile_function(
             &upvalues_in.iter().cloned().collect(),
         );
     }));
+    if scope_on {
+        scope_note("fold", &mut body, &scope_seed, &mut scope_counts, &mut scope_examples);
+    }
     let block = ast::share_block(body);
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         LocalDeclarer::default().declare_locals(
@@ -1227,7 +1260,19 @@ fn decompile_function(
         );
     }));
 
-    let body = Arc::try_unwrap(block).unwrap().into_inner();
+    let mut body = Arc::try_unwrap(block).unwrap().into_inner();
+    if scope_on {
+        scope_note("declare", &mut body, &scope_seed, &mut scope_counts, &mut scope_examples);
+        let mut lines = vec![format!(
+            "TOPAZ_SCOPE function line {:?}: {}",
+            func_line,
+            scope_counts.join(" ")
+        )];
+        lines.extend(scope_examples);
+        for text in lines.into_iter().rev() {
+            body.0.insert(0, ast::Comment::new(text).into());
+        }
+    }
     finish_function(
         ast_function,
         body,

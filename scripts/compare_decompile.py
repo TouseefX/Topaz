@@ -289,7 +289,7 @@ def main(argv):
     with open(output, encoding="utf-8", errors="replace") as fh:
         scope_lines = [l.strip() for l in fh if l.strip().startswith("-- TOPAZ_SCOPE")]
     report.append(f"topaz scope check lines in output: {len(scope_lines)}")
-    report.extend(scope_lines[:60])
+    report.extend(scope_lines[:300])
 
     print("\n".join(report))
     return 0
