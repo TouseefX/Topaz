@@ -26,7 +26,7 @@ use std::collections::HashSet;
 
 use itertools::Either;
 
-use crate::{Block, LValue, LocalRw, RValue, RcLocal, Statement, Traverse};
+use crate::{Block, Call, LValue, LocalRw, RValue, RcLocal, Statement, Traverse};
 
 /// Counts for one call to [`sink_declarations`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +39,8 @@ pub struct SinkStats {
     pub not_movable: usize,
     /// Declarations the block never mentions again.
     pub unused: usize,
+    /// Of the moved declarations, how many are calls.
+    pub calls_moved: usize,
     /// First use is a plain assignment to the local.
     pub first_use_writes: usize,
     /// Blocked because a statement in between writes an input of the value.
@@ -64,6 +66,10 @@ struct Effects {
     calls: bool,
     /// The statement may change a table, a global, or run a call.
     side_effects: bool,
+    /// The statement contains something other than a literal, a local, a
+    /// closure or a table constructor, such as an index, an operator or a
+    /// global read.
+    opaque: bool,
 }
 
 impl Effects {
@@ -73,6 +79,7 @@ impl Effects {
         self.captured.extend(other.captured);
         self.calls |= other.calls;
         self.side_effects |= other.side_effects;
+        self.opaque |= other.opaque;
     }
 
     /// A construct that could not be inspected is assumed to do everything.
@@ -120,8 +127,11 @@ pub fn sink_declarations(block: &mut Block) -> SinkStats {
         };
         stats.candidates += 1;
 
-        let (reads, may_call): (Vec<RcLocal>, bool) = match assign.right.first() {
+        let value = assign.right.first();
+        let is_call = matches!(value, Some(RValue::Call(call)) if call_is_movable(call));
+        let (reads, may_call): (Vec<RcLocal>, bool) = match value {
             None => (Vec::new(), false),
+            Some(value) if is_call => (value.values_read().into_iter().cloned().collect(), false),
             Some(value) => match movable(value) {
                 Some(may_call) => (
                     value.values_read().into_iter().cloned().collect(),
@@ -159,6 +169,15 @@ pub fn sink_declarations(block: &mut Block) -> SinkStats {
                 blocked = Some(&mut stats.blocked_writes);
                 break;
             }
+            if is_call
+                && (s.calls
+                    || s.side_effects
+                    || s.opaque
+                    || s.mentions.iter().any(|m| captured.contains(m)))
+            {
+                blocked = Some(&mut stats.blocked_calls);
+                break;
+            }
             if reads_captured && s.calls {
                 blocked = Some(&mut stats.blocked_calls);
                 break;
@@ -177,6 +196,9 @@ pub fn sink_declarations(block: &mut Block) -> SinkStats {
             None => {
                 moves.push((d, f));
                 stats.moved += 1;
+                if is_call {
+                    stats.calls_moved += 1;
+                }
             }
         }
     }
@@ -208,6 +230,14 @@ pub fn sink_declarations(block: &mut Block) -> SinkStats {
     }
     block.0 = out;
     stats
+}
+
+/// A call whose callee and arguments can be evaluated later with the same
+/// result. The call itself has effects, so [`sink_declarations`] applies a
+/// stricter rule to it.
+fn call_is_movable(call: &Call) -> bool {
+    (matches!(call.value.as_ref(), RValue::Global(_)) || movable(&call.value).is_some())
+        && call.arguments.iter().all(|a| movable(a).is_some())
 }
 
 /// Whether a declared value can move. `Some(true)` means it may run a
@@ -279,6 +309,12 @@ fn summarize(statement: &mut Statement, fx: &mut Effects) {
 
     statement.post_traverse_values(&mut |value| -> Option<()> {
         if let Either::Right(value) = value {
+            if !matches!(
+                value,
+                RValue::Literal(_) | RValue::Local(_) | RValue::Closure(_) | RValue::Table(_)
+            ) {
+                fx.opaque = true;
+            }
             match value {
                 RValue::Call(_) | RValue::MethodCall(_) | RValue::Select(_) => {
                     fx.calls = true;

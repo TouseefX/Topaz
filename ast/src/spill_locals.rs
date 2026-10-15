@@ -326,11 +326,12 @@ fn spill_function(block: &mut Block) {
     peak = scan_block(block, 0, false, 0, &none, &mut decls, &mut seen);
     if std::env::var_os("TOPAZ_DEBUG_SPILL").is_some() {
         eprintln!(
-            "[spill-sink] peak {} -> {}; candidates {} moved {} not_movable {} unused {} first_use_writes {} blocked writes {} calls {} metamethod {}",
+            "[spill-sink] peak {} -> {}; candidates {} moved {} (calls {}) not_movable {} unused {} first_use_writes {} blocked writes {} calls {} metamethod {}",
             before,
             peak,
             sink.candidates,
             sink.moved,
+            sink.calls_moved,
             sink.not_movable,
             sink.unused,
             sink.first_use_writes,
