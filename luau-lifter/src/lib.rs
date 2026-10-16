@@ -1336,6 +1336,14 @@ fn decompile_function(
         for name in ld.unwritten.iter().take(4) {
             scope_examples.push(format!("TOPAZ_SCOPE ld fn: {} (read, never written)", name));
         }
+        scope_counts.push(format!(
+            "pl={}/{}/0",
+            ld.violations.len(),
+            ld.place_drops
+        ));
+        for name in ld.violations.iter().take(8) {
+            scope_examples.push(format!("TOPAZ_SCOPE pl fn: {} (declared where a use is not in scope)", name));
+        }
         scope_note("declare", &mut body, &scope_seed, &mut scope_counts, &mut scope_examples, false);
         // Same check, but entering the closures in the body: a local that a
         // closure uses while this function never declares it shows up here.

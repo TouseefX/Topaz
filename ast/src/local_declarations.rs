@@ -80,6 +80,10 @@ pub struct DeclStats {
     pub decl_drops: usize,
     /// Locals read in the visited code but never written in it.
     pub unwritten: Vec<String>,
+    /// Placements dropped because no block is at the chosen node.
+    pub place_drops: usize,
+    /// Locals whose chosen declaration point does not cover every use.
+    pub violations: Vec<String>,
 }
 
 thread_local! {
@@ -246,6 +250,8 @@ impl LocalDeclarer {
         let root_node = self.visit(root_block, 0);
         let lock_skips = self.lock_skips;
         let mut unwritten: Vec<String> = Vec::new();
+        let mut place_drops = 0usize;
+        let mut violations: Vec<String> = Vec::new();
         let dominators = simple_fast(&self.graph, root_node);
         let dom_idx = DomIdx::build(self.graph.node_indices(), &dominators);
         for (local, usages) in self.local_usages {
@@ -268,6 +274,12 @@ impl LocalDeclarer {
                 // with nil.
                 continue;
             }
+            // Snapshot of the usages for the placement check (debug only).
+            let uses: Vec<(NodeIndex, usize)> = if crate::scope_check::enabled() {
+                usages.iter().map(|(n, i)| (*n, *i)).collect()
+            } else {
+                Vec::new()
+            };
             let (mut node, mut first_stat_index) = if usages.len() == 1 {
                 usages.into_iter().next().unwrap()
             } else {
@@ -344,8 +356,31 @@ impl LocalDeclarer {
                 .node_weight(node)
                 .and_then(|(b, _)| b.clone())
             else {
+                place_drops += 1;
                 continue;
             };
+            if crate::scope_check::enabled() {
+                // Every use must be after the declaration point: in the same
+                // block at or after `first_stat_index`, or inside a child that
+                // starts at or after it.
+                let violated = uses.iter().any(|&(u, ui)| {
+                    if u == node {
+                        ui < first_stat_index
+                    } else if !dom_idx.dominates(node, u) {
+                        true
+                    } else {
+                        self.graph
+                            .neighbors_directed(node, Direction::Outgoing)
+                            .filter(|&c| dom_idx.dominates(c, u))
+                            .filter_map(|c| self.graph.node_weight(c).map(|(_, i)| *i))
+                            .min()
+                            .map_or(false, |child_stat| child_stat < first_stat_index)
+                    }
+                });
+                if violated {
+                    violations.push(format!("{}", local));
+                }
+            }
             self.declarations
                 .entry(block.into())
                 .or_default()
@@ -392,6 +427,8 @@ impl LocalDeclarer {
                 lock_skips,
                 decl_drops,
                 unwritten,
+                place_drops,
+                violations,
             }
         });
     }

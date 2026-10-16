@@ -297,6 +297,7 @@ def main(argv):
     out_by_stage = collections.Counter()
     never_by_stage = collections.Counter()
     ld_totals = [0, 0, 0]
+    pl_totals = [0, 0]
     nonzero = []
     for l in scope_lines:
         if "TOPAZ_SCOPE function line" not in l:
@@ -305,6 +306,10 @@ def main(argv):
         for stage, unresolved, never, skipped in re.findall(
             r"([a-z_]+)=(\d+)/(\d+)/(\d+)", l.split(":", 1)[1]
         ):
+            if stage == "pl":
+                pl_totals[0] += int(unresolved)
+                pl_totals[1] += int(never)
+                continue
             if stage == "ld":
                 # LocalDeclarer: blocks not locked, declarations dropped, read-never-written locals.
                 ld_totals[0] += int(unresolved)
@@ -324,6 +329,10 @@ def main(argv):
         "LocalDeclarer silent skips, summed over functions: blocks not locked "
         f"{ld_totals[0]}, declarations dropped with their block {ld_totals[1]}, "
         f"locals read but never written {ld_totals[2]}"
+    )
+    report.append(
+        "LocalDeclarer placements: declaration point not covering every use "
+        f"{pl_totals[0]}, placements with no block {pl_totals[1]}"
     )
     report.append(
         "reads of a local never declared in the function (upvalue identities, noise before link): "
