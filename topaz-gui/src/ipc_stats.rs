@@ -43,7 +43,6 @@ pub enum SharedState {
 pub struct SharedServerStatus {
     pub state: SharedState,
     pub luau_requests: u64,
-    pub lua51_requests: u64,
     pub bytes_in: u64,
     pub bytes_out: u64,
     pub errors: u64,

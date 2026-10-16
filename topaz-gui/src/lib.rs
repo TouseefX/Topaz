@@ -53,9 +53,6 @@ Avoid:\n\
 If the chosen port is busy, starting the server will fail with \"address in use\".";
 
 fn detect_format(bytes: &[u8]) -> Option<BytecodeFormat> {
-    if bytes.starts_with(b"\x1BLua") {
-        return Some(BytecodeFormat::Lua51);
-    }
     match bytes.first() {
         Some(&0) => Some(BytecodeFormat::Luau),
         Some(b) if (4..=9).contains(b) => Some(BytecodeFormat::Luau),
@@ -148,7 +145,6 @@ fn android_main(app: AndroidApp) {
 #[derive(PartialEq, Clone, Copy)]
 enum BytecodeFormat {
     Luau,
-    Lua51,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -213,7 +209,6 @@ pub struct TopazApp {
     server_port_text: String,
     server_port: u16,
     server_luau: bool,
-    server_lua51: bool,
     server_encode_key: u8,
     server_encode_key_text: String,
 
@@ -287,12 +282,11 @@ impl TopazApp {
             server_port_text: format!("{}", saved.server_port),
             server_port: saved.server_port,
             server_luau: saved.server_luau,
-            server_lua51: saved.server_lua51,
             server_encode_key: saved.server_encode_key,
             server_encode_key_text: format!("{}", saved.server_encode_key),
             // Default Android paths that users often have
             android_manual_path: if cfg!(target_os = "android") {
-                "/sdcard/Download/sample.luac".to_string()
+                "/sdcard/Download/sample.luau.bin".to_string()
             } else {
                 String::new()
             },
@@ -329,11 +323,6 @@ impl TopazApp {
         self.status_is_error = false;
     }
 
-    fn load_lua51_sample(&mut self) {
-        const SAMPLE: &[u8] = include_bytes!("../../sample.luac");
-        self.write_and_load_sample(SAMPLE, "topaz_sample.luac");
-    }
-
     fn load_luau_sample(&mut self) {
         const SAMPLE: &[u8] = include_bytes!("../../sample.luau.bin");
         self.write_and_load_sample(SAMPLE, "topaz_sample.luau.bin");
@@ -359,14 +348,10 @@ impl TopazApp {
                 if let Some(f) = detected {
                     if self.format != f {
                         self.format = f;
-                        let name = match f {
-                            BytecodeFormat::Lua51 => "Lua 5.1",
-                            BytecodeFormat::Luau => "Luau",
-                        };
-                        status.push_str(&format!(" · auto-detected {name}"));
+                        status.push_str(" · auto-detected Luau");
                     }
                 } else {
-                    status.push_str(" · format unknown — pick Luau or Lua 5.1 manually");
+                    status.push_str(" · format unknown — pick Luau manually");
                 }
                 self.status = status;
                 self.status_is_error = false;
@@ -422,7 +407,6 @@ impl TopazApp {
                     // Source only. CFG dump re-lifts the whole chunk and made
                     // even a one-line `require` wait a full extra pass.
                     match format {
-                        BytecodeFormat::Lua51 => lua51_lifter::decompile_bytecode(&bytecode),
                         BytecodeFormat::Luau => {
                             luau_lifter::decompile_bytecode_default(&bytecode, encode_key)
                         }
@@ -702,7 +686,6 @@ impl TopazApp {
             show_upvalue_comments: self.show_upvalue_comments,
             server_port: self.server_port,
             server_luau: self.server_luau,
-            server_lua51: self.server_lua51,
             server_encode_key: self.server_encode_key,
             encode_key: self.encode_key,
             keep_alive: self.keep_alive,
@@ -729,7 +712,7 @@ impl eframe::App for TopazApp {
             ui.horizontal(|ui| {
                 ui.heading("Topaz");
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new("Luau / Lua 5.1 decompiler").weak());
+                ui.label(egui::RichText::new("Luau decompiler").weak());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     server_status_badge(ui, &state);
                 });
@@ -894,28 +877,19 @@ impl TopazApp {
                 if ui.button("Open File…").clicked() {
                     self.pick_file();
                 }
-                let mut load_lua51 = false;
                 let mut load_luau = false;
                 ui.menu_button("Load sample ▾", |ui| {
-                    if ui.button("Lua 5.1 (sample.luac)").clicked() {
-                        load_lua51 = true;
-                        ui.close_menu();
-                    }
                     if ui.button("Luau (sample.luau)").clicked() {
                         load_luau = true;
                         ui.close_menu();
                     }
                 });
-                if load_lua51 {
-                    self.load_lua51_sample();
-                }
                 if load_luau {
                     self.load_luau_sample();
                 }
                 ui.separator();
                 ui.label("Format:");
                 ui.radio_value(&mut self.format, BytecodeFormat::Luau, "Luau");
-                ui.radio_value(&mut self.format, BytecodeFormat::Lua51, "Lua 5.1");
 
                 if self.format == BytecodeFormat::Luau {
                     ui.separator();
@@ -1160,7 +1134,6 @@ impl TopazApp {
             return;
         };
         self.cfgs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match self.format {
-            BytecodeFormat::Lua51 => lua51_lifter::dump_cfgs(bytecode),
             BytecodeFormat::Luau => dump_luau_cfgs_for_gui(bytecode, self.encode_key),
         }))
         .unwrap_or_default();
@@ -1444,7 +1417,7 @@ impl TopazApp {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.label(egui::RichText::new("About").strong());
             ui.add_space(4.0);
-            ui.label("Topaz · Luau and Lua 5.1 decompiler");
+            ui.label("Topaz · Luau decompiler");
             #[cfg(target_os = "android")]
             ui.label("Android build · pure Rust · eframe + NativeActivity · system clipboard + SAF browser");
             #[cfg(not(target_os = "android"))]
@@ -1524,10 +1497,8 @@ impl TopazApp {
                     ui.label("Routes");
                     ui.horizontal(|ui| {
                         let old_luau = self.server_luau;
-                        let old_lua51 = self.server_lua51;
                         ui.checkbox(&mut self.server_luau, "Luau (/luau/decompile)");
-                        ui.checkbox(&mut self.server_lua51, "Lua 5.1 (/lua51/decompile)");
-                        if self.server_luau != old_luau || self.server_lua51 != old_lua51 {
+                        if self.server_luau != old_luau {
                             self.save_state();
                         }
                     });
@@ -1560,7 +1531,7 @@ impl TopazApp {
 
         ui.horizontal(|ui| {
             let start_label = if transitional { "Working…" } else { "▶  Start server" };
-            let can_start = !running && !transitional && (self.server_luau || self.server_lua51);
+            let can_start = !running && !transitional && self.server_luau;
             if ui
                 .add_enabled(can_start, egui::Button::new(start_label).min_size(egui::vec2(140.0, 28.0)))
                 .clicked()
@@ -1571,7 +1542,6 @@ impl TopazApp {
                     let cfg = ServerConfig {
                         port: self.server_port,
                         luau: self.server_luau,
-                        lua51: self.server_lua51,
                         encode_key: self.server_encode_key,
                     };
                     self.server.start(cfg, move || ctx.request_repaint());
@@ -1581,7 +1551,6 @@ impl TopazApp {
                     crate::android::start_remote_server(crate::android::RemoteServerConfig {
                         port: self.server_port,
                         luau: self.server_luau,
-                        lua51: self.server_lua51,
                         encode_key: self.server_encode_key,
                     });
                 }
@@ -1597,7 +1566,7 @@ impl TopazApp {
                 crate::android::stop_remote_server();
             }
 
-            if !self.server_luau && !self.server_lua51 && !running {
+            if !self.server_luau && !running {
                 ui.weak("Enable at least one route to start.");
             }
         });
@@ -1617,14 +1586,6 @@ impl TopazApp {
                         "POST",
                         &format!("{base}/luau/decompile?encode_key={}", self.server_encode_key),
                         "Body: raw or base64 Luau bytecode",
-                    );
-                }
-                if self.server_lua51 {
-                    endpoint_row(
-                        ui,
-                        "POST",
-                        &format!("{base}/lua51/decompile"),
-                        "Body: raw or base64 Lua 5.1 bytecode",
                     );
                 }
 
@@ -1653,7 +1614,7 @@ impl TopazApp {
                 ui.add_space(4.0);
 
                 #[cfg(not(target_os = "android"))]
-                let (luau, lua51, bytes_in, bytes_out, last_str) = {
+                let (luau, bytes_in, bytes_out, last_str) = {
                     use std::sync::atomic::Ordering;
                     let s = &self.server.stats;
                     let last_str = {
@@ -1665,14 +1626,13 @@ impl TopazApp {
                     };
                     (
                         s.luau_requests.load(Ordering::Relaxed),
-                        s.lua51_requests.load(Ordering::Relaxed),
                         s.bytes_in.load(Ordering::Relaxed),
                         s.bytes_out.load(Ordering::Relaxed),
                         last_str,
                     )
                 };
                 #[cfg(target_os = "android")]
-                let (luau, lua51, bytes_in, bytes_out, last_str) = {
+                let (luau, bytes_in, bytes_out, last_str) = {
                     let s = &self.android_server_status;
                     let last_str = match s.last_request_ms {
                         None => "—".to_string(),
@@ -1682,19 +1642,15 @@ impl TopazApp {
                             format!("{} ago", format_duration(elapsed))
                         }
                     };
-                    (s.luau_requests, s.lua51_requests, s.bytes_in, s.bytes_out, last_str)
+                    (s.luau_requests, s.bytes_in, s.bytes_out, last_str)
                 };
-                let total = luau + lua51;
 
                 egui::Grid::new("server_stats")
                     .num_columns(2)
                     .spacing([18.0, 4.0])
                     .show(ui, |ui| {
                         ui.label("Requests served");
-                        ui.monospace(format!(
-                            "{total}  ({} Luau, {} Lua 5.1)",
-                            luau, lua51
-                        ));
+                        ui.monospace(format!("{luau}"));
                         ui.end_row();
 
                         ui.label("Bytes in / out");
@@ -1722,10 +1678,7 @@ impl TopazApp {
                         self.server_encode_key,
                     )
                 } else {
-                    format!(
-                        "curl -X POST --data-binary @bytecode.bin '{}/lua51/decompile'",
-                        format!("http://{addr}"),
-                    )
+                    "No route enabled.".to_string()
                 };
                 ui.add(
                     egui::TextEdit::multiline(&mut example.as_str())

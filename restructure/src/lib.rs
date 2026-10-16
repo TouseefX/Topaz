@@ -11,6 +11,9 @@ use tuple::Map;
 mod conditional;
 mod jump;
 mod r#loop;
+mod split;
+mod structured;
+pub use structured::{set_debug_tag, take_hoisted_locals};
 
 /// Post-dominators of `graph` (virtual super-sink, no mutation).
 pub fn post_dominators<N, E>(graph: &StableDiGraph<N, E>) -> IDom<NodeIndex> {
@@ -508,6 +511,20 @@ impl GraphStructurer {
     }
 }
 
-pub fn lift(function: cfg::function::Function) -> ast::Block {
+pub fn lift(mut function: cfg::function::Function) -> ast::Block {
+    structured::clear_hoisted_locals();
+    // Irreducible loops get copies of their entry blocks first, so the
+    // structurer sees a reducible graph.
+    split::make_reducible(&mut function);
+    // Goto-free structurer first. It only reads `function`, and returns
+    // `None` unless its output is provably clean (no goto / labels / leftover
+    // for-loop IR). Next, the goto-free dispatch fallback (one state machine
+    // arm per node). Only then the legacy goto structurer.
+    if let Some(block) = structured::try_lift(&function) {
+        return block;
+    }
+    if let Some(block) = structured::try_dispatch(&function) {
+        return block;
+    }
     GraphStructurer::new(function).structure()
 }

@@ -71,8 +71,33 @@ impl DomIdx {
     }
 }
 
+/// Silent skips in the last `declare_locals` call on this thread (debug).
+#[derive(Default, Clone)]
+pub struct DeclStats {
+    /// Blocks `visit` could not lock, so their statements were not recorded.
+    pub lock_skips: usize,
+    /// Declarations that were dropped because their block could not be locked.
+    pub decl_drops: usize,
+    /// Locals read in the visited code but never written in it.
+    pub unwritten: Vec<String>,
+    /// Placements dropped because no block is at the chosen node.
+    pub place_drops: usize,
+    /// Locals whose chosen declaration point does not cover every use.
+    pub violations: Vec<String>,
+}
+
+thread_local! {
+    static STATS: std::cell::RefCell<DeclStats> = std::cell::RefCell::new(DeclStats::default());
+}
+
+/// Returns and clears the stats of the last `declare_locals` on this thread.
+pub fn take_stats() -> DeclStats {
+    STATS.with(|s| std::mem::take(&mut *s.borrow_mut()))
+}
+
 #[derive(Default)]
 pub struct LocalDeclarer {
+    lock_skips: usize,
     block_to_node: FxHashMap<ByAddress<SharedBlock>, NodeIndex>,
     graph: DiGraph<(Option<SharedBlock>, usize), ()>,
     local_usages: IndexMap<RcLocal, FxHashMap<NodeIndex, usize>>,
@@ -142,6 +167,7 @@ impl LocalDeclarer {
         let mut nested = Vec::new();
         {
             let Some(guard) = block.try_lock() else {
+                self.lock_skips += 1;
                 return node;
             };
             for (stat_index, stat) in guard.iter().enumerate() {
@@ -222,6 +248,10 @@ impl LocalDeclarer {
         locals_to_ignore: &FxHashSet<RcLocal>,
     ) {
         let root_node = self.visit(root_block, 0);
+        let lock_skips = self.lock_skips;
+        let mut unwritten: Vec<String> = Vec::new();
+        let mut place_drops = 0usize;
+        let mut violations: Vec<String> = Vec::new();
         let dominators = simple_fast(&self.graph, root_node);
         let dom_idx = DomIdx::build(self.graph.node_indices(), &dominators);
         for (local, usages) in self.local_usages {
@@ -229,12 +259,27 @@ impl LocalDeclarer {
                 continue;
             }
             if !self.written.contains(&local) {
+                unwritten.push(
+                    local
+                        .0
+                         .0
+                        .lock()
+                        .0
+                        .clone()
+                        .unwrap_or_else(|| "?".to_string()),
+                );
                 // Never assigned: a missing def, an upvalue/param we
                 // already ignore, or a generic-for binder phi. Inserting
                 // `local x` at the first read shadows the binder / outer
                 // with nil.
                 continue;
             }
+            // Snapshot of the usages for the placement check (debug only).
+            let uses: Vec<(NodeIndex, usize)> = if crate::scope_check::enabled() {
+                usages.iter().map(|(n, i)| (*n, *i)).collect()
+            } else {
+                Vec::new()
+            };
             let (mut node, mut first_stat_index) = if usages.len() == 1 {
                 usages.into_iter().next().unwrap()
             } else {
@@ -311,8 +356,31 @@ impl LocalDeclarer {
                 .node_weight(node)
                 .and_then(|(b, _)| b.clone())
             else {
+                place_drops += 1;
                 continue;
             };
+            if crate::scope_check::enabled() {
+                // Every use must be after the declaration point: in the same
+                // block at or after `first_stat_index`, or inside a child that
+                // starts at or after it.
+                let violated = uses.iter().any(|&(u, ui)| {
+                    if u == node {
+                        ui < first_stat_index
+                    } else if !dom_idx.dominates(node, u) {
+                        true
+                    } else {
+                        self.graph
+                            .neighbors_directed(node, Direction::Outgoing)
+                            .filter(|&c| dom_idx.dominates(c, u))
+                            .filter_map(|c| self.graph.node_weight(c).map(|(_, i)| *i))
+                            .min()
+                            .map_or(false, |child_stat| child_stat < first_stat_index)
+                    }
+                });
+                if violated {
+                    violations.push(format!("{}", local));
+                }
+            }
             self.declarations
                 .entry(block.into())
                 .or_default()
@@ -321,8 +389,10 @@ impl LocalDeclarer {
                 .insert(local);
         }
 
+        let mut decl_drops = 0usize;
         for (ByAddress(block), declarations) in self.declarations {
             let Some(mut block) = block.try_lock() else {
+                decl_drops += declarations.values().map(|set| set.len()).sum::<usize>();
                 continue;
             };
             for (stat_index, mut locals) in declarations.into_iter().rev() {
@@ -352,6 +422,15 @@ impl LocalDeclarer {
                 }
             }
         }
+        STATS.with(|s| {
+            *s.borrow_mut() = DeclStats {
+                lock_skips,
+                decl_drops,
+                unwritten,
+                place_drops,
+                violations,
+            }
+        });
     }
 }
 

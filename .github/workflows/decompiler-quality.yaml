@@ -1,0 +1,145 @@
+name: Decompiler quality
+
+# Builds the decompiler from this branch and from main, decompiles the
+# Lua corpus in decompiler-corpus/ with both, and reports goto counts,
+# incomplete markers and whether each decompiled output still compiles.
+#
+# Results are also published as workflow annotations (readable through the
+# checks API even when the raw job log is not available).
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - 'arena/**'
+
+jobs:
+  corpus:
+    name: Corpus (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: new
+            src: .
+          - label: baseline
+            src: baseline
+    steps:
+      - name: Checkout this branch
+        uses: actions/checkout@v4
+
+      - name: Checkout main as baseline
+        if: matrix.label == 'baseline'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: baseline
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.src }}
+
+      - name: Build topaz CLI
+        working-directory: ${{ matrix.src }}
+        run: cargo build --release -p topaz
+
+      - name: Build luau-compile and luau (runtime)
+        run: |
+          git clone --depth 1 https://github.com/luau-lang/luau.git /tmp/luau
+          cmake -S /tmp/luau -B /tmp/luau/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/luau/build --target Luau.Compile.CLI --target Luau.Repl.CLI --parallel 4
+          LUAU_COMPILE="$(find /tmp/luau/build -type f -name 'luau-compile' | head -n 1)"
+          LUAU_REPL="$(find /tmp/luau/build -type f -name 'luau' -perm -u+x | head -n 1)"
+          test -x "$LUAU_COMPILE"
+          test -x "$LUAU_REPL"
+          echo "LUAU_COMPILE=$LUAU_COMPILE" >> "$GITHUB_ENV"
+          echo "LUAU_REPL=$LUAU_REPL" >> "$GITHUB_ENV"
+
+      - name: Decompile corpus
+        env:
+          TOPAZ_STRUCTURED_DEBUG: '1'
+        run: |
+          bash scripts/decompile_corpus.sh \
+            "${{ matrix.src }}/target/release/topaz" \
+            "$LUAU_COMPILE" \
+            decompiler-corpus \
+            "corpus-out/${{ matrix.label }}" \
+            "$LUAU_REPL"
+          cat "corpus-out/${{ matrix.label }}/SUMMARY.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish corpus summary as annotations
+        if: always()
+        run: |
+          # Each block is ONE annotation with %0A line breaks: GitHub caps the
+          # number of notices per step, so one-line-per-annotation loses data.
+          label="${{ matrix.label }}"
+          esc() { sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/$/%0A/' | tr -d '\n'; }
+          f="corpus-out/$label/SUMMARY.md"
+          if [ -f "$f" ]; then
+            printf '::notice title=corpus summary (%s)::%s\n' "$label" "$(sed 's/|/ /g' "$f" | esc)"
+          else
+            echo "::warning title=corpus::no SUMMARY.md produced"
+          fi
+          logs=(corpus-out/$label/*.topaz.log)
+          if [ -f "${logs[0]}" ]; then
+            # Why the goto-free structurer gave up (or succeeded), aggregated.
+            s1="$(cat "${logs[@]}" | grep -h '^structured:' | sort | uniq -c | sort -rn | head -40)"
+            printf '::notice title=structured reasons (%s)::%s\n' "$label" "$(printf '%s\n' "$s1" | esc)"
+            # Panics and errors from the decompiler itself, aggregated.
+            s2="$(cat "${logs[@]}" | grep -h -E 'panicked|error' | sort | uniq -c | sort -rn | head -15)"
+            printf '::notice title=topaz errors (%s)::%s\n' "$label" "$(printf '%s\n' "$s2" | esc)"
+          fi
+
+      - name: Publish output samples (debug)
+        if: always()
+        run: |
+          label="${{ matrix.label }}"
+          esc() { sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/$/%0A/' | tr -d '\n'; }
+          for f in corpus-out/$label/01_loops_break_continue.topaz.log corpus-out/$label/07_cutscene_like.decompiled.lua corpus-out/$label/07_cutscene_like.topaz.log; do
+            [ -f "$f" ] || { echo "::notice title=sample::missing $f"; continue; }
+            printf '::notice title=sample %s (%s, %s bytes)::%s\n' "$(basename "$f")" "$label" "$(wc -c < "$f")" "$(head -n 150 "$f" | esc)"
+          done
+          : > /tmp/diffs.txt
+          for f in corpus-out/$label/*.diff; do
+            [ -f "$f" ] || continue
+            { printf '== %s ==\n' "$(basename "$f")"; head -n 25 "$f"; } >> /tmp/diffs.txt
+          done
+          diffs="$(cat /tmp/diffs.txt)"
+          if [ -n "$diffs" ]; then
+            printf '::notice title=output diffs (%s)::%s\n' "$label" "$(printf '%s' "$diffs" | esc)"
+          fi
+
+      - name: Unit tests (ast, cfg, restructure) - informational
+        continue-on-error: true
+        working-directory: ${{ matrix.src }}
+        env:
+          RUST_BACKTRACE: '1'
+        run: |
+          # Every test binary runs (--no-fail-fast). Failure lines become
+          # annotations so the cause is visible without the raw job log.
+          rc=0
+          cargo test -p ast -p cfg -p restructure --lib --no-fail-fast > unit-test.log 2>&1 || rc=$?
+          esc() { sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/$/%0A/' | tr -d '\n'; }
+          summary="$(grep -E '^error|^ +--> |panicked at|^test .* FAILED|test result' unit-test.log | head -80)"
+          printf '::error title=unit test results (%s, exit %s)::%s\n' "${{ matrix.label }}" "$rc" "$(printf '%s\n' "$summary" | esc)"
+          exit $rc
+
+      - name: Restructure unit tests (gate, new only)
+        if: matrix.label == 'new'
+        env:
+          RUST_BACKTRACE: '1'
+        run: cargo test -p restructure --lib
+
+      - name: Upload corpus output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: decompile-corpus-${{ matrix.label }}
+          path: corpus-out/${{ matrix.label }}
+          if-no-files-found: warn

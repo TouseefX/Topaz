@@ -1536,7 +1536,6 @@ pub fn files_dir() -> Option<String> {
 pub struct RemoteServerConfig {
     pub port: u16,
     pub luau: bool,
-    pub lua51: bool,
     pub encode_key: u8,
 }
 
@@ -1550,7 +1549,6 @@ pub fn start_remote_server(cfg: RemoteServerConfig) -> bool {
         put_string_extra(env, intent, "cmd", "start_server")?;
         put_int_extra(env, intent, "port", cfg.port as i32)?;
         put_bool_extra(env, intent, "luau", cfg.luau)?;
-        put_bool_extra(env, intent, "lua51", cfg.lua51)?;
         put_int_extra(env, intent, "encode_key", cfg.encode_key as i32)?;
 
         let dir = files_dir_inner(env, activity)?;

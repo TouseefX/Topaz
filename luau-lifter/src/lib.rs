@@ -506,6 +506,11 @@ fn run_post_wave(
         .filter(|s| s != "0" && !s.eq_ignore_ascii_case("false"))
         .is_some();
     let post_start = Instant::now();
+    // `TOPAZ_SCOPE_CHECK`: after every step, count reads of locals no scope
+    // declares. The counts go into the output as `-- TOPAZ_SCOPE` comments.
+    let scope_on = std::env::var_os("TOPAZ_SCOPE_CHECK").is_some();
+    let mut scope_steps: Vec<String> = Vec::new();
+    let mut scope_examples: Vec<String> = Vec::new();
     macro_rules! step {
         ($name:expr, $e:expr) => {{
             let _ = tx.send(PostEvent::Entering($name));
@@ -518,6 +523,23 @@ fn run_post_wave(
             }
             let t0 = Instant::now();
             $e;
+            if scope_on {
+                let r = ast::scope_check::check(&mut body);
+                scope_steps.push(format!(
+                    "{}={}/{}/{}",
+                    $name, r.unresolved, r.never_declared, r.skipped_blocks
+                ));
+                for e in r.examples {
+                    if scope_examples.len() < 60 {
+                        scope_examples.push(format!("TOPAZ_SCOPE {}: {}", $name, e));
+                    }
+                }
+                for e in r.snippets {
+                    if scope_examples.len() < 60 {
+                        scope_examples.push(format!("TOPAZ_SCOPE {} stmt: {}", $name, e));
+                    }
+                }
+            }
             if dbg {
                 eprintln!(
                     "[post] after {} ({:.1}s): {}",
@@ -530,6 +552,23 @@ fn run_post_wave(
     }
     if dbg {
         eprintln!("[post] start t+0.0s: {}", report_cycles(&mut body));
+    }
+    if scope_on {
+        let r = ast::scope_check::check(&mut body);
+        scope_steps.push(format!(
+            "start={}/{}/{}",
+            r.unresolved, r.never_declared, r.skipped_blocks
+        ));
+        for e in r.examples {
+            if scope_examples.len() < 60 {
+                scope_examples.push(format!("TOPAZ_SCOPE start: {}", e));
+            }
+        }
+        for e in r.snippets {
+            if scope_examples.len() < 60 {
+                scope_examples.push(format!("TOPAZ_SCOPE start stmt: {}", e));
+            }
+        }
     }
     step!("link_upvalues", link_upvalues(&mut body, &mut upvalues));
     const QUALITY_STMT_CAP: usize = 250_000;
@@ -589,6 +628,42 @@ fn run_post_wave(
             n_funcs,
         )));
         return;
+    }
+    // Luau rejects a function with more than 200 active locals. Spill the
+    // excess top-level locals of each function into a table. Runs after the
+    // cycle check, because the walk uses try_lock on shared blocks.
+    ast::spill_locals::spill_locals(&mut body);
+    if scope_on {
+        let r = ast::scope_check::check(&mut body);
+        scope_steps.push(format!(
+            "spill={}/{}/{}",
+            r.unresolved, r.never_declared, r.skipped_blocks
+        ));
+        for e in r.examples {
+            if scope_examples.len() < 60 {
+                scope_examples.push(format!("TOPAZ_SCOPE spill: {}", e));
+            }
+        }
+        for e in r.snippets {
+            if scope_examples.len() < 60 {
+                scope_examples.push(format!("TOPAZ_SCOPE spill stmt: {}", e));
+            }
+        }
+        let mut header = vec![format!(
+            "TOPAZ_SCOPE unresolved/never-declared/skipped per step: {}",
+            scope_steps.join(" ")
+        )];
+        header.extend(scope_examples);
+        for text in header.into_iter().rev() {
+            body.0.insert(0, ast::Comment::new(text).into());
+        }
+    }
+    if std::env::var_os("TOPAZ_AB_REPORT").is_some() {
+        eprintln!(
+            "[ab] captured renames={} replace skips={}",
+            ast::copy_fold::CAPTURED_RENAMES.load(std::sync::atomic::Ordering::Relaxed),
+            ast::replace_locals::LOCKED_SKIPS.load(std::sync::atomic::Ordering::Relaxed),
+        );
     }
     let _ = tx.send(PostEvent::Done(render_complete(&mut body)));
 }
@@ -1023,13 +1098,58 @@ fn finish_function(
         let mut ast_function = ast_function.lock();
         ast_function.body = body;
         if post && !ast_function.body.0.is_empty() && ast_function.body.0.len() < 250_000 {
+            if ast::scope_check::enabled() {
+                let seed: Vec<ast::RcLocal> = upvalues_in
+                    .iter()
+                    .chain(params.iter())
+                    .cloned()
+                    .collect();
+                ast::scope_check::set_seed(seed);
+            }
             post_process::apply_all_with_upvalues(&mut ast_function.body, &upvalues_in);
+            if ast::scope_check::enabled() {
+                let log = ast::scope_check::take_log();
+                let text = format!("TOPAZ_SCOPE function line {:?}: {}", func_line, log.join(" "));
+                ast_function.body.0.insert(0, ast::Comment::new(text).into());
+            }
         }
         ast_function.parameters = params;
         ast_function.is_variadic = is_variadic;
         ast_function.line = func_line;
     }
     (ByAddress(ast_function), upvalues_in)
+}
+
+/// `TOPAZ_SCOPE_CHECK`: counts the reads of undeclared locals in one
+/// function body at one stage of its decompilation.
+fn scope_note(
+    stage: &str,
+    body: &mut ast::Block,
+    seed: &[ast::RcLocal],
+    counts: &mut Vec<String>,
+    examples: &mut Vec<String>,
+    closures: bool,
+) {
+    let r = ast::scope_check::check_function(body, seed, closures);
+    counts.push(format!(
+        "{}={}/{}/{}",
+        stage, r.unresolved, r.never_declared, r.skipped_blocks
+    ));
+    for e in r.oos_examples.into_iter().chain(r.examples) {
+        if examples.len() < 60 {
+            examples.push(format!("TOPAZ_SCOPE {} fn: {}", stage, e));
+        }
+    }
+    for e in r.snippets {
+        if examples.len() < 60 {
+            examples.push(format!("TOPAZ_SCOPE {} fn stmt: {}", stage, e));
+        }
+    }
+    for e in r.oos_snippets {
+        if examples.len() < 60 {
+            examples.push(format!("TOPAZ_SCOPE {} oos stmt: {}", stage, e));
+        }
+    }
 }
 
 fn decompile_function(
@@ -1157,34 +1277,87 @@ fn decompile_function(
     let params = std::mem::take(&mut function.parameters);
     let is_variadic = function.is_variadic;
     let func_line = function.line;
+    restructure::set_debug_tag(format!("line {:?}", func_line));
     let lifted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         restructure::lift(function)
     }));
+    // Locals the dispatch fallback declared itself (empty otherwise).
+    let hoisted = restructure::take_hoisted_locals();
     let mut body = match lifted {
         Ok(b) => b,
         Err(_) => ast::Block(vec![
             ast::Comment::new("failed to decompile function".to_string()).into(),
         ]),
     };
+    let scope_on = std::env::var_os("TOPAZ_SCOPE_CHECK").is_some();
+    let scope_seed: Vec<ast::RcLocal> = upvalues_in
+        .iter()
+        .chain(params.iter())
+        .chain(hoisted.iter())
+        .cloned()
+        .collect();
+    let mut scope_counts: Vec<String> = Vec::new();
+    let mut scope_examples: Vec<String> = Vec::new();
     // Flatten inverted `x ~= "A"` wrappers that swallowed later `x == "B"`
     // cases (v11 IOInvis else). Then fold SSA copies, never into upvalues
     // (v11 CameraShaker Update).
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ast::flatten_dispatch::flatten_string_dispatch(&mut body);
-        ast::fold_copies::fold_copy_locals_with(
-            &mut body,
-            &upvalues_in.iter().cloned().collect(),
-        );
+        // A/B switch: skip the fold before local declaration.
+        if std::env::var_os("TOPAZ_AB_NO_FOLD_COPIES").is_none() {
+            ast::fold_copies::fold_copy_locals_with(
+                &mut body,
+                &upvalues_in.iter().cloned().collect(),
+            );
+        }
     }));
     let block = ast::share_block(body);
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         LocalDeclarer::default().declare_locals(
             Arc::clone(&block),
-            &upvalues_in.iter().chain(params.iter()).cloned().collect(),
+            &upvalues_in
+                .iter()
+                .chain(params.iter())
+                .chain(hoisted.iter())
+                .cloned()
+                .collect(),
         );
     }));
 
-    let body = Arc::try_unwrap(block).unwrap().into_inner();
+    let mut body = Arc::try_unwrap(block).unwrap().into_inner();
+    if scope_on {
+        let ld = ast::local_declarations::take_stats();
+        scope_counts.push(format!(
+            "ld={}/{}/{}",
+            ld.lock_skips,
+            ld.decl_drops,
+            ld.unwritten.len()
+        ));
+        for name in ld.unwritten.iter().take(4) {
+            scope_examples.push(format!("TOPAZ_SCOPE ld fn: {} (read, never written)", name));
+        }
+        scope_counts.push(format!(
+            "pl={}/{}/0",
+            ld.violations.len(),
+            ld.place_drops
+        ));
+        for name in ld.violations.iter().take(8) {
+            scope_examples.push(format!("TOPAZ_SCOPE pl fn: {} (declared where a use is not in scope)", name));
+        }
+        scope_note("declare", &mut body, &scope_seed, &mut scope_counts, &mut scope_examples, false);
+        // Same check, but entering the closures in the body: a local that a
+        // closure uses while this function never declares it shows up here.
+        scope_note("declare_sub", &mut body, &scope_seed, &mut scope_counts, &mut scope_examples, true);
+        let mut lines = vec![format!(
+            "TOPAZ_SCOPE function line {:?}: {}",
+            func_line,
+            scope_counts.join(" ")
+        )];
+        lines.extend(scope_examples);
+        for text in lines.into_iter().rev() {
+            body.0.insert(0, ast::Comment::new(text).into());
+        }
+    }
     finish_function(
         ast_function,
         body,
