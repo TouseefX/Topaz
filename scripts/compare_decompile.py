@@ -329,15 +329,14 @@ def main(argv):
         "reads of a local never declared in the function (upvalue identities, noise before link): "
         + ", ".join(f"{k} {v}" for k, v in never_by_stage.items())
     )
-    report.extend(nonzero)
-    # Every out-of-scope example the checker recorded, so none is crowded out
-    # by the first 200 lines below.
+    # Out-of-scope reads first, so they fit in the annotation budget.
     oos = [l for l in scope_lines if "(out of scope" in l]
-    report.append(f"out-of-scope examples recorded: {len(oos)} (first 80 shown)")
-    report.extend(l[:300] for l in oos[:80])
+    report.append(f"out-of-scope examples recorded: {len(oos)} (first 40 shown)")
+    report.extend(l[:200] for l in oos[:40])
     stmts = [l for l in scope_lines if " oos stmt: " in l and "declare" in l]
-    report.append(f"declare-stage statements with an out-of-scope read: {len(stmts)} (first 60 shown)")
-    report.extend(l[:300] for l in stmts[:60])
+    report.append(f"declare-stage statements with an out-of-scope read: {len(stmts)} (first 25 shown)")
+    report.extend(l[:200] for l in stmts[:25])
+    report.extend(nonzero[:20])
     report.extend(scope_lines[:200])
 
     print("\n".join(report))
