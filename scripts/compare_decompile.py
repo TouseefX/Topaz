@@ -335,9 +335,9 @@ def main(argv):
     oos = [l for l in scope_lines if "(out of scope" in l]
     report.append(f"out-of-scope examples recorded: {len(oos)} (first 80 shown)")
     report.extend(l[:300] for l in oos[:80])
-    stmts = [l for l in scope_lines if " fn stmt: " in l and "declare" in l]
-    report.append(f"declare-stage statements with an out-of-scope read: {len(stmts)} (first 30 shown)")
-    report.extend(l[:300] for l in stmts[:30])
+    stmts = [l for l in scope_lines if " oos stmt: " in l and "declare" in l]
+    report.append(f"declare-stage statements with an out-of-scope read: {len(stmts)} (first 60 shown)")
+    report.extend(l[:300] for l in stmts[:60])
     report.extend(scope_lines[:200])
 
     print("\n".join(report))

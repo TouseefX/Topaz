@@ -1145,6 +1145,11 @@ fn scope_note(
             examples.push(format!("TOPAZ_SCOPE {} fn stmt: {}", stage, e));
         }
     }
+    for e in r.oos_snippets {
+        if examples.len() < 60 {
+            examples.push(format!("TOPAZ_SCOPE {} oos stmt: {}", stage, e));
+        }
+    }
 }
 
 fn decompile_function(

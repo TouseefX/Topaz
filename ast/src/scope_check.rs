@@ -33,6 +33,8 @@ pub struct ScopeReport {
     pub examples: Vec<String>,
     /// The first few out-of-scope uses, in the same form.
     pub oos_examples: Vec<String>,
+    /// The first few statements that contain an out-of-scope use, as text.
+    pub oos_snippets: Vec<String>,
     /// The first few statements that contain an offender, as text.
     pub snippets: Vec<String>,
     /// Every local declared in the checked part.
@@ -41,6 +43,7 @@ pub struct ScopeReport {
 
 const MAX_EXAMPLES: usize = 4;
 const MAX_OOS_EXAMPLES: usize = 12;
+const MAX_OOS_SNIPPETS: usize = 12;
 const MAX_SNIPPETS: usize = 3;
 
 thread_local! {
@@ -174,13 +177,9 @@ fn check_use(
         report.examples.len() < MAX_EXAMPLES
     };
     if want {
-        let name = local
-            .0
-             .0
-            .lock()
-            .0
-            .clone()
-            .unwrap_or_else(|| "?".to_string());
+        // Display prints the name, or UNNAMED_<id> before naming, which is
+        // the same text the statements show.
+        let name = format!("{}", local);
         if declared_somewhere {
             report
                 .oos_examples
@@ -230,6 +229,7 @@ fn check_statement(
     // A repeat's condition sees the locals of its block, so it is checked
     // below, inside that scope.
     let before = report.unresolved;
+    let before_oos = report.unresolved - report.never_declared;
     if !matches!(statement, Statement::Repeat(_)) {
         // Read the expression tree itself. A closure's `values_read` also lists
         // its upvalues, which are not printed and may still name a local that
@@ -256,6 +256,12 @@ fn check_statement(
     if report.unresolved > before && report.snippets.len() < MAX_SNIPPETS {
         let text = format!("{}", statement).replace('\n', " ");
         report.snippets.push(text.chars().take(220).collect());
+    }
+    if report.unresolved - report.never_declared > before_oos
+        && report.oos_snippets.len() < MAX_OOS_SNIPPETS
+    {
+        let text = format!("{}", statement).replace('\n', " ");
+        report.oos_snippets.push(text.chars().take(260).collect());
     }
 
     // Closures see the locals in scope at the statement, not the ones it
