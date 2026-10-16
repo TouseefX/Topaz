@@ -296,14 +296,21 @@ def main(argv):
     report.append(f"topaz scope check lines in output: {len(scope_lines)}")
     out_by_stage = collections.Counter()
     never_by_stage = collections.Counter()
+    ld_totals = [0, 0, 0]
     nonzero = []
     for l in scope_lines:
         if "TOPAZ_SCOPE function line" not in l:
             continue
         hit = False
-        for stage, unresolved, never, _skipped in re.findall(
+        for stage, unresolved, never, skipped in re.findall(
             r"([a-z_]+)=(\d+)/(\d+)/(\d+)", l.split(":", 1)[1]
         ):
+            if stage == "ld":
+                # LocalDeclarer: blocks not locked, declarations dropped, read-never-written locals.
+                ld_totals[0] += int(unresolved)
+                ld_totals[1] += int(never)
+                ld_totals[2] += int(skipped)
+                continue
             out_by_stage[stage] += int(unresolved) - int(never)
             never_by_stage[stage] += int(never)
             hit = hit or int(unresolved) > int(never)
@@ -312,6 +319,11 @@ def main(argv):
     report.append(
         "reads of a local out of its scope, summed over all functions, by stage: "
         + ", ".join(f"{k} {v}" for k, v in out_by_stage.items())
+    )
+    report.append(
+        "LocalDeclarer silent skips, summed over functions: blocks not locked "
+        f"{ld_totals[0]}, declarations dropped with their block {ld_totals[1]}, "
+        f"locals read but never written {ld_totals[2]}"
     )
     report.append(
         "reads of a local never declared in the function (upvalue identities, noise before link): "

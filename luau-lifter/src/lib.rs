@@ -1321,6 +1321,16 @@ fn decompile_function(
 
     let mut body = Arc::try_unwrap(block).unwrap().into_inner();
     if scope_on {
+        let ld = ast::local_declarations::take_stats();
+        scope_counts.push(format!(
+            "ld={}/{}/{}",
+            ld.lock_skips,
+            ld.decl_drops,
+            ld.unwritten.len()
+        ));
+        for name in ld.unwritten.iter().take(4) {
+            scope_examples.push(format!("TOPAZ_SCOPE ld fn: {} (read, never written)", name));
+        }
         scope_note("declare", &mut body, &scope_seed, &mut scope_counts, &mut scope_examples, false);
         // Same check, but entering the closures in the body: a local that a
         // closure uses while this function never declares it shows up here.
