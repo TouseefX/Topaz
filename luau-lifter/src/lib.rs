@@ -1135,7 +1135,7 @@ fn scope_note(
         "{}={}/{}/{}",
         stage, r.unresolved, r.never_declared, r.skipped_blocks
     ));
-    for e in r.examples {
+    for e in r.oos_examples.into_iter().chain(r.examples) {
         if examples.len() < 60 {
             examples.push(format!("TOPAZ_SCOPE {} fn: {}", stage, e));
         }

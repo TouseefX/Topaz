@@ -31,6 +31,8 @@ pub struct ScopeReport {
     pub skipped_blocks: usize,
     /// The first few offenders, as `name (kind, function at line N)`.
     pub examples: Vec<String>,
+    /// The first few out-of-scope uses, in the same form.
+    pub oos_examples: Vec<String>,
     /// The first few statements that contain an offender, as text.
     pub snippets: Vec<String>,
     /// Every local declared in the checked part.
@@ -38,6 +40,7 @@ pub struct ScopeReport {
 }
 
 const MAX_EXAMPLES: usize = 4;
+const MAX_OOS_EXAMPLES: usize = 12;
 const MAX_SNIPPETS: usize = 3;
 
 thread_local! {
@@ -163,7 +166,14 @@ fn check_use(
     if !declared_somewhere {
         report.never_declared += 1;
     }
-    if report.examples.len() < MAX_EXAMPLES {
+    // Out-of-scope uses get their own list, so the never-declared noise
+    // before link time cannot fill the examples first.
+    let want = if declared_somewhere {
+        report.oos_examples.len() < MAX_OOS_EXAMPLES
+    } else {
+        report.examples.len() < MAX_EXAMPLES
+    };
+    if want {
         let name = local
             .0
              .0
@@ -171,14 +181,15 @@ fn check_use(
             .0
             .clone()
             .unwrap_or_else(|| "?".to_string());
-        let kind = if declared_somewhere {
-            "out of scope"
+        if declared_somewhere {
+            report
+                .oos_examples
+                .push(format!("{} (out of scope, function at line {:?})", name, line));
         } else {
-            "never declared"
-        };
-        report
-            .examples
-            .push(format!("{} ({}, function at line {:?})", name, kind, line));
+            report
+                .examples
+                .push(format!("{} (never declared, function at line {:?})", name, line));
+        }
     }
 }
 
